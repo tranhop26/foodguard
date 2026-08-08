@@ -2,6 +2,7 @@
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 from dataclasses import dataclass
 import datetime
+import hashlib
 import json
 
 from genlayer import *
@@ -39,9 +40,34 @@ class Accounting:
     customer_refunds_emitted: u256
 
 
+@allow_storage
+@dataclass
+class Evidence:
+    schema_version: str
+    order_id: str
+    item_id: str
+    subject: str
+    action: str
+    actor_wallet: str
+    issuer_id: str
+    source_url: str
+    sha256: str
+    observed_at: str
+    submitted_at: str
+    expires_at: str
+    chain_id: str
+    contract_address: str
+    nonce: str
+    envelope_json: str
+
+
 class FoodGuard(gl.Contract):
     orders: TreeMap[str, Order]
     item_json_by_key: TreeMap[str, str]
+    evidence_by_key: TreeMap[str, Evidence]
+    evidence_count_by_order: TreeMap[str, u256]
+    used_evidence_replay_keys: TreeMap[str, bool]
+    submitted_claim_keys: TreeMap[str, bool]
     deployer: Address
     creation_paused: bool
     total_inflows: u256
@@ -72,6 +98,12 @@ class FoodGuard(gl.Contract):
     def _item_key(self, order_id: str, item_id: str) -> str:
         return self._canonical_json([order_id, item_id])
 
+    def _evidence_key(self, order_id: str, evidence_index: int) -> str:
+        return self._canonical_json([order_id, evidence_index])
+
+    def _address_hex(self, address: Address) -> str:
+        return address.as_hex.lower()
+
     def _now(self) -> int:
         try:
             parsed = datetime.datetime.now(datetime.timezone.utc)
@@ -80,6 +112,193 @@ class FoodGuard(gl.Contract):
             return int(parsed.timestamp())
         except Exception:
             raise gl.vm.UserError("[EXPECTED] transaction datetime required")
+
+    def _parse_evidence_timestamp(self, value: str) -> int:
+        if type(value) is not str or not value.endswith("Z"):
+            raise gl.vm.UserError("[EXPECTED] invalid evidence timestamps")
+        try:
+            parsed = datetime.datetime.fromisoformat(value[:-1] + "+00:00")
+        except Exception:
+            raise gl.vm.UserError("[EXPECTED] invalid evidence timestamps")
+        if parsed.tzinfo != datetime.timezone.utc:
+            raise gl.vm.UserError("[EXPECTED] invalid evidence timestamps")
+        epoch = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+        delta = parsed - epoch
+        return (
+            delta.days * 86_400_000_000
+            + delta.seconds * 1_000_000
+            + delta.microseconds
+        )
+
+    def _assert_evidence_json_value(self, value) -> None:
+        if value is None or type(value) in (bool, int, str):
+            return
+        if type(value) is list:
+            for item in value:
+                self._assert_evidence_json_value(item)
+            return
+        if type(value) is dict:
+            for item in value.values():
+                self._assert_evidence_json_value(item)
+            return
+        raise gl.vm.UserError("[EXPECTED] invalid evidence")
+
+    def _append_evidence(
+        self,
+        order_id: str,
+        expected_action: str,
+        envelope_json: str,
+        expected_actor: Address,
+    ) -> Evidence:
+        try:
+            envelope = json.loads(envelope_json)
+        except Exception:
+            raise gl.vm.UserError("[EXPECTED] invalid evidence")
+        if type(envelope) is not dict:
+            raise gl.vm.UserError("[EXPECTED] invalid evidence")
+        self._assert_evidence_json_value(envelope)
+        if envelope_json != self._canonical_json(envelope):
+            raise gl.vm.UserError("[EXPECTED] canonical evidence JSON required")
+
+        required_fields = {
+            "action",
+            "actor_wallet",
+            "chain_id",
+            "contract_address",
+            "expires_at",
+            "issuer_id",
+            "nonce",
+            "observed_at",
+            "order_id",
+            "schema_version",
+            "sha256",
+            "source_url",
+            "subject",
+            "submitted_at",
+        }
+        if not required_fields.issubset(envelope.keys()) or any(
+            type(envelope[field_name]) is not str
+            or not envelope[field_name].strip()
+            for field_name in required_fields
+        ):
+            raise gl.vm.UserError("[EXPECTED] invalid evidence")
+        if envelope["schema_version"] != "foodguard-evidence/1":
+            raise gl.vm.UserError("[EXPECTED] invalid evidence")
+        if envelope["order_id"] != order_id:
+            raise gl.vm.UserError("[EXPECTED] evidence order mismatch")
+        if envelope["action"] != expected_action:
+            raise gl.vm.UserError("[EXPECTED] evidence action mismatch")
+
+        item_id = envelope.get("item_id", "")
+        if type(item_id) is not str or ("item_id" in envelope and not item_id):
+            raise gl.vm.UserError("[EXPECTED] invalid evidence")
+        if expected_action == "CUSTOMER_CLAIM" and not item_id:
+            raise gl.vm.UserError("[EXPECTED] evidence item required")
+        if item_id and self._item_key(order_id, item_id) not in self.item_json_by_key:
+            raise gl.vm.UserError("[EXPECTED] evidence item not found")
+        expected_subject = (
+            "order:" + order_id + "/item:" + item_id
+            if item_id
+            else "order:" + order_id
+        )
+        if envelope["subject"] != expected_subject:
+            raise gl.vm.UserError("[EXPECTED] evidence subject mismatch")
+
+        try:
+            envelope_actor = Address(envelope["actor_wallet"])
+            envelope_contract = Address(envelope["contract_address"])
+        except Exception:
+            raise gl.vm.UserError("[EXPECTED] invalid evidence")
+        if envelope_actor != expected_actor:
+            raise gl.vm.UserError("[EXPECTED] evidence actor mismatch")
+        if (
+            envelope["chain_id"] != str(int(gl.message.chain_id))
+            or envelope_contract != gl.message.contract_address
+        ):
+            raise gl.vm.UserError(
+                "[EXPECTED] evidence transaction binding mismatch"
+            )
+
+        observed_at = self._parse_evidence_timestamp(envelope["observed_at"])
+        submitted_at = self._parse_evidence_timestamp(envelope["submitted_at"])
+        expires_at = self._parse_evidence_timestamp(envelope["expires_at"])
+        if observed_at > submitted_at or submitted_at > expires_at:
+            raise gl.vm.UserError("[EXPECTED] invalid evidence timestamps")
+        transaction_time = self._now() * 1_000_000
+        if expires_at < transaction_time:
+            raise gl.vm.UserError("[EXPECTED] stale evidence")
+        if submitted_at > transaction_time:
+            raise gl.vm.UserError("[EXPECTED] future evidence")
+
+        digest = envelope["sha256"]
+        if (
+            len(digest) != 66
+            or digest[:2].lower() != "0x"
+            or any(character not in "0123456789abcdefABCDEF" for character in digest[2:])
+        ):
+            raise gl.vm.UserError("[EXPECTED] invalid evidence")
+        digest_preimage = dict(envelope)
+        digest_preimage.pop("sha256")
+        calculated_digest = "0x" + hashlib.sha256(
+            self._canonical_json(digest_preimage).encode("utf-8")
+        ).hexdigest()
+        if digest.lower() != calculated_digest:
+            raise gl.vm.UserError("[EXPECTED] evidence digest mismatch")
+
+        canonical_chain_id = str(int(gl.message.chain_id))
+        canonical_contract = self._address_hex(gl.message.contract_address)
+        canonical_actor = self._address_hex(expected_actor)
+        replay_preimage = self._canonical_json(
+            [
+                canonical_chain_id,
+                canonical_contract,
+                order_id,
+                item_id,
+                expected_action,
+                canonical_actor,
+                envelope["nonce"],
+            ]
+        )
+        replay_key = hashlib.sha256(replay_preimage.encode("utf-8")).hexdigest()
+        if replay_key in self.used_evidence_replay_keys:
+            raise gl.vm.UserError("[EXPECTED] evidence replay")
+
+        claim_key = self._item_key(order_id, item_id)
+        if (
+            expected_action == "CUSTOMER_CLAIM"
+            and claim_key in self.submitted_claim_keys
+        ):
+            raise gl.vm.UserError("[EXPECTED] claim already submitted")
+
+        evidence = Evidence(
+            schema_version=envelope["schema_version"],
+            order_id=envelope["order_id"],
+            item_id=item_id,
+            subject=envelope["subject"],
+            action=envelope["action"],
+            actor_wallet=envelope["actor_wallet"],
+            issuer_id=envelope["issuer_id"],
+            source_url=envelope["source_url"],
+            sha256=envelope["sha256"],
+            observed_at=envelope["observed_at"],
+            submitted_at=envelope["submitted_at"],
+            expires_at=envelope["expires_at"],
+            chain_id=envelope["chain_id"],
+            contract_address=envelope["contract_address"],
+            nonce=envelope["nonce"],
+            envelope_json=envelope_json,
+        )
+        evidence_count = (
+            int(self.evidence_count_by_order[order_id])
+            if order_id in self.evidence_count_by_order
+            else 0
+        )
+        self.evidence_by_key[self._evidence_key(order_id, evidence_count)] = evidence
+        self.evidence_count_by_order[order_id] = u256(evidence_count + 1)
+        self.used_evidence_replay_keys[replay_key] = True
+        if expected_action == "CUSTOMER_CLAIM":
+            self.submitted_claim_keys[claim_key] = True
+        return evidence
 
     def _parse_manifest(self, manifest_json: str):
         try:
@@ -293,6 +512,63 @@ class FoodGuard(gl.Contract):
         self._record_acceptance(order_id, False)
 
     @gl.public.write
+    def submit_packed_evidence(self, order_id: str, envelope_json: str) -> None:
+        if order_id not in self.orders:
+            raise gl.vm.UserError("[EXPECTED] order not found")
+        order = self.orders[order_id]
+        if order.state != "ACCEPTED":
+            raise gl.vm.UserError("[EXPECTED] invalid evidence transition")
+        if gl.message.sender_address != order.restaurant:
+            raise gl.vm.UserError("[EXPECTED] restaurant wallet required")
+        self._append_evidence(order_id, "PACKED", envelope_json, order.restaurant)
+        order.state = "READY_FOR_PICKUP"
+        self.orders[order_id] = order
+
+    @gl.public.write
+    def submit_pickup_evidence(self, order_id: str, envelope_json: str) -> None:
+        if order_id not in self.orders:
+            raise gl.vm.UserError("[EXPECTED] order not found")
+        order = self.orders[order_id]
+        if order.state != "READY_FOR_PICKUP":
+            raise gl.vm.UserError("[EXPECTED] invalid evidence transition")
+        if gl.message.sender_address != order.courier:
+            raise gl.vm.UserError("[EXPECTED] courier wallet required")
+        self._append_evidence(order_id, "PICKED_UP", envelope_json, order.courier)
+        order.state = "IN_TRANSIT"
+        self.orders[order_id] = order
+
+    @gl.public.write
+    def submit_delivery_evidence(self, order_id: str, envelope_json: str) -> None:
+        if order_id not in self.orders:
+            raise gl.vm.UserError("[EXPECTED] order not found")
+        order = self.orders[order_id]
+        if order.state != "IN_TRANSIT":
+            raise gl.vm.UserError("[EXPECTED] invalid evidence transition")
+        if gl.message.sender_address != order.courier:
+            raise gl.vm.UserError("[EXPECTED] courier wallet required")
+        self._append_evidence(order_id, "DELIVERED", envelope_json, order.courier)
+        order.state = "REVIEW_WINDOW"
+        self.orders[order_id] = order
+
+    @gl.public.write
+    def submit_claim_evidence(self, order_id: str, envelope_json: str) -> None:
+        if order_id not in self.orders:
+            raise gl.vm.UserError("[EXPECTED] order not found")
+        order = self.orders[order_id]
+        if order.state != "REVIEW_WINDOW":
+            raise gl.vm.UserError("[EXPECTED] invalid evidence transition")
+        if gl.message.sender_address != order.customer:
+            raise gl.vm.UserError("[EXPECTED] customer wallet required")
+        if self._now() >= int(order.review_deadline):
+            raise gl.vm.UserError("[EXPECTED] review deadline passed")
+        self._append_evidence(
+            order_id,
+            "CUSTOMER_CLAIM",
+            envelope_json,
+            order.customer,
+        )
+
+    @gl.public.write
     def set_creation_paused(self, paused: bool) -> None:
         if gl.message.sender_address != self.deployer:
             raise gl.vm.UserError("[EXPECTED] only deployer may pause creation")
@@ -343,6 +619,20 @@ class FoodGuard(gl.Contract):
     @gl.public.view
     def get_order(self, order_id: str) -> Order:
         return self.orders[order_id]
+
+    @gl.public.view
+    def get_evidence(self, order_id: str, evidence_index: u256) -> Evidence:
+        return self.evidence_by_key[
+            self._evidence_key(order_id, int(evidence_index))
+        ]
+
+    @gl.public.view
+    def get_evidence_count(self, order_id: str) -> u256:
+        if order_id not in self.orders:
+            raise gl.vm.UserError("[EXPECTED] order not found")
+        if order_id not in self.evidence_count_by_order:
+            return u256(0)
+        return self.evidence_count_by_order[order_id]
 
     @gl.public.view
     def get_item(self, order_id: str, item_id: str) -> str:

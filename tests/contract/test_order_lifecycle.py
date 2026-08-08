@@ -500,9 +500,15 @@ def test_intentionally_frozen_public_abi_has_no_privileged_escape_hatch(food_gua
         "cancel_unaccepted",
         "create_order",
         "get_accounting",
+        "get_evidence",
+        "get_evidence_count",
         "get_item",
         "get_order",
         "set_creation_paused",
+        "submit_claim_evidence",
+        "submit_delivery_evidence",
+        "submit_packed_evidence",
+        "submit_pickup_evidence",
     }
 
 
