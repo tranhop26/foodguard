@@ -11,11 +11,11 @@ import {
 } from "../lib/genlayer/config";
 
 const categoryDefinitions = [
-  { catalogValue: "Cơm Việt", en: "Vietnamese rice", vi: "Cơm Việt", slug: "com-viet" },
-  { catalogValue: "Món nước", en: "Noodle soups", vi: "Món nước", slug: "mon-nuoc" },
-  { catalogValue: "Món chay", en: "Vegetarian", vi: "Món chay", slug: "mon-chay" },
-  { catalogValue: "Cuốn & gỏi", en: "Rolls & salads", vi: "Cuốn & gỏi", slug: "cuon-goi" },
-  { catalogValue: "Bánh mì", en: "Banh mi", vi: "Bánh mì", slug: "banh-mi" },
+  { catalogValue: "Cơm Việt", en: "Vietnamese rice", searchAliases: ["rice"], vi: "Cơm Việt", slug: "com-viet" },
+  { catalogValue: "Món nước", en: "Noodle soups", searchAliases: ["noodle soup"], vi: "Món nước", slug: "mon-nuoc" },
+  { catalogValue: "Món chay", en: "Vegetarian", searchAliases: ["vegetarian food"], vi: "Món chay", slug: "mon-chay" },
+  { catalogValue: "Cuốn & gỏi", en: "Rolls & salads", searchAliases: ["rolls salads"], vi: "Cuốn & gỏi", slug: "cuon-goi" },
+  { catalogValue: "Bánh mì", en: "Banh mi", searchAliases: ["banh mi"], vi: "Bánh mì", slug: "banh-mi" },
 ];
 
 const restaurants = catalogData.restaurants as Restaurant[];
@@ -38,12 +38,16 @@ function filterRestaurants(searchQuery: string, categorySlug: string): Restauran
     const matchesCategory = selectedCategory
       ? restaurant.categories.includes(selectedCategory.catalogValue)
       : true;
+    const categoryAliases = categoryDefinitions
+      .filter((category) => restaurant.categories.includes(category.catalogValue))
+      .flatMap((category) => [category.en, ...category.searchAliases]);
     const searchable = normalizeSearch(
       [
         restaurant.name,
         restaurant.description,
         restaurant.neighborhood,
         ...restaurant.categories,
+        ...categoryAliases,
         restaurant.featured_item.name,
         ...restaurant.featured_item.conditions,
       ].join(" "),

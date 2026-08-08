@@ -146,4 +146,34 @@ describe("FoodGuard proof marketplace landing", () => {
     expect(vietnameseHref).toContain("category=mon-nuoc");
     expect(vietnameseHref).not.toContain("locale=");
   });
+
+  it.each([
+    { category: "mon-nuoc", categoryName: "Noodle soups", count: 2, query: "pho" },
+    { category: "com-viet", categoryName: "Vietnamese rice", count: 2, query: "rice" },
+    { category: "mon-chay", categoryName: "Vegetarian", count: 1, query: "vegetarian food" },
+  ])(
+    "returns truthful English results for advertised '$query' search",
+    ({ category, categoryName, count, query }) => {
+      renderLanding({ categorySlug: category, locale: "en", searchQuery: query });
+
+      expect(screen.getByRole("searchbox", { name: /search dishes or restaurants/i })).toHaveValue(
+        query,
+      );
+      expect(screen.getAllByRole("article")).toHaveLength(count);
+      expect(screen.getByText(new RegExp(`^${count} restaurant`))).toBeVisible();
+
+      const currentCategory = screen.getByRole("link", { name: categoryName });
+      expect(currentCategory).toHaveAttribute("aria-current", "page");
+      const currentParams = new URL(currentCategory.getAttribute("href")!, "https://foodguard.test")
+        .searchParams;
+      expect(currentParams.get("q")).toBe(query);
+      expect(currentParams.get("category")).toBe(category);
+      expect(currentParams.get("locale")).toBe("en");
+
+      const vietnameseHref = screen.getByRole("link", { name: "Tiếng Việt" }).getAttribute("href");
+      const vietnameseParams = new URL(vietnameseHref!, "https://foodguard.test").searchParams;
+      expect(vietnameseParams.get("q")).toBe(query);
+      expect(vietnameseParams.get("category")).toBe(category);
+    },
+  );
 });
