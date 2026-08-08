@@ -279,6 +279,56 @@ def test_unanimous_mutual_settlement_uses_the_same_immutable_ledger(
     assert_conserved(mutual_order)
 
 
+def test_final_mutual_signature_preflights_insolvency_before_persisting(
+    mutual_order,
+    emitted_messages,
+    vm,
+    customer,
+    restaurant,
+    courier,
+    monkeypatch,
+):
+    vm.sender = customer
+    digest = mutual_order.propose_mutual_settlement("fg-1", _allocation())
+    mutual_order.sign_mutual_settlement("fg-1", digest)
+    vm.sender = restaurant
+    mutual_order.sign_mutual_settlement("fg-1", digest)
+    before_order = mutual_order.get_order("fg-1")
+    before_accounting = mutual_order.get_accounting()
+
+    instance = mutual_order._instance
+    contract_wasi = type(instance).__mro__[1].balance.fget.__globals__["wasi"]
+    original_get_self_balance = contract_wasi.get_self_balance
+    final_signature_at_balance_check = []
+
+    def observe_balance_check():
+        stored = instance.settlement_proposal_by_order["fg-1"]
+        final_signature_at_balance_check.append(stored.courier_signed)
+        return original_get_self_balance()
+
+    monkeypatch.setattr(
+        contract_wasi,
+        "get_self_balance",
+        observe_balance_check,
+    )
+    vm.deal(vm._contract_address, 1)
+    vm.sender = courier
+
+    with vm.expect_revert("insufficient contract balance"):
+        mutual_order.sign_mutual_settlement("fg-1", digest)
+
+    stored = mutual_order.get_settlement_proposal("fg-1")
+    assert final_signature_at_balance_check == [False]
+    assert stored.customer_signed is True
+    assert stored.restaurant_signed is True
+    assert stored.courier_signed is False
+    assert mutual_order.get_order("fg-1") == before_order
+    assert mutual_order.get_accounting() == before_accounting
+    with vm.expect_revert("settlement not found"):
+        mutual_order.get_order_settlement("fg-1")
+    assert emitted_messages == []
+
+
 def test_exact_acceptance_deadline_is_permissionless_cancellation_boundary(
     created_order,
     emitted_messages,

@@ -1016,7 +1016,7 @@ class FoodGuard(gl.Contract):
                 on="finalized",
             )
 
-    def _allocate_once(
+    def _preflight_allocation(
         self,
         order_id: str,
         order: Order,
@@ -1024,10 +1024,9 @@ class FoodGuard(gl.Contract):
         customer_wei: int,
         restaurant_wei: int,
         courier_wei: int,
-        terminal_state: str,
     ) -> str:
         if order_id in self.settlement_by_order:
-            return self.settlement_by_order[order_id].settlement_id
+            raise gl.vm.UserError("[EXPECTED] order reserves already settled")
 
         allocation_total = customer_wei + restaurant_wei + courier_wei
         if (
@@ -1066,7 +1065,7 @@ class FoodGuard(gl.Contract):
         if int(self.total_inflows) != post_accounted:
             raise gl.vm.UserError("[EXPECTED] accounting conservation violated")
 
-        settlement_id = self._settlement_id(
+        return self._settlement_id(
             order_id,
             basis,
             customer_wei,
@@ -1074,6 +1073,16 @@ class FoodGuard(gl.Contract):
             courier_wei,
         )
 
+    def _apply_allocation(
+        self,
+        order_id: str,
+        order: Order,
+        settlement_id: str,
+        customer_wei: int,
+        restaurant_wei: int,
+        courier_wei: int,
+        terminal_state: str,
+    ) -> str:
         self.reserved_items -= order.subtotal
         self.reserved_delivery -= order.delivery_fee
         self.restaurant_payouts_emitted += u256(restaurant_wei)
@@ -1098,6 +1107,36 @@ class FoodGuard(gl.Contract):
         self._emit_eoa_transfer(order.restaurant, u256(restaurant_wei))
         self._emit_eoa_transfer(order.courier, u256(courier_wei))
         return settlement_id
+
+    def _allocate_once(
+        self,
+        order_id: str,
+        order: Order,
+        basis: str,
+        customer_wei: int,
+        restaurant_wei: int,
+        courier_wei: int,
+        terminal_state: str,
+    ) -> str:
+        if order_id in self.settlement_by_order:
+            return self.settlement_by_order[order_id].settlement_id
+        settlement_id = self._preflight_allocation(
+            order_id,
+            order,
+            basis,
+            customer_wei,
+            restaurant_wei,
+            courier_wei,
+        )
+        return self._apply_allocation(
+            order_id,
+            order,
+            settlement_id,
+            customer_wei,
+            restaurant_wei,
+            courier_wei,
+            terminal_state,
+        )
 
     @gl.public.write.payable
     def create_order(
@@ -1539,11 +1578,12 @@ class FoodGuard(gl.Contract):
         order_id: str,
         order: Order,
         proposal: SettlementProposal,
+        settlement_id: str,
     ) -> str:
-        return self._allocate_once(
+        return self._apply_allocation(
             order_id,
             order,
-            "mutual:" + proposal.digest,
+            settlement_id,
             int(proposal.customer_wei),
             int(proposal.restaurant_wei),
             int(proposal.courier_wei),
@@ -1576,6 +1616,34 @@ class FoodGuard(gl.Contract):
         if order.state != "ESCALATED":
             raise gl.vm.UserError("[EXPECTED] invalid settlement transition")
 
+        completes_settlement = (
+            (
+                role == "customer"
+                and proposal.restaurant_signed
+                and proposal.courier_signed
+            )
+            or (
+                role == "restaurant"
+                and proposal.customer_signed
+                and proposal.courier_signed
+            )
+            or (
+                role == "courier"
+                and proposal.customer_signed
+                and proposal.restaurant_signed
+            )
+        )
+        settlement_id = ""
+        if completes_settlement:
+            settlement_id = self._preflight_allocation(
+                order_id,
+                order,
+                "mutual:" + proposal.digest,
+                int(proposal.customer_wei),
+                int(proposal.restaurant_wei),
+                int(proposal.courier_wei),
+            )
+
         if role == "customer":
             proposal.customer_signed = True
         elif role == "restaurant":
@@ -1583,12 +1651,13 @@ class FoodGuard(gl.Contract):
         else:
             proposal.courier_signed = True
         self.settlement_proposal_by_order[order_id] = proposal
-        if (
-            proposal.customer_signed
-            and proposal.restaurant_signed
-            and proposal.courier_signed
-        ):
-            self._complete_mutual_settlement(order_id, order, proposal)
+        if completes_settlement:
+            self._complete_mutual_settlement(
+                order_id,
+                order,
+                proposal,
+                settlement_id,
+            )
 
     @gl.public.write
     def set_creation_paused(self, paused: bool) -> None:
