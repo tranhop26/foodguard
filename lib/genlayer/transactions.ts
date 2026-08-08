@@ -23,6 +23,7 @@ export type TxStageHandler = (stage: TxStage) => void;
 export interface TrackTransactionOptions {
   maxAttempts?: number;
   pollIntervalMs?: number;
+  timeoutMs?: number;
 }
 
 export class ConsensusFailedError extends Error {
@@ -38,6 +39,13 @@ export class TransactionExecutionError extends Error {
   constructor(result: string) {
     super(`FoodGuard transaction execution failed (${result})`);
     this.name = "TransactionExecutionError";
+  }
+}
+
+export class TransactionTrackingTimeoutError extends Error {
+  constructor(operation: "transaction status" | "order readback") {
+    super(`FoodGuard ${operation} timed out before confirmation`);
+    this.name = "TransactionTrackingTimeoutError";
   }
 }
 
@@ -111,6 +119,55 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function withDeadline<T>(
+  operation: Promise<T>,
+  deadline: number,
+  operationName: "transaction status" | "order readback",
+): Promise<T> {
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) {
+    return Promise.reject(new TransactionTrackingTimeoutError(operationName));
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new TransactionTrackingTimeoutError(operationName));
+    }, remainingMs);
+
+    operation.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+async function waitForNextPoll(
+  pollIntervalMs: number,
+  deadline: number,
+): Promise<void> {
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) {
+    throw new TransactionTrackingTimeoutError("transaction status");
+  }
+  await wait(Math.min(pollIntervalMs, remainingMs));
+  if (Date.now() >= deadline) {
+    throw new TransactionTrackingTimeoutError("transaction status");
+  }
+}
+
 export async function trackTransaction<T = unknown>(
   hash: string,
   onUpdate: TxStageHandler,
@@ -118,21 +175,31 @@ export async function trackTransaction<T = unknown>(
 ): Promise<T> {
   const maxAttempts = options.maxAttempts ?? 40;
   const pollIntervalMs = options.pollIntervalMs ?? 1_500;
+  const timeoutMs = options.timeoutMs ?? 60_000;
   if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
     throw new RangeError("maxAttempts must be a positive integer");
   }
   if (!Number.isFinite(pollIntervalMs) || pollIntervalMs < 0) {
     throw new RangeError("pollIntervalMs must be a nonnegative finite number");
   }
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new RangeError("timeoutMs must be a positive finite number");
+  }
+
+  const deadline = Date.now() + timeoutMs;
 
   onUpdate("SUBMITTED");
   onUpdate("CONSENSUS_PENDING");
   const client = getFoodGuardReadClient();
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const transaction = await client.getTransaction({
-      hash: hash as TransactionHash,
-    });
+    const transaction = await withDeadline(
+      client.getTransaction({
+        hash: hash as TransactionHash,
+      }),
+      deadline,
+      "transaction status",
+    );
     const status = getStatusName(transaction);
     if (status && consensusFailureStatuses.has(status)) {
       onUpdate("CONSENSUS_FAILED");
@@ -155,13 +222,17 @@ export async function trackTransaction<T = unknown>(
         );
       }
 
-      const order = await reconcileOrder<T>(orderId);
+      const order = await withDeadline(
+        reconcileOrder<T>(orderId),
+        deadline,
+        "order readback",
+      );
       onUpdate("READBACK_CONFIRMED");
       return order;
     }
 
     if (attempt + 1 < maxAttempts) {
-      await wait(pollIntervalMs);
+      await waitForNextPoll(pollIntervalMs, deadline);
     }
   }
 

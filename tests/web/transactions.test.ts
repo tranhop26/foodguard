@@ -113,6 +113,7 @@ describe("FoodGuard StudioNet client", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllEnvs();
     if (originalWindow) {
       Object.defineProperty(globalThis, "window", originalWindow);
@@ -333,5 +334,83 @@ describe("FoodGuard StudioNet client", () => {
       }),
     ).rejects.toThrow("timed out");
     expect(sdk.getTransaction).toHaveBeenCalledTimes(2);
+  });
+
+  it("times out when the transaction RPC never settles", async () => {
+    vi.useFakeTimers();
+    const stages: TxStage[] = [];
+    sdk.getTransaction.mockReturnValue(new Promise(() => undefined));
+
+    const outcomePromise = trackTransaction(HASH, (stage) => stages.push(stage), {
+      maxAttempts: 2,
+      pollIntervalMs: 0,
+      timeoutMs: 100,
+    }).then(
+      (value) => ({ kind: "resolved", value }) as const,
+      (error: unknown) => ({ kind: "rejected", error }) as const,
+    );
+
+    await vi.advanceTimersByTimeAsync(100);
+    const outcome = await Promise.race([
+      outcomePromise,
+      Promise.resolve({ kind: "still-pending" } as const),
+    ]);
+
+    expect(outcome).toMatchObject({
+      kind: "rejected",
+      error: {
+        name: "TransactionTrackingTimeoutError",
+        message: expect.stringContaining("transaction status"),
+      },
+    });
+    expect(stages.at(-1)).toBe("CONSENSUS_PENDING");
+    expect(stages).not.toContain("FINALIZED");
+    expect(stages).not.toContain("READBACK_CONFIRMED");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("times out a hung readback without confirming a late result", async () => {
+    vi.useFakeTimers();
+    const stages: TxStage[] = [];
+    let resolveReadback: ((value: unknown) => void) | undefined;
+    sdk.readContract.mockReturnValue(
+      new Promise((resolve) => {
+        resolveReadback = resolve;
+      }),
+    );
+    mockReceipt({
+      statusName: TransactionStatus.FINALIZED,
+      txExecutionResultName: ExecutionResult.FINISHED_WITH_RETURN,
+    });
+
+    const outcomePromise = trackTransaction(HASH, (stage) => stages.push(stage), {
+      timeoutMs: 100,
+    }).then(
+      (value) => ({ kind: "resolved", value }) as const,
+      (error: unknown) => ({ kind: "rejected", error }) as const,
+    );
+
+    await vi.advanceTimersByTimeAsync(100);
+    const outcome = await Promise.race([
+      outcomePromise,
+      Promise.resolve({ kind: "still-pending" } as const),
+    ]);
+
+    expect(outcome).toMatchObject({
+      kind: "rejected",
+      error: {
+        name: "TransactionTrackingTimeoutError",
+        message: expect.stringContaining("order readback"),
+      },
+    });
+    expect(stages.at(-1)).toBe("EXECUTION_SUCCESS");
+    expect(stages).not.toContain("READBACK_CONFIRMED");
+    expect(vi.getTimerCount()).toBe(0);
+
+    resolveReadback?.({ order_id: "fg-1", state: "SETTLED" });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(stages.at(-1)).toBe("EXECUTION_SUCCESS");
+    expect(stages).not.toContain("READBACK_CONFIRMED");
   });
 });
