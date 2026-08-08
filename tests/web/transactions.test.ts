@@ -413,4 +413,50 @@ describe("FoodGuard StudioNet client", () => {
     expect(stages.at(-1)).toBe("EXECUTION_SUCCESS");
     expect(stages).not.toContain("READBACK_CONFIRMED");
   });
+
+  it("rejects readback that settles after the deadline before its timer runs", async () => {
+    vi.useFakeTimers();
+    const startedAt = Date.now();
+    const stages: TxStage[] = [];
+    let resolveReadback: ((value: unknown) => void) | undefined;
+    sdk.readContract.mockReturnValue(
+      new Promise((resolve) => {
+        resolveReadback = resolve;
+      }),
+    );
+    mockReceipt({
+      statusName: TransactionStatus.FINALIZED,
+      txExecutionResultName: ExecutionResult.FINISHED_WITH_RETURN,
+    });
+
+    const outcomePromise = trackTransaction(HASH, (stage) => stages.push(stage), {
+      timeoutMs: 100,
+    }).then(
+      (value) => ({ kind: "resolved", value }) as const,
+      (error: unknown) => ({ kind: "rejected", error }) as const,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(stages.at(-1)).toBe("EXECUTION_SUCCESS");
+
+    vi.setSystemTime(startedAt + 101);
+    resolveReadback?.({ order_id: "fg-1", state: "SETTLED" });
+    for (let turn = 0; turn < 10; turn += 1) {
+      await Promise.resolve();
+    }
+    const outcome = await Promise.race([
+      outcomePromise,
+      Promise.resolve({ kind: "still-pending" } as const),
+    ]);
+
+    expect(outcome).toMatchObject({
+      kind: "rejected",
+      error: {
+        name: "TransactionTrackingTimeoutError",
+        message: expect.stringContaining("order readback"),
+      },
+    });
+    expect(stages.at(-1)).toBe("EXECUTION_SUCCESS");
+    expect(stages).not.toContain("READBACK_CONFIRMED");
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });

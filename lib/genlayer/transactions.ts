@@ -142,12 +142,20 @@ function withDeadline<T>(
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        if (Date.now() >= deadline) {
+          reject(new TransactionTrackingTimeoutError(operationName));
+          return;
+        }
         resolve(value);
       },
       (error: unknown) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        if (Date.now() >= deadline) {
+          reject(new TransactionTrackingTimeoutError(operationName));
+          return;
+        }
         reject(error);
       },
     );
