@@ -33,6 +33,7 @@ interface OrderBuilderProps {
   initialActors?: OrderActors;
   item?: OrderItem;
   orderId?: string;
+  sourceUrl?: string;
 }
 
 const DEMO_ITEM: OrderItem = {
@@ -52,6 +53,17 @@ const EMPTY_WALLET: WalletSnapshot = {
 };
 
 const MAX_U256 = (1n << 256n) - 1n;
+
+interface FrozenCommitment {
+  actors: OrderActors;
+  amounts: ReturnType<typeof calculateOrderValueWei>;
+  canonicalEvidence: string;
+  canonicalManifest: string;
+  deadlinesJson: string;
+  deliveryFeeWei: string;
+  digest: HexDigest;
+  orderId: string;
+}
 
 function configuredContract(): OrderBuilderConfiguration {
   const configuration = getFoodGuardConfiguration();
@@ -126,8 +138,8 @@ function actorValidation(actors: OrderActors): "VALID" | "INVALID" | "DUPLICATE"
 }
 
 function canonicalDeadlines(createdAtMs: number): string {
-  const base = BigInt(createdAtMs) * 1_000n;
-  const minute = 60_000_000n;
+  const base = BigInt(Math.floor(createdAtMs / 1_000));
+  const minute = 60n;
   const acceptanceDeadline = base + 30n * minute;
   const packingDeadline = base + 120n * minute;
   const deliveryDeadline = base + 240n * minute;
@@ -146,12 +158,15 @@ function sameAddress(left: string | null, right: string): boolean {
   return Boolean(left && left.toLowerCase() === right.toLowerCase());
 }
 
-function manifestSourceUrl(): string {
-  if (typeof window === "undefined") return "/create";
-  const url = new URL(window.location.href);
-  url.searchParams.delete("locale");
-  url.hash = "";
-  return url.toString();
+function manifestSourceUrl(configuredUrl?: string): string {
+  const origin = configuredUrl ?? process.env.NEXT_PUBLIC_FOODGUARD_APP_ORIGIN;
+  try {
+    const url = new URL("/create", origin || "https://foodguard.example");
+    if (url.protocol === "https:") return url.toString();
+  } catch {
+    // Fall through to a deterministic preview-only URL.
+  }
+  return "https://foodguard.example/create";
 }
 
 export function OrderBuilder({
@@ -160,26 +175,29 @@ export function OrderBuilder({
   initialActors = ["", "", ""],
   item = DEMO_ITEM,
   orderId: initialOrderId = "fg-demo-order",
+  sourceUrl,
 }: OrderBuilderProps) {
   const { copy } = useLocale();
   const [actors, setActors] = useState<OrderActors>(initialActors);
   const [deliveryFeeWei, setDeliveryFeeWei] = useState(initialDeliveryFee);
   const [orderId, setOrderId] = useState(initialOrderId);
-  const [createdAtMs] = useState(() => Date.now());
-  const [deadlineBaseMs, setDeadlineBaseMs] = useState(() => Date.now());
+  const [createdAtMs, setCreatedAtMs] = useState<number | null>(null);
+  const [deadlineBaseMs, setDeadlineBaseMs] = useState<number | null>(null);
   const [wallet, setWallet] = useState<WalletSnapshot>(EMPTY_WALLET);
   const [digest, setDigest] = useState<HexDigest | null>(null);
   const [pending, setPending] = useState(false);
   const [stage, setStage] = useState<TxStage | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [authoritativeOrder, setAuthoritativeOrder] = useState<FoodGuardOrderView | null>(null);
+  const [frozenCommitment, setFrozenCommitment] = useState<FrozenCommitment | null>(null);
 
   const items = useMemo(() => [canonicalItem(item)], [item]);
   const canonicalManifest = useMemo(() => canonicalOrderManifest(items), [items]);
   const deadlinesJson = useMemo(
-    () => canonicalDeadlines(deadlineBaseMs),
+    () => deadlineBaseMs === null ? "CLOCK_REQUIRED" : canonicalDeadlines(deadlineBaseMs),
     [deadlineBaseMs],
   );
+  const evidenceSourceUrl = useMemo(() => manifestSourceUrl(sourceUrl), [sourceUrl]);
   const amounts = useMemo(() => {
     try {
       return calculateOrderValueWei(items, deliveryFeeWei);
@@ -189,7 +207,8 @@ export function OrderBuilder({
   }, [deliveryFeeWei, items]);
   const validation = actorValidation(actors);
 
-  const manifestEvidence = useMemo<EvidenceDocument>(() => {
+  const manifestEvidence = useMemo<EvidenceDocument | null>(() => {
+    if (createdAtMs === null) return null;
     const observedAt = new Date(createdAtMs).toISOString();
     return {
       action: "ORDER_MANIFEST",
@@ -204,17 +223,29 @@ export function OrderBuilder({
       order_id: orderId || "ORDER_ID_REQUIRED",
       schema_version: "foodguard-evidence/1",
       sha256: `0x${"0".repeat(64)}`,
-      source_url: manifestSourceUrl(),
+      source_url: evidenceSourceUrl,
       subject: "FoodGuard canonical order manifest",
       submitted_at: observedAt,
     };
-  }, [actors, configuration.address, createdAtMs, items, orderId]);
+  }, [actors, configuration.address, createdAtMs, evidenceSourceUrl, items, orderId]);
   const canonicalEvidence = useMemo(
-    () => canonicalizeEvidence(manifestEvidence),
+    () => manifestEvidence ? canonicalizeEvidence(manifestEvidence) : "CLOCK_REQUIRED",
     [manifestEvidence],
   );
+  const visibleActors = frozenCommitment?.actors ?? actors;
+  const visibleAmounts = frozenCommitment?.amounts ?? amounts;
+  const visibleCanonicalEvidence = frozenCommitment?.canonicalEvidence ?? canonicalEvidence;
+  const visibleCanonicalManifest = frozenCommitment?.canonicalManifest ?? canonicalManifest;
+  const visibleDeadlinesJson = frozenCommitment?.deadlinesJson ?? deadlinesJson;
+  const visibleDeliveryFeeWei = frozenCommitment?.deliveryFeeWei ?? deliveryFeeWei;
+  const visibleDigest = frozenCommitment?.digest ?? digest;
+  const visibleOrderId = frozenCommitment?.orderId ?? orderId;
 
   useEffect(() => {
+    if (!manifestEvidence) {
+      setDigest(null);
+      return;
+    }
     let active = true;
     setDigest(null);
     hashEvidence(manifestEvidence).then(
@@ -232,15 +263,20 @@ export function OrderBuilder({
 
   useEffect(() => {
     if (pending) return;
-    setDeadlineBaseMs(Date.now());
-    const timer = window.setInterval(() => setDeadlineBaseMs(Date.now()), 60_000);
+    const refreshClock = () => {
+      const now = Date.now();
+      setCreatedAtMs((current) => current ?? now);
+      setDeadlineBaseMs(now);
+    };
+    refreshClock();
+    const timer = window.setInterval(refreshClock, 60_000);
     return () => window.clearInterval(timer);
   }, [pending]);
 
   const handleWalletChange = useCallback((nextWallet: WalletSnapshot) => {
     setWallet(nextWallet);
-    if (nextWallet.status === "READY") setDeadlineBaseMs(Date.now());
-  }, []);
+    if (nextWallet.status === "READY" && !pending) setDeadlineBaseMs(Date.now());
+  }, [pending]);
 
   const customerConnected = sameAddress(wallet.address, actors[0]);
   const canCreate =
@@ -250,6 +286,8 @@ export function OrderBuilder({
     customerConnected &&
     Boolean(digest) &&
     Boolean(amounts) &&
+    manifestEvidence !== null &&
+    deadlineBaseMs !== null &&
     Boolean(orderId.trim()) &&
     !authoritativeOrder &&
     !pending;
@@ -263,7 +301,18 @@ export function OrderBuilder({
   }
 
   async function createOrder() {
-    if (!canCreate || !amounts) return;
+    if (!canCreate || !amounts || !digest || !manifestEvidence) return;
+    const commitment: FrozenCommitment = {
+      actors: [...actors],
+      amounts,
+      canonicalEvidence,
+      canonicalManifest,
+      deadlinesJson,
+      deliveryFeeWei,
+      digest,
+      orderId,
+    };
+    setFrozenCommitment(commitment);
     setPending(true);
     setError(null);
     setAuthoritativeOrder(null);
@@ -271,16 +320,16 @@ export function OrderBuilder({
       const hash = await writeFoodGuard(
         "create_order",
         [
-          orderId,
-          actors[1],
-          actors[2],
-          canonicalManifest,
-          amounts.deliveryFee,
-          deadlinesJson,
+          commitment.orderId,
+          commitment.actors[1],
+          commitment.actors[2],
+          commitment.canonicalManifest,
+          commitment.amounts.deliveryFee,
+          commitment.deadlinesJson,
         ],
-        amounts.total,
+        commitment.amounts.total,
         setStage,
-        actors[0],
+        commitment.actors[0],
       );
       const readback = await trackTransaction<FoodGuardOrderView>(hash, setStage);
       setAuthoritativeOrder(readback);
@@ -288,6 +337,7 @@ export function OrderBuilder({
       setError(caught instanceof Error ? caught.message : "FoodGuard write failed");
     } finally {
       setPending(false);
+      setFrozenCommitment(null);
     }
   }
 
@@ -310,7 +360,7 @@ export function OrderBuilder({
                   onChange={(event) => setActor(index, event.target.value)}
                   spellCheck={false}
                   type="text"
-                  value={actors[index]}
+                  value={visibleActors[index]}
                 />
               </label>
             ),
@@ -331,7 +381,7 @@ export function OrderBuilder({
               disabled={pending}
               onChange={(event) => setOrderId(event.target.value)}
               type="text"
-              value={orderId}
+              value={visibleOrderId}
             />
           </label>
           <label>
@@ -341,28 +391,28 @@ export function OrderBuilder({
               disabled={pending}
               onChange={(event) => setDeliveryFeeWei(event.target.value.trim())}
               type="text"
-              value={deliveryFeeWei}
+              value={visibleDeliveryFeeWei}
             />
           </label>
         </div>
 
         <dl className="amount-summary">
-          <div><dt>{copy.order.itemSubtotal}</dt><dd><code>{amounts?.subtotal.toString() ?? "INVALID"}</code></dd></div>
-          <div><dt>{copy.order.deliveryFee}</dt><dd><code>{amounts?.deliveryFee.toString() ?? "INVALID"}</code></dd></div>
-          <div><dt>{copy.order.total}</dt><dd><code>{amounts?.total.toString() ?? "INVALID"}</code></dd></div>
+          <div><dt>{copy.order.itemSubtotal}</dt><dd><code>{visibleAmounts?.subtotal.toString() ?? "INVALID"}</code></dd></div>
+          <div><dt>{copy.order.deliveryFee}</dt><dd><code>{visibleAmounts?.deliveryFee.toString() ?? "INVALID"}</code></dd></div>
+          <div><dt>{copy.order.total}</dt><dd><code>{visibleAmounts?.total.toString() ?? "INVALID"}</code></dd></div>
         </dl>
         {!amounts && <p className="form-notice form-notice--error" role="alert">{copy.order.invalidAmount}</p>}
 
         <section className="manifest-preview" aria-labelledby="manifest-title">
           <h2 id="manifest-title">{copy.order.manifest}</h2>
-          <pre data-testid="canonical-manifest">{canonicalManifest}</pre>
+          <pre data-testid="canonical-manifest">{visibleCanonicalManifest}</pre>
           <h3>{copy.order.deadlines}</h3>
-          <pre data-testid="canonical-deadlines">{deadlinesJson}</pre>
+          <pre data-testid="canonical-deadlines">{visibleDeadlinesJson}</pre>
           <h3>{copy.order.evidenceManifest}</h3>
-          <pre>{canonicalEvidence}</pre>
+          <pre data-testid="canonical-evidence">{visibleCanonicalEvidence}</pre>
           <h3>{copy.order.digest}</h3>
           <code className="digest" data-testid="manifest-digest">
-            {digest ?? copy.order.awaitingDigest}
+            {visibleDigest ?? copy.order.awaitingDigest}
           </code>
         </section>
 
@@ -373,7 +423,7 @@ export function OrderBuilder({
           </div>
         )}
 
-        <WalletButton actors={actors} onChange={handleWalletChange} />
+        <WalletButton actors={visibleActors} onChange={handleWalletChange} />
         {wallet.status === "READY" && !customerConnected && (
           <p className="form-notice form-notice--error" role="alert">{copy.order.customerMustConnect}</p>
         )}

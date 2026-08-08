@@ -2,6 +2,8 @@
 
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { hydrateRoot, type Root } from "react-dom/client";
+import { renderToString } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { OrderBuilder } from "../../components/food/OrderBuilder";
@@ -167,13 +169,21 @@ describe("FoodGuard order builder", () => {
     renderBuilder();
     const first = JSON.parse(screen.getByTestId("canonical-deadlines").textContent!);
 
+    expect(first).toEqual({
+      acceptance_deadline: 1_893_457_800,
+      appeal_deadline: 1_893_484_800,
+      delivery_deadline: 1_893_470_400,
+      packing_deadline: 1_893_463_200,
+      review_deadline: 1_893_477_600,
+    });
+
     await act(async () => {
       await vi.advanceTimersByTimeAsync(60_000);
     });
     const refreshed = JSON.parse(screen.getByTestId("canonical-deadlines").textContent!);
 
     expect(refreshed.acceptance_deadline).toBeGreaterThan(first.acceptance_deadline);
-    expect(refreshed.acceptance_deadline).toBeGreaterThan(Date.now() * 1_000);
+    expect(refreshed.acceptance_deadline).toBe(1_893_457_860);
   });
 
   it("keeps the raw manifest digest unchanged when only the URL locale changes", async () => {
@@ -202,6 +212,66 @@ describe("FoodGuard order builder", () => {
     );
 
     expect(screen.getByTestId("manifest-digest")).toHaveTextContent(vietnameseDigest!);
+    clock.mockRestore();
+  });
+
+  it("uses a stable configured public source URL instead of browser location", async () => {
+    window.history.replaceState({}, "", "/create?locale=en#draft");
+    renderBuilder({ sourceUrl: "https://foodguard.example/create" });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("canonical-evidence")).toHaveTextContent(
+        '"source_url":"https://foodguard.example/create"',
+      ),
+    );
+  });
+
+  it("server-renders and hydrates the initial commitment without clock or URL drift", async () => {
+    const element = (
+      <LocaleProvider>
+        <OrderBuilder
+          configuration={READY_CONFIGURATION}
+          initialActors={[CUSTOMER, RESTAURANT, COURIER]}
+          item={ITEM}
+          orderId="fg-9"
+          sourceUrl="https://foodguard.example/create"
+        />
+      </LocaleProvider>
+    );
+    const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_893_456_000_000);
+    let firstServerHtml = "";
+    let secondServerHtml = "";
+
+    Reflect.deleteProperty(globalThis, "window");
+    try {
+      firstServerHtml = renderToString(element);
+      clock.mockReturnValue(2_208_988_800_000);
+      secondServerHtml = renderToString(element);
+    } finally {
+      if (windowDescriptor) {
+        Object.defineProperty(globalThis, "window", windowDescriptor);
+      }
+    }
+
+    expect(secondServerHtml).toBe(firstServerHtml);
+    const container = document.createElement("div");
+    container.innerHTML = firstServerHtml;
+    document.body.append(container);
+    const hydrationErrors: unknown[] = [];
+    let root: Root | undefined;
+
+    clock.mockReturnValue(2_524_608_000_000);
+    await act(async () => {
+      root = hydrateRoot(container, element, {
+        onRecoverableError: (error) => hydrationErrors.push(error),
+      });
+      await Promise.resolve();
+    });
+
+    expect(hydrationErrors).toEqual([]);
+    await act(async () => root?.unmount());
+    container.remove();
     clock.mockRestore();
   });
 
@@ -244,6 +314,66 @@ describe("FoodGuard order builder", () => {
     expect(screen.getByRole("textbox", { name: /ví người giao hàng/i })).toBeDisabled();
     expect(screen.getByRole("textbox", { name: /mã đơn/i })).toBeDisabled();
     expect(screen.getByRole("textbox", { name: /phí giao hàng/i })).toBeDisabled();
+  });
+
+  it("keeps the submitted preview immutable across wallet events and parent updates", async () => {
+    const provider = installWallet();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_893_456_000_000);
+    mocks.writeFoodGuard.mockImplementation(() => new Promise(() => undefined));
+    const view = renderBuilder({
+      deliveryFeeWei: "50",
+      sourceUrl: "https://foodguard.example/create",
+    });
+    fireEvent.click(screen.getAllByRole("button")[0]);
+    const createButton = screen.getAllByRole("button").at(-1)!;
+    await waitFor(() => expect(createButton).toBeEnabled());
+
+    const preview = {
+      deadlines: screen.getByTestId("canonical-deadlines").textContent,
+      digest: screen.getByTestId("manifest-digest").textContent,
+      evidence: screen.getByTestId("canonical-evidence").textContent,
+      manifest: screen.getByTestId("canonical-manifest").textContent,
+    };
+    fireEvent.click(createButton);
+    await waitFor(() => expect(mocks.writeFoodGuard).toHaveBeenCalledTimes(1));
+    const submittedCall = mocks.writeFoodGuard.mock.calls[0];
+
+    clock.mockReturnValue(1_893_459_600_000);
+    view.rerender(
+      <LocaleProvider>
+        <OrderBuilder
+          configuration={READY_CONFIGURATION}
+          deliveryFeeWei="999"
+          initialActors={[CUSTOMER, RESTAURANT, COURIER]}
+          item={{ ...ITEM, item_id: "changed-item", price_wei: "999" }}
+          orderId="changed-order"
+          sourceUrl="https://changed.example/create"
+        />
+      </LocaleProvider>,
+    );
+    await act(async () => {
+      provider.emit("accountsChanged", [COURIER]);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText("COURIER")).toBeVisible();
+    expect(screen.getByTestId("canonical-deadlines")).toHaveTextContent(preview.deadlines!);
+    expect(screen.getByTestId("manifest-digest")).toHaveTextContent(preview.digest!);
+    expect(screen.getByTestId("canonical-evidence")).toHaveTextContent(preview.evidence!);
+    expect(screen.getByTestId("canonical-manifest")).toHaveTextContent(preview.manifest!);
+    expect(mocks.writeFoodGuard.mock.calls[0]).toEqual(submittedCall);
+    expect(submittedCall[1]).toEqual([
+      "fg-9",
+      RESTAURANT,
+      COURIER,
+      preview.manifest,
+      50n,
+      preview.deadlines,
+    ]);
+    expect(submittedCall[2]).toBe(1_250n);
+    expect(submittedCall[4]).toBe(CUSTOMER);
+    clock.mockRestore();
   });
 
   it("shows actionable StudioNet switching guidance and cannot write on the wrong chain", async () => {
@@ -335,7 +465,7 @@ describe("FoodGuard role console", () => {
           address={RESTAURANT}
           order={{
             ...READY_FOR_PICKUP_ORDER,
-            acceptance_deadline: BigInt(Date.now()) * 1_000n - 1n,
+            acceptance_deadline: BigInt(Math.floor(Date.now() / 1_000)) - 1n,
             courier_accepted: false,
             restaurant_accepted: false,
             state: "FUNDED",
@@ -354,7 +484,7 @@ describe("FoodGuard role console", () => {
           address={CUSTOMER}
           order={{
             ...READY_FOR_PICKUP_ORDER,
-            acceptance_deadline: BigInt(Date.now()) * 1_000n + 60_000_000n,
+            acceptance_deadline: BigInt(Math.floor(Date.now() / 1_000)) + 60n,
             courier_accepted: false,
             restaurant_accepted: false,
             state: "FUNDED",
@@ -373,7 +503,7 @@ describe("FoodGuard role console", () => {
           address={CUSTOMER}
           order={{
             ...READY_FOR_PICKUP_ORDER,
-            review_deadline: BigInt(Date.now()) * 1_000n - 1n,
+            review_deadline: BigInt(Math.floor(Date.now() / 1_000)) - 1n,
             state: "REVIEW_WINDOW",
           }}
         />
@@ -381,6 +511,107 @@ describe("FoodGuard role console", () => {
     );
 
     expect(screen.queryByRole("button", { name: /khiếu nại/i })).not.toBeInTheDocument();
+  });
+
+  it("removes provider acceptance at the exact Unix-second deadline", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2030-01-01T00:00:00.000Z"));
+    render(
+      <LocaleProvider>
+        <RoleConsole
+          address={RESTAURANT}
+          order={{
+            ...READY_FOR_PICKUP_ORDER,
+            acceptance_deadline: 1_893_456_001n,
+            courier_accepted: false,
+            restaurant_accepted: false,
+            state: "FUNDED",
+          }}
+        />
+      </LocaleProvider>,
+    );
+
+    const acceptanceLabel = screen.getByRole("button").textContent;
+    expect(acceptanceLabel).toBeTruthy();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(999);
+    });
+    expect(screen.getByRole("button")).toBeEnabled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(screen.getByRole("button")).not.toHaveTextContent(acceptanceLabel!);
+  });
+
+  it("makes unaccepted cancellation permissionless at the exact deadline", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2030-01-01T00:00:00.000Z"));
+    render(
+      <LocaleProvider>
+        <RoleConsole
+          address={OUTSIDER}
+          order={{
+            ...READY_FOR_PICKUP_ORDER,
+            acceptance_deadline: 1_893_456_001n,
+            courier_accepted: false,
+            restaurant_accepted: true,
+            state: "PARTIALLY_ACCEPTED",
+          }}
+        />
+      </LocaleProvider>,
+    );
+
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(screen.getByRole("button")).toBeEnabled();
+  });
+
+  it.each([undefined, "not-a-deadline"])(
+    "fails closed when the acceptance deadline is missing or invalid (%s)",
+    (acceptanceDeadline) => {
+      render(
+        <LocaleProvider>
+          <RoleConsole
+            address={CUSTOMER}
+            order={{
+              ...READY_FOR_PICKUP_ORDER,
+              acceptance_deadline: acceptanceDeadline,
+              courier_accepted: false,
+              restaurant_accepted: false,
+              state: "FUNDED",
+            }}
+          />
+        </LocaleProvider>,
+      );
+
+      expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    },
+  );
+
+  it("removes customer claims at the exact Unix-second review deadline", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2030-01-01T00:00:00.000Z"));
+    render(
+      <LocaleProvider>
+        <RoleConsole
+          address={CUSTOMER}
+          order={{
+            ...READY_FOR_PICKUP_ORDER,
+            review_deadline: 1_893_456_001n,
+            state: "REVIEW_WINDOW",
+          }}
+        />
+      </LocaleProvider>,
+    );
+
+    expect(screen.getByRole("button")).toBeEnabled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 
   it("updates actions only from the authoritative order returned after a write", async () => {

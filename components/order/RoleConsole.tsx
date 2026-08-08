@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import type { OrderState } from "../../lib/domain";
 import { readFoodGuard, writeFoodGuard } from "../../lib/genlayer/client";
@@ -59,21 +59,49 @@ function acceptedState(state: OrderState): boolean {
   return state === "FUNDED" || state === "PARTIALLY_ACCEPTED";
 }
 
-function beforeDeadline(deadline: bigint | number | string | undefined): boolean {
-  if (deadline === undefined) return true;
+const MAX_U64 = (1n << 64n) - 1n;
+
+function parseDeadline(
+  deadline: bigint | number | string | undefined,
+): bigint | null {
   try {
-    return BigInt(Date.now()) * 1_000n < BigInt(deadline);
+    let parsed: bigint;
+    if (typeof deadline === "bigint") parsed = deadline;
+    else if (typeof deadline === "number" && Number.isSafeInteger(deadline)) {
+      parsed = BigInt(deadline);
+    } else if (typeof deadline === "string" && /^(0|[1-9][0-9]*)$/.test(deadline)) {
+      parsed = BigInt(deadline);
+    } else {
+      return null;
+    }
+    return parsed >= 0n && parsed <= MAX_U64 ? parsed : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
-function actionFor(role: WalletRole, order: FoodGuardOrderView): RoleAction | null {
+type DeadlinePhase = "BEFORE" | "EXPIRED" | "INVALID";
+
+function deadlinePhase(
+  deadline: bigint | number | string | undefined,
+  nowSeconds: bigint | null,
+): DeadlinePhase {
+  const parsed = parseDeadline(deadline);
+  if (parsed === null || nowSeconds === null) return "INVALID";
+  return nowSeconds < parsed ? "BEFORE" : "EXPIRED";
+}
+
+function actionFor(
+  role: WalletRole,
+  order: FoodGuardOrderView,
+  nowSeconds: bigint | null,
+): RoleAction | null {
+  const acceptancePhase = deadlinePhase(order.acceptance_deadline, nowSeconds);
   if (role === "RESTAURANT") {
     if (
       acceptedState(order.state) &&
       !order.restaurant_accepted &&
-      beforeDeadline(order.acceptance_deadline)
+      acceptancePhase === "BEFORE"
     ) {
       return { id: "acceptRestaurant", method: "accept_restaurant", requiresEvidence: false };
     }
@@ -85,7 +113,7 @@ function actionFor(role: WalletRole, order: FoodGuardOrderView): RoleAction | nu
     if (
       acceptedState(order.state) &&
       !order.courier_accepted &&
-      beforeDeadline(order.acceptance_deadline)
+      acceptancePhase === "BEFORE"
     ) {
       return { id: "acceptCourier", method: "accept_courier", requiresEvidence: false };
     }
@@ -99,16 +127,23 @@ function actionFor(role: WalletRole, order: FoodGuardOrderView): RoleAction | nu
   if (
     role === "CUSTOMER" &&
     order.state === "REVIEW_WINDOW" &&
-    beforeDeadline(order.review_deadline)
+    deadlinePhase(order.review_deadline, nowSeconds) === "BEFORE"
   ) {
     return { id: "claim", method: "submit_claim_evidence", requiresEvidence: true };
   }
   if (
-    role === "CUSTOMER" &&
     acceptedState(order.state) &&
     (
-      !order.restaurant_accepted && !order.courier_accepted ||
-      !beforeDeadline(order.acceptance_deadline)
+      (
+        acceptancePhase === "BEFORE" &&
+        role === "CUSTOMER" &&
+        !order.restaurant_accepted &&
+        !order.courier_accepted
+      ) ||
+      (
+        acceptancePhase === "EXPIRED" &&
+        !(order.restaurant_accepted && order.courier_accepted)
+      )
     )
   ) {
     return { id: "cancel", method: "cancel_unaccepted", requiresEvidence: false };
@@ -128,13 +163,47 @@ export function RoleConsole({
   const [stage, setStage] = useState<TxStage | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [nowSeconds, setNowSeconds] = useState<bigint | null>(null);
   const actors = [
     authoritativeOrder.customer,
     authoritativeOrder.restaurant,
     authoritativeOrder.courier,
   ] as const;
   const role = address ? deriveWalletRole(address, actors) : null;
-  const action = role ? actionFor(role, authoritativeOrder) : null;
+  const action = role ? actionFor(role, authoritativeOrder, nowSeconds) : null;
+
+  useEffect(() => {
+    let active = true;
+    let timer: number | undefined;
+
+    const refreshAtBoundary = () => {
+      if (!active) return;
+      const nowMs = BigInt(Date.now());
+      const currentSeconds = nowMs / 1_000n;
+      setNowSeconds(currentSeconds);
+
+      const nextDeadline = [
+        parseDeadline(authoritativeOrder.acceptance_deadline),
+        parseDeadline(authoritativeOrder.review_deadline),
+      ].reduce<bigint | null>((next, deadline) => {
+        if (deadline === null || deadline <= currentSeconds) return next;
+        return next === null || deadline < next ? deadline : next;
+      }, null);
+      if (nextDeadline === null) return;
+
+      const remainingMs = nextDeadline * 1_000n - nowMs;
+      const boundedDelay = remainingMs > 2_147_483_647n
+        ? 2_147_483_647
+        : Number(remainingMs);
+      timer = window.setTimeout(refreshAtBoundary, boundedDelay);
+    };
+
+    refreshAtBoundary();
+    return () => {
+      active = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [authoritativeOrder.acceptance_deadline, authoritativeOrder.review_deadline]);
 
   async function performAction() {
     if (!action || pending || !writesEnabled) return;

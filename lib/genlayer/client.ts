@@ -13,6 +13,40 @@ interface Eip1193WalletProvider {
   request(args: { method: string; params?: unknown }): Promise<unknown>;
 }
 
+export class WalletAccountChangedAfterSubmissionError extends Error {
+  readonly actualAccount: string | null;
+  readonly expectedAccount: string;
+  readonly transactionHash: TransactionHash;
+
+  constructor(
+    transactionHash: TransactionHash,
+    expectedAccount: string,
+    actualAccount: string | null,
+  ) {
+    super(
+      `Wallet account changed after submission. Transaction ${transactionHash} may already be on StudioNet; reconcile it before retrying.`,
+    );
+    this.name = "WalletAccountChangedAfterSubmissionError";
+    this.transactionHash = transactionHash;
+    this.expectedAccount = expectedAccount;
+    this.actualAccount = actualAccount;
+  }
+}
+
+export class WalletAccountUnverifiedAfterSubmissionError extends Error {
+  readonly expectedAccount: string;
+  readonly transactionHash: TransactionHash;
+
+  constructor(transactionHash: TransactionHash, expectedAccount: string) {
+    super(
+      `Wallet account could not be verified after submission. Transaction ${transactionHash} may already be on StudioNet; reconcile it before retrying.`,
+    );
+    this.name = "WalletAccountUnverifiedAfterSubmissionError";
+    this.transactionHash = transactionHash;
+    this.expectedAccount = expectedAccount;
+  }
+}
+
 function getWalletProvider(): Eip1193WalletProvider {
   if (typeof window === "undefined") {
     throw new Error("A connected EIP-1193 browser wallet is required");
@@ -108,7 +142,38 @@ export async function writeFoodGuard(
   }
 
   onUpdate?.("SUBMITTED");
-  return hash as TransactionHash;
+  const transactionHash = hash as TransactionHash;
+  const submittedAccount = expectedAccount ?? account;
+  let currentAccount: string | null = null;
+  try {
+    const accounts = await provider.request({ method: "eth_accounts" });
+    const candidate = Array.isArray(accounts) ? accounts[0] : undefined;
+    if (typeof candidate === "string" && isAddress(candidate, { strict: false })) {
+      currentAccount = candidate;
+    }
+  } catch {
+    // A hash exists, so failure to recheck must remain recoverable rather than
+    // being reported as an authorized success.
+  }
+  if (
+    currentAccount === null
+  ) {
+    throw new WalletAccountUnverifiedAfterSubmissionError(
+      transactionHash,
+      submittedAccount,
+    );
+  }
+  if (
+    currentAccount.toLowerCase() !== submittedAccount.toLowerCase()
+  ) {
+    throw new WalletAccountChangedAfterSubmissionError(
+      transactionHash,
+      submittedAccount,
+      currentAccount,
+    );
+  }
+
+  return transactionHash;
 }
 
 export async function reconcileOrder<T = unknown>(orderId: string): Promise<T> {

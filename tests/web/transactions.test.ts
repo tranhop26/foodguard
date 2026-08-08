@@ -204,6 +204,82 @@ describe("FoodGuard StudioNet client", () => {
     expect(sdk.writeContract).not.toHaveBeenCalled();
   });
 
+  it("preserves a submitted hash when the account changes while confirmation is pending", async () => {
+    const changedAccount = "0x3333333333333333333333333333333333333333";
+    const stages: TxStage[] = [];
+    let currentAccounts = [ADDRESS];
+    let resolveWrite: ((hash: TransactionHash) => void) | undefined;
+    walletProvider.request.mockImplementation(
+      async ({ method }: { method: string }) => {
+        if (method === "eth_chainId") return `0x${studionet.id.toString(16)}`;
+        return currentAccounts;
+      },
+    );
+    sdk.writeContract.mockReturnValue(
+      new Promise((resolve) => {
+        resolveWrite = resolve;
+      }),
+    );
+
+    const outcomePromise = writeFoodGuard(
+      "create_order",
+      ["fg-1"],
+      1n,
+      (stage) => stages.push(stage),
+      ADDRESS,
+    ).then(
+      (value) => ({ kind: "resolved", value }) as const,
+      (error: unknown) => ({ kind: "rejected", error }) as const,
+    );
+    await vi.waitFor(() => expect(sdk.writeContract).toHaveBeenCalledTimes(1));
+
+    currentAccounts = [changedAccount];
+    resolveWrite?.(HASH);
+    const outcome = await outcomePromise;
+
+    expect(outcome).toMatchObject({
+      kind: "rejected",
+      error: {
+        name: "WalletAccountChangedAfterSubmissionError",
+        transactionHash: HASH,
+        message: expect.stringContaining(HASH),
+      },
+    });
+    expect(walletProvider.request).toHaveBeenCalledWith({ method: "eth_accounts" });
+    expect(stages).toEqual(["WALLET_CONFIRMATION", "SUBMITTED"]);
+  });
+
+  it("reports an unverifiable post-submission account without losing the hash", async () => {
+    sdk.writeContract.mockResolvedValue(HASH);
+    walletProvider.request.mockImplementation(
+      async ({ method }: { method: string }) => {
+        if (method === "eth_chainId") return `0x${studionet.id.toString(16)}`;
+        if (method === "eth_requestAccounts") return [ADDRESS];
+        throw new Error("wallet disconnected");
+      },
+    );
+
+    const outcome = await writeFoodGuard(
+      "create_order",
+      ["fg-1"],
+      1n,
+      undefined,
+      ADDRESS,
+    ).then(
+      (value) => ({ kind: "resolved", value }) as const,
+      (error: unknown) => ({ kind: "rejected", error }) as const,
+    );
+
+    expect(outcome).toMatchObject({
+      kind: "rejected",
+      error: {
+        name: "WalletAccountUnverifiedAfterSubmissionError",
+        transactionHash: HASH,
+        message: expect.stringMatching(/could not be verified.*0x[a-f0-9]{64}/i),
+      },
+    });
+  });
+
   it("disables writes before deployment without asking the wallet", async () => {
     vi.stubEnv("NEXT_PUBLIC_FOODGUARD_ADDRESS", "");
 
