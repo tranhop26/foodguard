@@ -61,7 +61,9 @@ Stable item decision fields are:
 - `MISSING`: the item or required quantity is absent.
 - `MISMATCHED`: the delivered item conflicts with committed attributes.
 - `DELIVERY_FAILED`: valid delivery evidence is absent or establishes non-delivery.
-- `UNRESOLVED`: evidence is inaccessible, malformed, stale, hash-mismatched, contradictory, or consensus is insufficient.
+- `UNRESOLVED`: validators agree that evidence is inaccessible, malformed, stale, hash-mismatched, contradictory, or insufficient.
+
+An actual network consensus failure cannot mutate contract storage. In that case the contract stays in its prior state, reserved value does not move, and the UI presents `CONSENSUS_FAILED / UNRESOLVED` with a permissionless retry action.
 
 Delivery-fee decisions are `DELIVERED`, `DELIVERY_FAILED`, or `UNRESOLVED` and are evaluated independently from restaurant item quality.
 
@@ -104,6 +106,8 @@ Validators must:
 6. Compare the stable fields rather than exact explanations or raw pages.
 
 Unavailable or invalid evidence never becomes approval, payout, or refund by default. It becomes `UNRESOLVED`.
+
+Validator disagreement that prevents transaction consensus leaves storage unchanged. It is an unresolved transaction condition, not a stored item verdict; retry is safe because no resolution round or allocation was committed.
 
 ## 6. State machine
 
@@ -205,6 +209,7 @@ The real contract address is added only after deployment. There is no contract-a
 - Duplicate accept, evidence nonce, resolution, appeal, settlement, refund, and callback/retry.
 - Unavailable, malformed, stale, mismatched, contradictory, and replayed evidence.
 - Independent validator agreement, dissent, malicious leader, and `UNRESOLVED`.
+- Network consensus failure leaves the order and accounting unchanged and exposes an idempotent retry.
 - Cure success, cure failure, appeal success, second unresolved result, escalation, and matching/mismatching mutual settlement signatures.
 - Restaurant item payout, customer item refund, courier payout, delivery-fee refund, and mixed item outcomes.
 - Conservation and solvency after every material branch.

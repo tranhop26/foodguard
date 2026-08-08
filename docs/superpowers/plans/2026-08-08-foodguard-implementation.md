@@ -17,6 +17,7 @@
 - Evidence is public canonical JSON bound by SHA-256, schema `foodguard-evidence/1`, source URL, subject, issuer, version, timestamps, chain, contract, action, and nonce.
 - Stable outcomes are `MATCHED`, `MISSING`, `MISMATCHED`, `DELIVERY_FAILED`, and `UNRESOLVED`.
 - Missing, stale, malformed, contradictory, or hash-mismatched evidence must become `UNRESOLVED`, never a payout or refund by default.
+- Actual validator consensus failure cannot mutate contract storage: preserve the prior order/accounting state and expose `CONSENSUS_FAILED / UNRESOLVED` plus permissionless retry in the UI.
 - V1 has no platform fee and must preserve `total_inflows = reserved_items + reserved_delivery + restaurant_payouts_emitted + courier_payouts_emitted + customer_refunds_emitted`.
 - Frontend state must never advance beyond contract readback; show submission, consensus, `FINALIZED`, execution result, and readback separately.
 - Do not commit secrets, private keys, generated build output, private task material, or a fake deployed contract address.
@@ -304,6 +305,16 @@ def test_validator_independently_rejects_malicious_leader(food_guard_review, vm,
     vm.mock_llm(RESOLUTION_PROMPT_PATTERN, INDEPENDENT_MISSING_TEA_JSON)
     assert vm.run_validator() is False
 
+def test_consensus_failure_leaves_state_and_accounting_unchanged(food_guard_review, vm, outsider):
+    before_order = food_guard_review.get_order("fg-1")
+    before_accounting = food_guard_review.get_accounting()
+    vm.sender = outsider
+    vm.configure_consensus_failure()
+    with vm.expect_consensus_failure():
+        food_guard_review.request_resolution("fg-1")
+    assert food_guard_review.get_order("fg-1") == before_order
+    assert food_guard_review.get_accounting() == before_accounting
+
 def test_unavailable_evidence_becomes_unresolved(food_guard_review, vm, outsider):
     vm.sender = outsider
     vm.mock_web(EVIDENCE_URL_PATTERN, "")
@@ -337,7 +348,7 @@ def validator_fn(leader_result):
 result = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
 ```
 
-Do not accept a leader result merely because its JSON shape is valid. Convert fetch, digest, schema, freshness, and consensus failures to item or delivery `UNRESOLVED` without allocating value.
+Do not accept a leader result merely because its JSON shape is valid. When validators agree that fetch, digest, schema, freshness, or evidence sufficiency checks fail, store item or delivery `UNRESOLVED` without allocating value. When validators fail to reach consensus, GenLayer reverts the transaction; storage and accounting remain unchanged for a safe permissionless retry.
 
 - [ ] **Step 5: Run resolution tests and commit**
 
@@ -496,7 +507,7 @@ Run: `git add contracts tests/contract pyproject.toml && git commit -m "feat: co
 
 **Interfaces:**
 - Produces: `readFoodGuard<T>(method, args)`, `writeFoodGuard(method, args, value?)`, `trackTransaction(hash, onUpdate)`, `reconcileOrder(orderId)`.
-- `TxStage` is `WALLET_CONFIRMATION | SUBMITTED | CONSENSUS_PENDING | FINALIZED | EXECUTION_SUCCESS | EXECUTION_ERROR | READBACK_CONFIRMED`.
+- `TxStage` is `WALLET_CONFIRMATION | SUBMITTED | CONSENSUS_PENDING | CONSENSUS_FAILED | FINALIZED | EXECUTION_SUCCESS | EXECUTION_ERROR | READBACK_CONFIRMED`.
 
 - [ ] **Step 1: Write failing transaction-state tests**
 
@@ -512,6 +523,13 @@ it("requires post-success order readback", async () => {
   await trackTransaction(hash, record);
   expect(reconcileOrder).toHaveBeenCalledWith("fg-1");
   expect(stages.at(-1)).toBe("READBACK_CONFIRMED");
+});
+
+it("maps validator disagreement to retry without advancing readback", async () => {
+  mockReceipt({ statusName: "UNDETERMINED", txExecutionResultName: "NOT_VOTED" });
+  await expect(trackTransaction(hash, record)).rejects.toThrow("consensus failed");
+  expect(stages.at(-1)).toBe("CONSENSUS_FAILED");
+  expect(reconcileOrder).not.toHaveBeenCalled();
 });
 ```
 
@@ -708,7 +726,7 @@ Read the contract on initial load and after each write. Render the timeline, per
 
 - [ ] **Step 4: Implement transaction and proof views**
 
-Render `SUBMITTED`, validator progress, `FINALIZED`, `EXECUTION_SUCCESS` or `EXECUTION_ERROR`, and `READBACK_CONFIRMED` independently. The proof page includes chain, contract, source hash when available, transaction, settlement ID, evidence digests, outcomes, and readback.
+Render `SUBMITTED`, validator progress, `CONSENSUS_FAILED`, `FINALIZED`, `EXECUTION_SUCCESS` or `EXECUTION_ERROR`, and `READBACK_CONFIRMED` independently. `CONSENSUS_FAILED` explains that no contract state changed and offers permissionless retry. The proof page includes chain, contract, source hash when available, transaction, settlement ID, evidence digests, outcomes, and readback.
 
 - [ ] **Step 5: Test, build, and commit**
 
@@ -770,6 +788,13 @@ test("unresolved flow locks value and exposes cure", async ({ page }) => {
   await page.goto("/orders/fg-1");
   await expect(page.getByText(/khóa trong escrow/i)).toBeVisible();
   await expect(page.getByRole("button", { name: /bổ sung bằng chứng/i })).toBeEnabled();
+});
+
+test("consensus failure preserves prior state and exposes retry", async ({ page }) => {
+  await installWalletAndRpcFixture(page, "consensus-failed");
+  await page.goto("/orders/fg-1");
+  await expect(page.getByText(/không có trạng thái contract nào thay đổi/i)).toBeVisible();
+  await expect(page.getByRole("button", { name: /thử lại resolution/i })).toBeEnabled();
 });
 
 test("keyboard reaches every enabled order action", async ({ page }) => {
