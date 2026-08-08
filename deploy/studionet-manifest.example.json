@@ -1,0 +1,28 @@
+{
+  "schema_version": "foodguard-studionet-deployment/1",
+  "status": "EXAMPLE_ONLY_NON_DEPLOYABLE",
+  "deployable": false,
+  "network": {
+    "name": "GenLayer StudioNet",
+    "chain_id": 61999
+  },
+  "source": {
+    "path": "contracts/food_guard.py",
+    "sha256": "",
+    "git_commit": ""
+  },
+  "deployment": {
+    "contract_address": "",
+    "transaction_hash": "",
+    "explorer_url": "",
+    "deployer_wallet": "",
+    "confirmed_at": ""
+  },
+  "confirmation": {
+    "wallet_and_action_confirmed": false,
+    "execution_success_verified": false,
+    "authoritative_readback_verified": false,
+    "source_hash_match_verified": false
+  },
+  "note": "Schema example only. Empty deployment values are intentional; this file cannot authorize or evidence a deployment."
+}

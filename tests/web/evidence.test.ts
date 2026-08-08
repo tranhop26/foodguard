@@ -7,6 +7,11 @@ import {
   hashEvidence,
   validateEvidenceDocument,
 } from "../../lib/evidence";
+import claimFixture from "../../public/evidence/order-fg-demo-claim-missing-item.json";
+import deliveredFixture from "../../public/evidence/order-fg-demo-delivered.json";
+import manifestFixture from "../../public/evidence/order-fg-demo-manifest.json";
+import packedFixture from "../../public/evidence/order-fg-demo-packed.json";
+import pickupFixture from "../../public/evidence/order-fg-demo-pickup.json";
 
 const validEvidence = {
   schema_version: "foodguard-evidence/1",
@@ -134,5 +139,49 @@ describe("FoodGuard evidence", () => {
         new Date("2026-08-08T00:01:00.000Z"),
       ),
     ).toThrow();
+  });
+});
+
+describe("committed demo evidence fixtures", () => {
+  const fixtures = [
+    ["order-fg-demo-manifest.json", manifestFixture],
+    ["order-fg-demo-packed.json", packedFixture],
+    ["order-fg-demo-pickup.json", pickupFixture],
+    ["order-fg-demo-delivered.json", deliveredFixture],
+    ["order-fg-demo-claim-missing-item.json", claimFixture],
+  ] as const;
+
+  it.each(fixtures)("recomputes the committed canonical digest for %s", async (_name, rawFixture) => {
+    const fixture = rawFixture as unknown as EvidenceDocument;
+
+    expect(await hashEvidence(fixture)).toBe(fixture.sha256);
+    expect(validateEvidenceDocument(fixture, new Date("2030-01-01T00:00:00.000Z"))).toEqual(fixture);
+    expect(JSON.stringify(fixture)).toBe(canonicalizeEvidenceEnvelope(fixture));
+  });
+
+  it.each(fixtures)("binds %s to its committed public fixture path", (name, rawFixture) => {
+    const fixture = rawFixture as unknown as EvidenceDocument;
+    const source = new URL(fixture.source_url);
+
+    expect(source.pathname).toBe(`/evidence/${name}`);
+    expect(fixture.order_id).toBe("fg-demo");
+    expect(fixture.issuer_id).toBe("foodguard-offline-fixture");
+  });
+
+  it("cross-checks action actors and item references against the order manifest", () => {
+    const manifestItemIds = manifestFixture.items.map((item) => item.item_id);
+    const customer = "0x1111111111111111111111111111111111111111";
+    const restaurant = "0x2222222222222222222222222222222222222222";
+    const courier = "0x3333333333333333333333333333333333333333";
+
+    expect(packedFixture.item_observations.map((item) => item.item_id)).toEqual(manifestItemIds);
+    expect(manifestItemIds).toContain(claimFixture.item_id);
+    expect(claimFixture.subject).toBe(`order:fg-demo/item:${claimFixture.item_id}`);
+    expect(manifestFixture.actor_wallet).toBe(customer);
+    expect(packedFixture.actor_wallet).toBe(restaurant);
+    expect(pickupFixture.actor_wallet).toBe(courier);
+    expect(deliveredFixture.actor_wallet).toBe(courier);
+    expect(claimFixture.actor_wallet).toBe(customer);
+    expect(new Set([customer, restaurant, courier]).size).toBe(3);
   });
 });

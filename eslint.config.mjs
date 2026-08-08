@@ -5,6 +5,15 @@ export default [
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    ignores: [".next/**", "node_modules/**"],
+    ignores: [".next/**", ".next-e2e-*/**", "node_modules/**", "test-results/**", "work/**"],
+  },
+  {
+    files: ["scripts/**/*.mjs"],
+    languageOptions: {
+      globals: {
+        console: "readonly",
+        process: "readonly",
+      },
+    },
   },
 ];
