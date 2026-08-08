@@ -46,6 +46,7 @@ const vi = {
     total: "Tổng ký quỹ chính xác (wei)",
     manifest: "Manifest đơn hàng chuẩn hóa",
     evidenceManifest: "ORDER_MANIFEST chuẩn hóa để băm",
+    deadlines: "Cam kết deadline chính xác (microseconds UTC)",
     digest: "SHA-256 của bằng chứng manifest",
     create: "Tạo và ký quỹ",
     threeDistinct: "Ba địa chỉ ví phải khác nhau.",

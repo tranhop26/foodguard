@@ -14,13 +14,14 @@ import {
 } from "../wallet/WalletButton";
 
 export interface FoodGuardOrderView {
-  acceptance_deadline?: number | string;
+  acceptance_deadline?: bigint | number | string;
   courier: string;
   courier_accepted: boolean;
   customer: string;
   order_id: string;
   restaurant: string;
   restaurant_accepted: boolean;
+  review_deadline?: bigint | number | string;
   state: OrderState;
   [key: string]: unknown;
 }
@@ -58,9 +59,22 @@ function acceptedState(state: OrderState): boolean {
   return state === "FUNDED" || state === "PARTIALLY_ACCEPTED";
 }
 
+function beforeDeadline(deadline: bigint | number | string | undefined): boolean {
+  if (deadline === undefined) return true;
+  try {
+    return BigInt(Date.now()) * 1_000n < BigInt(deadline);
+  } catch {
+    return false;
+  }
+}
+
 function actionFor(role: WalletRole, order: FoodGuardOrderView): RoleAction | null {
   if (role === "RESTAURANT") {
-    if (acceptedState(order.state) && !order.restaurant_accepted) {
+    if (
+      acceptedState(order.state) &&
+      !order.restaurant_accepted &&
+      beforeDeadline(order.acceptance_deadline)
+    ) {
       return { id: "acceptRestaurant", method: "accept_restaurant", requiresEvidence: false };
     }
     if (order.state === "ACCEPTED") {
@@ -68,7 +82,11 @@ function actionFor(role: WalletRole, order: FoodGuardOrderView): RoleAction | nu
     }
   }
   if (role === "COURIER") {
-    if (acceptedState(order.state) && !order.courier_accepted) {
+    if (
+      acceptedState(order.state) &&
+      !order.courier_accepted &&
+      beforeDeadline(order.acceptance_deadline)
+    ) {
       return { id: "acceptCourier", method: "accept_courier", requiresEvidence: false };
     }
     if (order.state === "READY_FOR_PICKUP") {
@@ -78,14 +96,20 @@ function actionFor(role: WalletRole, order: FoodGuardOrderView): RoleAction | nu
       return { id: "deliver", method: "submit_delivery_evidence", requiresEvidence: true };
     }
   }
-  if (role === "CUSTOMER" && order.state === "REVIEW_WINDOW") {
+  if (
+    role === "CUSTOMER" &&
+    order.state === "REVIEW_WINDOW" &&
+    beforeDeadline(order.review_deadline)
+  ) {
     return { id: "claim", method: "submit_claim_evidence", requiresEvidence: true };
   }
   if (
     role === "CUSTOMER" &&
     acceptedState(order.state) &&
-    order.acceptance_deadline !== undefined &&
-    BigInt(order.acceptance_deadline) <= BigInt(Date.now()) * 1_000n
+    (
+      !order.restaurant_accepted && !order.courier_accepted ||
+      !beforeDeadline(order.acceptance_deadline)
+    )
   ) {
     return { id: "cancel", method: "cancel_unaccepted", requiresEvidence: false };
   }

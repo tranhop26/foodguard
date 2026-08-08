@@ -46,6 +46,7 @@ const en = {
     total: "Exact escrow total (wei)",
     manifest: "Canonical order manifest",
     evidenceManifest: "Canonical ORDER_MANIFEST digest preimage",
+    deadlines: "Exact deadline commitments (UTC microseconds)",
     digest: "Manifest evidence SHA-256",
     create: "Create and fund",
     threeDistinct: "The three wallet addresses must be different.",

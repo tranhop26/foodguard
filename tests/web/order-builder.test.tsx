@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { OrderBuilder } from "../../components/food/OrderBuilder";
@@ -66,14 +66,32 @@ const READY_FOR_PICKUP_ORDER: FoodGuardOrderView = {
 };
 
 type EthereumMock = {
+  emit(event: "accountsChanged" | "chainChanged", value: unknown): void;
+  on: ReturnType<typeof vi.fn>;
+  removeListener: ReturnType<typeof vi.fn>;
   request: ReturnType<typeof vi.fn>;
 };
 
 function installWallet(chainId = "0xf22f"): EthereumMock {
   let currentChain = chainId;
+  let currentAccounts = [CUSTOMER];
+  const listeners = new Map<string, Set<(value: unknown) => void>>();
   const provider: EthereumMock = {
+    emit(event, value) {
+      if (event === "accountsChanged" && Array.isArray(value)) currentAccounts = value as string[];
+      if (event === "chainChanged" && typeof value === "string") currentChain = value;
+      for (const listener of listeners.get(event) ?? []) listener(value);
+    },
+    on: vi.fn((event: string, listener: (value: unknown) => void) => {
+      const eventListeners = listeners.get(event) ?? new Set();
+      eventListeners.add(listener);
+      listeners.set(event, eventListeners);
+    }),
+    removeListener: vi.fn((event: string, listener: (value: unknown) => void) => {
+      listeners.get(event)?.delete(listener);
+    }),
     request: vi.fn(async ({ method }: { method: string }) => {
-      if (method === "eth_requestAccounts" || method === "eth_accounts") return [CUSTOMER];
+      if (method === "eth_requestAccounts" || method === "eth_accounts") return currentAccounts;
       if (method === "eth_chainId") return currentChain;
       if (method === "wallet_switchEthereumChain") {
         currentChain = "0xf22f";
@@ -119,6 +137,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.useRealTimers();
   Reflect.deleteProperty(window, "ethereum");
 });
 
@@ -140,6 +159,21 @@ describe("FoodGuard order builder", () => {
       expect(screen.getByTestId("manifest-digest")).toHaveTextContent(/^0x[0-9a-f]{64}$/),
     );
     expect(mocks.writeFoodGuard).not.toHaveBeenCalled();
+  });
+
+  it("keeps visible contract deadlines fresh while the preview is idle", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2030-01-01T00:00:00.000Z"));
+    renderBuilder();
+    const first = JSON.parse(screen.getByTestId("canonical-deadlines").textContent!);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    const refreshed = JSON.parse(screen.getByTestId("canonical-deadlines").textContent!);
+
+    expect(refreshed.acceptance_deadline).toBeGreaterThan(first.acceptance_deadline);
+    expect(refreshed.acceptance_deadline).toBeGreaterThan(Date.now() * 1_000);
   });
 
   it("keeps the raw manifest digest unchanged when only the URL locale changes", async () => {
@@ -193,6 +227,23 @@ describe("FoodGuard order builder", () => {
     expect(value).toBe(1250n);
     expect(mocks.trackTransaction).toHaveBeenCalledWith(HASH, expect.any(Function));
     expect(await screen.findByText("FUNDED")).toBeVisible();
+    expect(screen.getByRole("button", { name: /tạo và ký quỹ/i })).toBeDisabled();
+  });
+
+  it("freezes every submitted commitment while wallet confirmation and readback are pending", async () => {
+    mocks.writeFoodGuard.mockImplementation(() => new Promise(() => undefined));
+    renderBuilder({ deliveryFeeWei: "50" });
+    fireEvent.click(screen.getByRole("button", { name: /kết nối ví/i }));
+    const createButton = screen.getByRole("button", { name: /tạo và ký quỹ/i });
+    await waitFor(() => expect(createButton).toBeEnabled());
+
+    fireEvent.click(createButton);
+
+    expect(screen.getByRole("textbox", { name: /ví khách hàng/i })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: /ví nhà hàng/i })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: /ví người giao hàng/i })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: /mã đơn/i })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: /phí giao hàng/i })).toBeDisabled();
   });
 
   it("shows actionable StudioNet switching guidance and cannot write on the wrong chain", async () => {
@@ -211,6 +262,29 @@ describe("FoodGuard order builder", () => {
         params: [{ chainId: "0xf22f" }],
       }),
     );
+  });
+
+  it("reacts to wallet account and chain changes after connection", async () => {
+    const provider = installWallet();
+    const view = renderBuilder();
+    fireEvent.click(screen.getByRole("button", { name: /kết nối ví/i }));
+    await screen.findByText(CUSTOMER);
+
+    act(() => provider.emit("accountsChanged", [COURIER]));
+    expect(await screen.findByText("COURIER")).toBeVisible();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /tạo và ký quỹ/i })).toBeDisabled(),
+    );
+
+    act(() => provider.emit("chainChanged", "0x1"));
+    expect(await screen.findByText(/chuyển ví sang StudioNet.*61999/i)).toBeVisible();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /tạo và ký quỹ/i })).toBeDisabled(),
+    );
+
+    view.unmount();
+    expect(provider.removeListener).toHaveBeenCalledWith("accountsChanged", expect.any(Function));
+    expect(provider.removeListener).toHaveBeenCalledWith("chainChanged", expect.any(Function));
   });
 
   it("keeps preview available but disables writes when deployment is required", async () => {
@@ -252,6 +326,61 @@ describe("FoodGuard role console", () => {
 
     expect(screen.getByText(/chỉ đọc/i)).toBeVisible();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("hides provider acceptance after the authoritative acceptance deadline", () => {
+    render(
+      <LocaleProvider>
+        <RoleConsole
+          address={RESTAURANT}
+          order={{
+            ...READY_FOR_PICKUP_ORDER,
+            acceptance_deadline: BigInt(Date.now()) * 1_000n - 1n,
+            courier_accepted: false,
+            restaurant_accepted: false,
+            state: "FUNDED",
+          }}
+        />
+      </LocaleProvider>,
+    );
+
+    expect(screen.queryByRole("button", { name: /nhà hàng nhận đơn/i })).not.toBeInTheDocument();
+  });
+
+  it("offers customer cancellation before the deadline only when neither provider accepted", () => {
+    render(
+      <LocaleProvider>
+        <RoleConsole
+          address={CUSTOMER}
+          order={{
+            ...READY_FOR_PICKUP_ORDER,
+            acceptance_deadline: BigInt(Date.now()) * 1_000n + 60_000_000n,
+            courier_accepted: false,
+            restaurant_accepted: false,
+            state: "FUNDED",
+          }}
+        />
+      </LocaleProvider>,
+    );
+
+    expect(screen.getByRole("button", { name: /hoàn tiền đơn chưa được nhận/i })).toBeEnabled();
+  });
+
+  it("hides customer claims after the review deadline", () => {
+    render(
+      <LocaleProvider>
+        <RoleConsole
+          address={CUSTOMER}
+          order={{
+            ...READY_FOR_PICKUP_ORDER,
+            review_deadline: BigInt(Date.now()) * 1_000n - 1n,
+            state: "REVIEW_WINDOW",
+          }}
+        />
+      </LocaleProvider>,
+    );
+
+    expect(screen.queryByRole("button", { name: /khiếu nại/i })).not.toBeInTheDocument();
   });
 
   it("updates actions only from the authoritative order returned after a write", async () => {

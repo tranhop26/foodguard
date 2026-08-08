@@ -10,6 +10,8 @@ export type WalletRole = "CUSTOMER" | "RESTAURANT" | "COURIER" | "OUTSIDER";
 export type WalletStatus = "DISCONNECTED" | "READY" | "WRONG_CHAIN" | "ERROR";
 
 export interface Eip1193Provider {
+  on?(event: "accountsChanged" | "chainChanged", listener: (value: unknown) => void): void;
+  removeListener?(event: "accountsChanged" | "chainChanged", listener: (value: unknown) => void): void;
   request(args: { method: string; params?: unknown }): Promise<unknown>;
 }
 
@@ -76,6 +78,26 @@ export function WalletButton({
     [actors],
   );
 
+  const synchronizeWallet = useCallback(
+    async (provider: Eip1193Provider, requestAccess: boolean) => {
+      const [accounts, chainId] = await Promise.all([
+        provider.request({ method: requestAccess ? "eth_requestAccounts" : "eth_accounts" }),
+        provider.request({ method: "eth_chainId" }),
+      ]);
+      const address = Array.isArray(accounts) ? accounts[0] : undefined;
+      if (
+        typeof address !== "string" ||
+        !isAddress(address, { strict: false }) ||
+        sameAddress(address, zeroAddress) ||
+        typeof chainId !== "string"
+      ) {
+        throw new Error(copy.wallet.invalidAccount);
+      }
+      commitSnapshot(address, chainId);
+    },
+    [commitSnapshot, copy.wallet.invalidAccount],
+  );
+
   useEffect(() => {
     if (!snapshot.address) return;
     const nextRole = deriveWalletRole(snapshot.address, actors);
@@ -88,6 +110,23 @@ export function WalletButton({
     onChange?.(snapshot);
   }, [onChange, snapshot]);
 
+  useEffect(() => {
+    const provider = walletProvider();
+    if (!provider?.on) return;
+    const refresh = () => {
+      void synchronizeWallet(provider, false).catch((caught: unknown) => {
+        setError(caught instanceof Error ? caught.message : copy.wallet.invalidAccount);
+        setSnapshot({ ...DISCONNECTED, status: "ERROR" });
+      });
+    };
+    provider.on("accountsChanged", refresh);
+    provider.on("chainChanged", refresh);
+    return () => {
+      provider.removeListener?.("accountsChanged", refresh);
+      provider.removeListener?.("chainChanged", refresh);
+    };
+  }, [copy.wallet.invalidAccount, synchronizeWallet]);
+
   async function connect() {
     const provider = walletProvider();
     if (!provider) {
@@ -97,18 +136,7 @@ export function WalletButton({
     }
     setBusy(true);
     try {
-      const accounts = await provider.request({ method: "eth_requestAccounts" });
-      const chainId = await provider.request({ method: "eth_chainId" });
-      const address = Array.isArray(accounts) ? accounts[0] : undefined;
-      if (
-        typeof address !== "string" ||
-        !isAddress(address, { strict: false }) ||
-        sameAddress(address, zeroAddress) ||
-        typeof chainId !== "string"
-      ) {
-        throw new Error(copy.wallet.invalidAccount);
-      }
-      commitSnapshot(address, chainId);
+      await synchronizeWallet(provider, true);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : copy.wallet.invalidAccount);
       setSnapshot({ ...DISCONNECTED, status: "ERROR" });
@@ -129,15 +157,7 @@ export function WalletButton({
         method: "wallet_switchEthereumChain",
         params: [{ chainId: expectedChainId }],
       });
-      const [accounts, chainId] = await Promise.all([
-        provider.request({ method: "eth_accounts" }),
-        provider.request({ method: "eth_chainId" }),
-      ]);
-      const address = Array.isArray(accounts) ? accounts[0] : undefined;
-      if (typeof address !== "string" || typeof chainId !== "string") {
-        throw new Error(copy.wallet.invalidAccount);
-      }
-      commitSnapshot(address, chainId);
+      await synchronizeWallet(provider, false);
     } catch {
       setError(copy.wallet.switchFailed);
     } finally {

@@ -166,6 +166,7 @@ export function OrderBuilder({
   const [deliveryFeeWei, setDeliveryFeeWei] = useState(initialDeliveryFee);
   const [orderId, setOrderId] = useState(initialOrderId);
   const [createdAtMs] = useState(() => Date.now());
+  const [deadlineBaseMs, setDeadlineBaseMs] = useState(() => Date.now());
   const [wallet, setWallet] = useState<WalletSnapshot>(EMPTY_WALLET);
   const [digest, setDigest] = useState<HexDigest | null>(null);
   const [pending, setPending] = useState(false);
@@ -175,6 +176,10 @@ export function OrderBuilder({
 
   const items = useMemo(() => [canonicalItem(item)], [item]);
   const canonicalManifest = useMemo(() => canonicalOrderManifest(items), [items]);
+  const deadlinesJson = useMemo(
+    () => canonicalDeadlines(deadlineBaseMs),
+    [deadlineBaseMs],
+  );
   const amounts = useMemo(() => {
     try {
       return calculateOrderValueWei(items, deliveryFeeWei);
@@ -225,8 +230,16 @@ export function OrderBuilder({
     };
   }, [manifestEvidence]);
 
+  useEffect(() => {
+    if (pending) return;
+    setDeadlineBaseMs(Date.now());
+    const timer = window.setInterval(() => setDeadlineBaseMs(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, [pending]);
+
   const handleWalletChange = useCallback((nextWallet: WalletSnapshot) => {
     setWallet(nextWallet);
+    if (nextWallet.status === "READY") setDeadlineBaseMs(Date.now());
   }, []);
 
   const customerConnected = sameAddress(wallet.address, actors[0]);
@@ -238,6 +251,7 @@ export function OrderBuilder({
     Boolean(digest) &&
     Boolean(amounts) &&
     Boolean(orderId.trim()) &&
+    !authoritativeOrder &&
     !pending;
 
   function setActor(index: number, value: string) {
@@ -262,7 +276,7 @@ export function OrderBuilder({
           actors[2],
           canonicalManifest,
           amounts.deliveryFee,
-          canonicalDeadlines(createdAtMs),
+          deadlinesJson,
         ],
         amounts.total,
         setStage,
@@ -292,6 +306,7 @@ export function OrderBuilder({
                 <input
                   aria-label={label}
                   autoComplete="off"
+                  disabled={pending}
                   onChange={(event) => setActor(index, event.target.value)}
                   spellCheck={false}
                   type="text"
@@ -313,6 +328,7 @@ export function OrderBuilder({
             <span>{copy.order.orderId}</span>
             <input
               autoComplete="off"
+              disabled={pending}
               onChange={(event) => setOrderId(event.target.value)}
               type="text"
               value={orderId}
@@ -322,6 +338,7 @@ export function OrderBuilder({
             <span>{copy.order.deliveryFee}</span>
             <input
               inputMode="numeric"
+              disabled={pending}
               onChange={(event) => setDeliveryFeeWei(event.target.value.trim())}
               type="text"
               value={deliveryFeeWei}
@@ -339,6 +356,8 @@ export function OrderBuilder({
         <section className="manifest-preview" aria-labelledby="manifest-title">
           <h2 id="manifest-title">{copy.order.manifest}</h2>
           <pre data-testid="canonical-manifest">{canonicalManifest}</pre>
+          <h3>{copy.order.deadlines}</h3>
+          <pre data-testid="canonical-deadlines">{deadlinesJson}</pre>
           <h3>{copy.order.evidenceManifest}</h3>
           <pre>{canonicalEvidence}</pre>
           <h3>{copy.order.digest}</h3>
