@@ -147,12 +147,11 @@ export function validateEvidenceDocument(value: unknown, now = new Date()): Evid
 }
 
 export function canonicalizeEvidence(value: EvidenceDocument): string {
-  return canonicalize(validateEvidenceShape(value) as JsonValue);
+  return canonicalize(digestPreimage(validateEvidenceShape(value)));
 }
 
 export async function hashEvidence(value: EvidenceDocument): Promise<HexDigest> {
-  const evidence = validateEvidenceShape(value);
-  const bytes = new TextEncoder().encode(canonicalize(digestPreimage(evidence)));
+  const bytes = new TextEncoder().encode(canonicalizeEvidence(value));
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return `0x${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }

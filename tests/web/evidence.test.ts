@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { EvidenceDocument, HexDigest } from "../../lib/domain";
 import {
+  canonicalizeEvidence,
   hashEvidence,
   validateEvidenceDocument,
 } from "../../lib/evidence";
@@ -76,6 +77,9 @@ function without(value: Record<string, unknown>, key: string) {
 
 describe("FoodGuard evidence", () => {
   it("hashes the digest-free recursively canonical document", async () => {
+    expect(canonicalizeEvidence(fixtureA)).toBe(
+      '{"action":"ORDER_MANIFEST","actor_wallet":"0x1111111111111111111111111111111111111111","chain_id":"genlayer-studionet","contract_address":"0x2222222222222222222222222222222222222222","expires_at":"2026-08-08T01:00:00.000Z","issuer_id":"restaurant-demo","item_id":"item-1","items":[{"conditions":["served warm"],"item_id":"item-1","name":"Com tam","permitted_substitutions":[],"price_wei":"1000000000000000000","quantity":1}],"nonce":"manifest-1","observed_at":"2026-08-08T00:00:00.000Z","order_id":"fg-1","schema_version":"foodguard-evidence/1","source_url":"https://evidence.example/order-fg-1.json","subject":"order:fg-1/item:item-1","submitted_at":"2026-08-08T00:01:00.000Z"}',
+    );
     expect(await hashEvidence(fixtureA)).toBe(
       "0x1f5f60f3d5fa220fcc251a5c25787d2cd2981da16f63957e2cc72d818c066015",
     );
