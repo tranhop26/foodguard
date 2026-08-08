@@ -9,12 +9,18 @@ import { EvidenceDrawer, isPublicEvidenceUrl } from "../../../components/order/E
 import {
   ItemOutcomeTable,
   type EvidenceRecordView,
+  type MutualSettlementView,
   type OrderDetailView,
   type ResolutionView,
   type SettlementView,
 } from "../../../components/order/ItemOutcomeTable";
 import { OrderTimeline } from "../../../components/order/OrderTimeline";
-import { authoritativeNowMs, type AuthoritativeClock } from "../../../components/order/authoritativeClock";
+import {
+  authoritativeNowMs,
+  MAX_CHAIN_SAMPLE_AGE_MS,
+  sampleAuthoritativeClock,
+  type AuthoritativeClock,
+} from "../../../components/order/authoritativeClock";
 import { RoleConsole, type RoleAction } from "../../../components/order/RoleConsole";
 import { TransactionLifecycle } from "../../../components/order/TransactionLifecycle";
 import { WalletButton, type WalletSnapshot } from "../../../components/wallet/WalletButton";
@@ -99,6 +105,11 @@ function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (!plainObject(value)) throw new TypeError("Canonical JSON readback is malformed");
   return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+}
+
+async function sha256Text(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return `0x${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
 function authoritativeManifest(manifestJson: string): OrderItem[] {
@@ -307,6 +318,91 @@ function parseSettlement(value: unknown): SettlementView {
   };
 }
 
+async function parseMutualSettlement(
+  value: unknown,
+  order: OrderDetailView,
+  settlement: SettlementView,
+): Promise<MutualSettlementView> {
+  if (!plainObject(value)) throw new TypeError("Mutual settlement proposal readback is malformed");
+  const stringFields = ["proposal_json", "digest", "proposal_nonce"] as const;
+  const signatureFields = ["customer_signed", "restaurant_signed", "courier_signed"] as const;
+  if (
+    Object.keys(value).sort().join(",") !== "courier_signed,courier_wei,customer_signed,customer_wei,digest,proposal_json,proposal_nonce,restaurant_signed,restaurant_wei" ||
+    stringFields.some((field) => typeof value[field] !== "string" || !(value[field] as string).trim()) ||
+    signatureFields.some((field) => value[field] !== true) ||
+    !/^0x[0-9a-f]{64}$/i.test(value.digest as string)
+  ) throw new TypeError("Mutual settlement proposal readback is malformed");
+  const customerTotal = unsignedRaw(value.customer_wei, "mutual customer_wei");
+  const restaurantTotal = unsignedRaw(value.restaurant_wei, "mutual restaurant_wei");
+  const courierTotal = unsignedRaw(value.courier_wei, "mutual courier_wei");
+  let proposal: unknown;
+  try { proposal = JSON.parse(value.proposal_json as string); } catch { throw new TypeError("Mutual settlement proposal JSON is malformed"); }
+  if (
+    !plainObject(proposal) ||
+    Object.keys(proposal).sort().join(",") !== "chain_id,contract_address,delivery_allocation,item_allocations,order_id,proposal_nonce" ||
+    canonicalJson(proposal) !== value.proposal_json ||
+    proposal.chain_id !== String(FOODGUARD_CHAIN.id) ||
+    proposal.order_id !== order.order_id ||
+    proposal.proposal_nonce !== value.proposal_nonce ||
+    !plainObject(proposal.delivery_allocation) ||
+    Object.keys(proposal.delivery_allocation).sort().join(",") !== "courier_wei,customer_wei" ||
+    !Array.isArray(proposal.item_allocations)
+  ) throw new TypeError("Mutual settlement proposal binding is malformed");
+  const configuration = getFoodGuardConfiguration();
+  if (
+    typeof proposal.contract_address !== "string" ||
+    !isAddress(proposal.contract_address, { strict: false }) ||
+    (configuration.status === "READY" && proposal.contract_address.toLowerCase() !== configuration.address.toLowerCase()) ||
+    (await sha256Text(value.proposal_json as string)).toLowerCase() !== (value.digest as string).toLowerCase()
+  ) throw new TypeError("Mutual settlement proposal digest or contract binding is malformed");
+  const manifest = authoritativeManifest(order.manifest_json);
+  if (proposal.item_allocations.length !== manifest.length) throw new TypeError("Mutual item allocations are malformed");
+  let expectedCustomer = 0n;
+  let expectedRestaurant = 0n;
+  const itemAllocations = proposal.item_allocations.map((allocation, index) => {
+    if (
+      !plainObject(allocation) ||
+      Object.keys(allocation).sort().join(",") !== "customer_wei,item_id,restaurant_wei" ||
+      allocation.item_id !== manifest[index].item_id
+    ) throw new TypeError("Mutual item allocations are malformed");
+    const customerWei = unsignedRaw(allocation.customer_wei, "mutual item customer_wei");
+    const restaurantWei = unsignedRaw(allocation.restaurant_wei, "mutual item restaurant_wei");
+    if (BigInt(customerWei) + BigInt(restaurantWei) !== BigInt(manifest[index].price_wei) * BigInt(manifest[index].quantity)) {
+      throw new TypeError("Mutual item allocation does not conserve value");
+    }
+    expectedCustomer += BigInt(customerWei);
+    expectedRestaurant += BigInt(restaurantWei);
+    return { customer_wei: customerWei, item_id: allocation.item_id as string, restaurant_wei: restaurantWei };
+  });
+  const deliveryCustomer = unsignedRaw(proposal.delivery_allocation.customer_wei, "mutual delivery customer_wei");
+  const deliveryCourier = unsignedRaw(proposal.delivery_allocation.courier_wei, "mutual delivery courier_wei");
+  if (BigInt(deliveryCustomer) + BigInt(deliveryCourier) !== BigInt(order.delivery_fee)) {
+    throw new TypeError("Mutual delivery allocation does not conserve value");
+  }
+  expectedCustomer += BigInt(deliveryCustomer);
+  if (
+    expectedCustomer !== BigInt(customerTotal) ||
+    expectedRestaurant !== BigInt(restaurantTotal) ||
+    BigInt(deliveryCourier) !== BigInt(courierTotal) ||
+    customerTotal !== String(settlement.customer_wei) ||
+    restaurantTotal !== String(settlement.restaurant_wei) ||
+    courierTotal !== String(settlement.courier_wei)
+  ) throw new TypeError("Mutual settlement totals do not match final settlement readback");
+  return {
+    courier_signed: true,
+    courier_wei: courierTotal,
+    customer_signed: true,
+    customer_wei: customerTotal,
+    delivery_allocation: { courier_wei: deliveryCourier, customer_wei: deliveryCustomer },
+    digest: value.digest as string,
+    item_allocations: itemAllocations,
+    proposal_json: value.proposal_json as string,
+    proposal_nonce: value.proposal_nonce as string,
+    restaurant_signed: true,
+    restaurant_wei: restaurantTotal,
+  };
+}
+
 export async function readAuthoritativeOrder(orderId: string): Promise<OrderDetailView> {
   const normalizedOrderId = orderId.trim();
   if (!normalizedOrderId) throw new TypeError("An order ID is required");
@@ -338,14 +434,24 @@ export async function readAuthoritativeOrder(orderId: string): Promise<OrderDeta
     : null;
   if (resolution) {
     const readbackDigests = evidence.map((record) => record.sha256);
+    const fullyUnresolved = (
+      resolution.delivery_outcome === "UNRESOLVED" &&
+      resolution.items.every((item) => item.outcome === "UNRESOLVED")
+    );
+    const failClosedWithoutDigests = fullyUnresolved && resolution.evidence_hashes.length === 0;
     if (
-      resolution.evidence_hashes.length !== readbackDigests.length ||
-      resolution.evidence_hashes.some((digest, index) => digest !== readbackDigests[index])
+      !failClosedWithoutDigests && (
+        resolution.evidence_hashes.length === 0 ||
+        resolution.evidence_hashes.length !== readbackDigests.length ||
+        resolution.evidence_hashes.some((digest, index) => digest !== readbackDigests[index])
+      )
     ) throw new TypeError("Resolution evidence digests do not match append-only evidence");
   }
   const settlement = order.state === "SETTLED" || order.state === "CANCELLED_REFUNDED"
     ? parseSettlement(await readFoodGuard<unknown>("get_order_settlement", [normalizedOrderId]))
     : null;
+  let mutualSettlement: MutualSettlementView | null = null;
+  let settlementBasis: string | null = null;
   if (settlement) {
     const customer = BigInt(settlement.customer_wei);
     const restaurant = BigInt(settlement.restaurant_wei);
@@ -356,9 +462,22 @@ export async function readAuthoritativeOrder(orderId: string): Promise<OrderDeta
     if (order.state === "CANCELLED_REFUNDED" && (customer !== BigInt(order.total_value) || restaurant !== 0n || courier !== 0n)) {
       throw new TypeError("Cancellation settlement allocation is malformed");
     }
+    if (order.state === "CANCELLED_REFUNDED") settlementBasis = "unaccepted-cancellation";
     if (order.state === "SETTLED") {
       if (!resolution) throw new TypeError("Settled order resolution is missing");
       const items = authoritativeManifest(order.manifest_json);
+      const hasUnresolved = (
+        resolution.delivery_outcome === "UNRESOLVED" ||
+        resolution.items.some((item) => item.outcome === "UNRESOLVED")
+      );
+      if (hasUnresolved) {
+        mutualSettlement = await parseMutualSettlement(
+          await readFoodGuard<unknown>("get_settlement_proposal", [normalizedOrderId]),
+          order,
+          settlement,
+        );
+        settlementBasis = `mutual:${mutualSettlement.digest}`;
+      } else {
       let expectedCustomer = 0n;
       let expectedRestaurant = 0n;
       for (const [index, result] of resolution.items.entries()) {
@@ -373,9 +492,29 @@ export async function readAuthoritativeOrder(orderId: string): Promise<OrderDeta
       if (customer !== expectedCustomer || restaurant !== expectedRestaurant || courier !== expectedCourier) {
         throw new TypeError("Settlement allocations do not match the authoritative resolution");
       }
+        settlementBasis = `resolution:${await sha256Text(canonicalJson(resolution))}`;
+      }
+    }
+    const configuration = getFoodGuardConfiguration();
+    const mutualProposal = mutualSettlement ? JSON.parse(mutualSettlement.proposal_json) as { contract_address: string } : null;
+    const settlementContract = mutualProposal?.contract_address ?? (configuration.status === "READY" ? configuration.address : null);
+    if (settlementBasis && settlementContract) {
+      const expectedSettlementId = await sha256Text(canonicalJson({
+        basis: settlementBasis,
+        chain_id: String(FOODGUARD_CHAIN.id),
+        contract_address: settlementContract.toLowerCase(),
+        courier_wei: String(settlement.courier_wei),
+        customer_wei: String(settlement.customer_wei),
+        order_id: normalizedOrderId,
+        restaurant_wei: String(settlement.restaurant_wei),
+        schema_version: "foodguard-settlement-v1",
+      }));
+      if (expectedSettlementId.toLowerCase() !== settlement.settlement_id.toLowerCase()) {
+        throw new TypeError("Settlement ID does not bind the authoritative allocation");
+      }
     }
   }
-  return { ...order, evidence, resolution, resolution_round: round, settlement };
+  return { ...order, evidence, mutual_settlement: mutualSettlement, resolution, resolution_round: round, settlement };
 }
 
 export async function readAuthoritativeChainTime(): Promise<bigint> {
@@ -428,6 +567,7 @@ export function OrderDetailWorkspace({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeEvidence, setActiveEvidence] = useState<ActiveEvidenceRequest | null>(null);
+  const [transactionActorAddress, setTransactionActorAddress] = useState<string | null>(null);
   const [transactionMethod, setTransactionMethod] = useState<string | null>(null);
   const [clock, setClock] = useState<AuthoritativeClock | null>(null);
   const [clockError, setClockError] = useState<string | null>(null);
@@ -450,24 +590,38 @@ export function OrderDetailWorkspace({
   useEffect(() => {
     if (!configuration.readsEnabled) return;
     let active = true;
-    let timer: number | undefined;
+    let refreshTimer: number | undefined;
+    let staleTimer: number | undefined;
+    let sampleGeneration = 0;
     const refresh = async () => {
       try {
         const seconds = await readChainTime();
         if (!active) return;
-        setClock({ sampledAtMs: Date.now(), seconds });
+        const sample = sampleAuthoritativeClock(seconds);
+        if (!sample) throw new TypeError("Monotonic time is unavailable");
+        const generation = ++sampleGeneration;
+        if (staleTimer !== undefined) window.clearTimeout(staleTimer);
+        setClock(sample);
         setClockError(null);
+        staleTimer = window.setTimeout(() => {
+          if (!active || generation !== sampleGeneration) return;
+          setClock(null);
+          setClockError(copy.detail.chainTimeUnavailable);
+        }, MAX_CHAIN_SAMPLE_AGE_MS + 1);
       } catch {
         if (!active) return;
+        sampleGeneration += 1;
+        if (staleTimer !== undefined) window.clearTimeout(staleTimer);
         setClock(null);
         setClockError(copy.detail.chainTimeUnavailable);
       }
-      if (active) timer = window.setTimeout(() => { void refresh(); }, 15_000);
+      if (active) refreshTimer = window.setTimeout(() => { void refresh(); }, 15_000);
     };
     void refresh();
     return () => {
       active = false;
-      if (timer !== undefined) window.clearTimeout(timer);
+      if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
+      if (staleTimer !== undefined) window.clearTimeout(staleTimer);
     };
   }, [configuration.readsEnabled, copy.detail.chainTimeUnavailable, readChainTime]);
 
@@ -486,6 +640,7 @@ export function OrderDetailWorkspace({
     setError(null);
     setStage(null);
     setTransactionMethod(method);
+    setTransactionActorAddress(expectedAddress ?? null);
     try {
       const result = transact
         ? await transact(method, args, expectedAddress, setStage)
@@ -606,7 +761,11 @@ export function OrderDetailWorkspace({
               order={order}
             />
           )}
-          <TransactionLifecycle stage={stage} />
+          <TransactionLifecycle
+            actorAddress={transactionActorAddress}
+            operation={transactionMethod}
+            stage={stage}
+          />
         </>
       )}
     </div>

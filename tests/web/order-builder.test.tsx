@@ -43,6 +43,10 @@ const CONTRACT = "0x5555555555555555555555555555555555555555";
 const HASH = `0x${"a".repeat(64)}`;
 const PUBLIC_APP_ORIGIN_ENV = "NEXT_PUBLIC_FOODGUARD_APP_ORIGIN";
 const VALID_PUBLIC_APP_ORIGIN = "https://app.foodguard.vn";
+
+function testClock(seconds: bigint) {
+  return { sampledAtMonotonicMs: performance.now(), seconds };
+}
 const originalPublicAppOrigin = process.env.NEXT_PUBLIC_FOODGUARD_APP_ORIGIN;
 
 const ITEM: OrderItem = {
@@ -524,6 +528,7 @@ describe("FoodGuard role console", () => {
       <LocaleProvider>
         <RoleConsole
           address={RESTAURANT}
+          clock={testClock(BigInt(Math.floor(Date.now() / 1_000)))}
           order={{
             ...READY_FOR_PICKUP_ORDER,
             acceptance_deadline: BigInt(Math.floor(Date.now() / 1_000)) - 1n,
@@ -543,6 +548,7 @@ describe("FoodGuard role console", () => {
       <LocaleProvider>
         <RoleConsole
           address={CUSTOMER}
+          clock={testClock(BigInt(Math.floor(Date.now() / 1_000)))}
           order={{
             ...READY_FOR_PICKUP_ORDER,
             acceptance_deadline: BigInt(Math.floor(Date.now() / 1_000)) + 60n,
@@ -562,6 +568,7 @@ describe("FoodGuard role console", () => {
       <LocaleProvider>
         <RoleConsole
           address={CUSTOMER}
+          clock={testClock(BigInt(Math.floor(Date.now() / 1_000)))}
           order={{
             ...READY_FOR_PICKUP_ORDER,
             review_deadline: BigInt(Math.floor(Date.now() / 1_000)) - 1n,
@@ -581,6 +588,7 @@ describe("FoodGuard role console", () => {
       <LocaleProvider>
         <RoleConsole
           address={RESTAURANT}
+          clock={testClock(1_893_456_000n)}
           order={{
             ...READY_FOR_PICKUP_ORDER,
             acceptance_deadline: 1_893_456_001n,
@@ -612,6 +620,7 @@ describe("FoodGuard role console", () => {
       <LocaleProvider>
         <RoleConsole
           address={OUTSIDER}
+          clock={testClock(1_893_456_000n)}
           order={{
             ...READY_FOR_PICKUP_ORDER,
             acceptance_deadline: 1_893_456_001n,
@@ -659,6 +668,7 @@ describe("FoodGuard role console", () => {
       <LocaleProvider>
         <RoleConsole
           address={CUSTOMER}
+          clock={testClock(1_893_456_000n)}
           order={{
             ...READY_FOR_PICKUP_ORDER,
             review_deadline: 1_893_456_001n,

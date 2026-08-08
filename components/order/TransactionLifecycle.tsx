@@ -12,7 +12,15 @@ const progression: TxStage[] = [
   "READBACK_CONFIRMED",
 ];
 
-export function TransactionLifecycle({ stage }: { stage: TxStage | null }) {
+export function TransactionLifecycle({
+  actorAddress,
+  operation,
+  stage,
+}: {
+  actorAddress?: string | null;
+  operation?: string | null;
+  stage: TxStage | null;
+}) {
   const { copy } = useLocale();
   if (!stage) return null;
 
@@ -64,8 +72,17 @@ export function TransactionLifecycle({ stage }: { stage: TxStage | null }) {
           <span>{readbackConfirmed ? copy.detail.readbackConfirmed : copy.detail.readbackPending}</span>
         </li>
       </ol>
-      {stage === "CONSENSUS_FAILED" && (
+      {stage === "CONSENSUS_FAILED" && operation === "request_resolution" && (
         <p className="form-notice form-notice--warning">{copy.detail.consensusUnchanged}</p>
+      )}
+      {stage === "CONSENSUS_FAILED" && operation !== "request_resolution" && actorAddress && operation && (
+        <p className="form-notice form-notice--warning">
+          {copy.detail.consensusActorRetry} <code>{actorAddress}</code>{" "}
+          {copy.detail.consensusOperation} <code>{operation}</code>
+        </p>
+      )}
+      {stage === "CONSENSUS_FAILED" && operation !== "request_resolution" && (!actorAddress || !operation) && (
+        <p className="form-notice form-notice--warning">{copy.detail.consensusRetryUnspecified}</p>
       )}
     </section>
   );

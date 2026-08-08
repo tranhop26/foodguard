@@ -63,4 +63,3 @@ export function OrderTimeline({ order }: { order: OrderDetailView }) {
     </section>
   );
 }
-

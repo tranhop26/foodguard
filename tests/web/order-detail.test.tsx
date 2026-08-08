@@ -19,6 +19,10 @@ vi.mock("../../lib/genlayer/transactions", () => ({
 }));
 
 import { AppealPanel } from "../../components/order/AppealPanel";
+import {
+  authoritativeNowMs,
+  MAX_CHAIN_SAMPLE_AGE_MS,
+} from "../../components/order/authoritativeClock";
 import { ConsensusPanel } from "../../components/order/ConsensusPanel";
 import { EvidenceDrawer } from "../../components/order/EvidenceDrawer";
 import { ItemOutcomeTable, type OrderDetailView } from "../../components/order/ItemOutcomeTable";
@@ -118,6 +122,40 @@ function renderLocalized(node: React.ReactNode, locale: Locale) {
   );
 }
 
+function testClock(seconds: bigint) {
+  return { sampledAtMonotonicMs: performance.now(), seconds };
+}
+
+async function storedPackedEvidence() {
+  const preimage = {
+    action: "PACKED",
+    actor_wallet: RESTAURANT,
+    chain_id: "61999",
+    contract_address: "0x4444444444444444444444444444444444444444",
+    expires_at: "2030-01-02T02:00:00.000Z",
+    issuer_id: "foodguard-web",
+    item_observations: [
+      { item_id: "item-1", observation: "PACKED_AS_ORDERED" },
+      { item_id: "item-2", observation: "PACKED_AS_ORDERED" },
+    ],
+    nonce: "packed-readback",
+    observed_at: "2030-01-01T00:00:00.000Z",
+    order_id: "fg-mixed",
+    schema_version: "foodguard-evidence/1",
+    sha256: ("0x" + "00".repeat(32)) as EvidenceDocument["sha256"],
+    source_url: "https://evidence.foodguard.vn/packed-readback.json",
+    subject: "order:fg-mixed",
+    submitted_at: "2030-01-01T00:00:00.000Z",
+  } satisfies EvidenceDocument;
+  const document = { ...preimage, sha256: await hashEvidence(preimage) } satisfies EvidenceDocument;
+  return { ...document, envelope_json: canonicalizeEvidenceEnvelope(document), item_id: "" };
+}
+
+async function sha256Text(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return `0x${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
@@ -125,6 +163,7 @@ afterEach(() => {
   window.history.replaceState({}, "", "/");
   vi.clearAllMocks();
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   delete (window as typeof window & { ethereum?: unknown }).ethereum;
 });
 
@@ -185,11 +224,49 @@ describe("authoritative order outcome presentation", () => {
     expect(screen.getByText("READBACK_PENDING")).toBeVisible();
   });
 
+  it("uses a bounded monotonic elapsed time for authoritative chain samples", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2030-01-01T00:00:00.000Z"));
+    const clock = { sampledAtMonotonicMs: 500, seconds: 1_000n };
+
+    expect(authoritativeNowMs(clock, () => 1_500)).toBe(1_001_000n);
+    vi.setSystemTime(new Date("2040-01-01T00:00:00.000Z"));
+    expect(authoritativeNowMs(clock, () => 1_500)).toBe(1_001_000n);
+    expect(authoritativeNowMs(clock, () => 500 + MAX_CHAIN_SAMPLE_AGE_MS + 1)).toBeNull();
+  });
+
+  it("names the eligible actor for an actor-bound consensus retry", () => {
+    renderLocalized(
+      <TransactionLifecycle
+        actorAddress={RESTAURANT}
+        operation="submit_packed_evidence"
+        stage="CONSENSUS_FAILED"
+      />,
+      "en",
+    );
+
+    expect(screen.getByText(RESTAURANT)).toBeVisible();
+    expect(screen.getByText("submit_packed_evidence")).toBeVisible();
+    expect(screen.queryByText(/anyone may retry/i)).not.toBeInTheDocument();
+  });
+
+  it("keeps request_resolution consensus retry explicitly permissionless", () => {
+    renderLocalized(
+      <TransactionLifecycle operation="request_resolution" stage="CONSENSUS_FAILED" />,
+      "en",
+    );
+
+    expect(screen.getByText(/anyone may retry safely/i)).toBeVisible();
+  });
+
   it("hides appeal after its strict deadline", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-08T00:00:00.000Z"));
 
-    renderLocalized(<AppealPanel address={CUSTOMER} order={EXPIRED_APPEAL_ORDER} />, "en");
+    renderLocalized(
+      <AppealPanel address={CUSTOMER} clock={testClock(1_700_000_001n)} order={EXPIRED_APPEAL_ORDER} />,
+      "en",
+    );
 
     expect(screen.queryByRole("button", { name: /appeal/i })).not.toBeInTheDocument();
   });
@@ -200,6 +277,7 @@ describe("authoritative order outcome presentation", () => {
     renderLocalized(
       <AppealPanel
         address={CUSTOMER}
+        clock={testClock(1_893_456_000n)}
         order={{ ...MIXED_OUTCOME_ORDER, appeal_deadline: "1893456005", state: "RESOLVED" }}
       />,
       "en",
@@ -250,6 +328,7 @@ describe("evidence envelope preview", () => {
         action="PACKED"
         address={RESTAURANT}
         chainId="61999"
+        clock={testClock(1_893_456_000n)}
         contractAddress="0x4444444444444444444444444444444444444444"
         nonce="nonce-packed-1"
         now={new Date("2030-01-01T00:00:00.000Z")}
@@ -322,6 +401,7 @@ describe("evidence envelope preview", () => {
         action="DELIVERED"
         address={COURIER}
         chainId="61999"
+        clock={testClock(1_893_456_000n)}
         contractAddress="0x4444444444444444444444444444444444444444"
         nonce="nonce-delivered-1"
         now={new Date("2030-01-01T00:00:00.000Z")}
@@ -339,11 +419,12 @@ describe("evidence envelope preview", () => {
   it("fails closed when a previewed envelope reaches its expiry", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2030-01-01T00:00:00.000Z"));
-    renderLocalized(
+    const view = renderLocalized(
       <EvidenceDrawer
         action="DELIVERED"
         address={COURIER}
         chainId="61999"
+        clock={testClock(1_893_456_000n)}
         contractAddress="0x4444444444444444444444444444444444444444"
         nonce="nonce-delivered-expiry"
         now={new Date("2030-01-01T00:00:00.000Z")}
@@ -365,6 +446,22 @@ describe("evidence envelope preview", () => {
     expect(screen.getByRole("button", { name: /submit delivered evidence/i })).toBeDisabled();
 
     act(() => { vi.advanceTimersByTime(26 * 60 * 60 * 1_000); });
+    view.rerender(
+      <LocaleProvider hasExplicitLocale initialLocale="en">
+        <EvidenceDrawer
+          action="DELIVERED"
+          address={COURIER}
+          chainId="61999"
+          clock={testClock(1_893_549_600n)}
+          contractAddress="0x4444444444444444444444444444444444444444"
+          nonce="nonce-delivered-expiry"
+          now={new Date("2030-01-01T00:00:00.000Z")}
+          onSubmit={vi.fn()}
+          order={BASE_ORDER}
+          sourceUrl="https://evidence.foodguard.vn/delivered-expiry.json"
+        />
+      </LocaleProvider>,
+    );
 
     expect(screen.getByText(/envelope has expired/i)).toBeVisible();
     expect(screen.getByRole("button", { name: /submit delivered evidence/i })).toBeDisabled();
@@ -383,6 +480,7 @@ describe("permissionless consensus", () => {
     const retry = vi.fn();
     renderLocalized(
       <ConsensusPanel
+        clock={testClock(1_700_000_001n)}
         onResolve={retry}
         order={{ ...BASE_ORDER, review_deadline: "1700000000", state: "REVIEW_WINDOW" }}
         stage="CONSENSUS_FAILED"
@@ -402,6 +500,7 @@ describe("permissionless consensus", () => {
     vi.setSystemTime(new Date("2026-08-08T00:00:00.000Z"));
     renderLocalized(
       <ConsensusPanel
+        clock={testClock(1_893_456_000n)}
         onResolve={vi.fn()}
         order={{ ...BASE_ORDER, review_deadline: "1893461400", state: "REVIEW_WINDOW" }}
         stage={null}
@@ -417,6 +516,7 @@ describe("permissionless consensus", () => {
     vi.setSystemTime(new Date("2030-01-01T00:00:00.000Z"));
     renderLocalized(
       <ConsensusPanel
+        clock={testClock(1_893_456_000n)}
         onResolve={vi.fn()}
         order={{ ...BASE_ORDER, review_deadline: "1893456005", state: "REVIEW_WINDOW" }}
         stage={null}
@@ -433,6 +533,7 @@ describe("permissionless consensus", () => {
     const settle = vi.fn();
     renderLocalized(
       <ConsensusPanel
+        clock={testClock(1_700_000_001n)}
         onSettle={settle}
         order={{ ...MIXED_OUTCOME_ORDER, appeal_deadline: "1700000000", state: "RESOLVED" }}
         stage={null}
@@ -524,6 +625,183 @@ describe("order detail readback orchestration", () => {
     await expect(readAuthoritativeOrder("fg-mixed")).rejects.toThrow(/resolution evidence/i);
   });
 
+  it("rejects an empty digest list for a non-fail-closed resolution", async () => {
+    const resolvedWithoutDigests = {
+      ...MIXED_OUTCOME_ORDER,
+      resolution: { ...MIXED_OUTCOME_ORDER.resolution!, evidence_hashes: [] },
+    };
+    genlayerMocks.readFoodGuard.mockImplementation((method: string) => {
+      if (method === "get_order") return Promise.resolve(resolvedWithoutDigests);
+      if (method === "get_evidence_count") return Promise.resolve("0");
+      if (method === "get_resolution") return Promise.resolve(JSON.stringify(resolvedWithoutDigests.resolution));
+      if (method === "get_round") return Promise.resolve("1");
+      throw new Error(`unexpected method ${method}`);
+    });
+
+    await expect(readAuthoritativeOrder("fg-mixed")).rejects.toThrow(/resolution evidence/i);
+  });
+
+  it("accepts a fully fail-closed UNRESOLVED result with no cited digests", async () => {
+    const evidence = await storedPackedEvidence();
+    genlayerMocks.readFoodGuard.mockImplementation((method: string) => {
+      if (method === "get_order") return Promise.resolve(UNRESOLVED_ORDER);
+      if (method === "get_evidence_count") return Promise.resolve("1");
+      if (method === "get_evidence") return Promise.resolve(evidence);
+      if (method === "get_resolution") return Promise.resolve(JSON.stringify(UNRESOLVED_ORDER.resolution));
+      if (method === "get_round") return Promise.resolve("1");
+      throw new Error(`unexpected method ${method}`);
+    });
+
+    await expect(readAuthoritativeOrder("fg-mixed")).resolves.toMatchObject({
+      state: "EVIDENCE_CURE",
+      resolution: { delivery_outcome: "UNRESOLVED", evidence_hashes: [] },
+    });
+  });
+
+  it("reads a unanimously signed mutual settlement for unresolved outcomes", async () => {
+    const evidence = await storedPackedEvidence();
+    const mixedUnresolvedResolution: NonNullable<OrderDetailView["resolution"]> = {
+      delivery_outcome: "UNRESOLVED",
+      evidence_hashes: [evidence.sha256],
+      items: [
+        { facts: ["matched"], item_id: "item-1", outcome: "MATCHED" },
+        { facts: ["insufficient evidence"], item_id: "item-2", outcome: "UNRESOLVED" },
+      ],
+    };
+    const proposalDocument = {
+      chain_id: "61999",
+      contract_address: "0x4444444444444444444444444444444444444444",
+      delivery_allocation: { courier_wei: "30", customer_wei: "20" },
+      item_allocations: [
+        { customer_wei: "100", item_id: "item-1", restaurant_wei: "700" },
+        { customer_wei: "50", item_id: "item-2", restaurant_wei: "50" },
+      ],
+      order_id: "fg-mixed",
+      proposal_nonce: "mutual-readback",
+    };
+    const proposalJson = JSON.stringify(proposalDocument);
+    const digest = await sha256Text(proposalJson);
+    const settlementId = await sha256Text(JSON.stringify({
+      basis: `mutual:${digest}`,
+      chain_id: "61999",
+      contract_address: "0x4444444444444444444444444444444444444444",
+      courier_wei: "30",
+      customer_wei: "170",
+      order_id: "fg-mixed",
+      restaurant_wei: "750",
+      schema_version: "foodguard-settlement-v1",
+    }));
+    const settledUnresolved = {
+      ...UNRESOLVED_ORDER,
+      delivery_settled: true,
+      items_settled: true,
+      resolution: mixedUnresolvedResolution,
+      state: "SETTLED",
+    };
+    genlayerMocks.readFoodGuard.mockImplementation((method: string) => {
+      if (method === "get_order") return Promise.resolve(settledUnresolved);
+      if (method === "get_evidence_count") return Promise.resolve("1");
+      if (method === "get_evidence") return Promise.resolve(evidence);
+      if (method === "get_resolution") return Promise.resolve(JSON.stringify(mixedUnresolvedResolution));
+      if (method === "get_round") return Promise.resolve("2");
+      if (method === "get_order_settlement") return Promise.resolve({
+        courier_wei: "30",
+        customer_wei: "170",
+        restaurant_wei: "750",
+        settlement_id: settlementId,
+      });
+      if (method === "get_settlement_proposal") return Promise.resolve({
+        courier_signed: true,
+        courier_wei: 30,
+        customer_signed: true,
+        customer_wei: 170,
+        digest,
+        proposal_json: proposalJson,
+        proposal_nonce: "mutual-readback",
+        restaurant_signed: true,
+        restaurant_wei: 750,
+      });
+      throw new Error(`unexpected method ${method}`);
+    });
+
+    const result = await readAuthoritativeOrder("fg-mixed");
+    expect(result.mutual_settlement?.item_allocations[0]).toEqual({
+      customer_wei: "100",
+      item_id: "item-1",
+      restaurant_wei: "700",
+    });
+    renderLocalized(<ItemOutcomeTable order={result} />, "en");
+    expect(screen.getByText("Customer: 100 wei / Restaurant: 700 wei")).toBeVisible();
+    expect(screen.getByText("Customer: 20 wei / Courier: 30 wei")).toBeVisible();
+    expect(screen.queryByText("Locked in escrow")).not.toBeInTheDocument();
+  });
+
+  it("normalizes a configured contract address when verifying a cancellation settlement ID", async () => {
+    const mixedCaseContract = "0xAbCdEfAbCdEfAbCdEfAbCdEfAbCdEfAbCdEfAbCd";
+    vi.stubEnv("NEXT_PUBLIC_FOODGUARD_ADDRESS", mixedCaseContract);
+    const settlementId = await sha256Text(JSON.stringify({
+      basis: "unaccepted-cancellation",
+      chain_id: "61999",
+      contract_address: mixedCaseContract.toLowerCase(),
+      courier_wei: "0",
+      customer_wei: "950",
+      order_id: "fg-mixed",
+      restaurant_wei: "0",
+      schema_version: "foodguard-settlement-v1",
+    }));
+    const cancelledOrder = {
+      ...BASE_ORDER,
+      delivery_settled: true,
+      items_settled: true,
+      refund_emitted: true,
+      state: "CANCELLED_REFUNDED",
+    };
+    genlayerMocks.readFoodGuard.mockImplementation((method: string) => {
+      if (method === "get_order") return Promise.resolve(cancelledOrder);
+      if (method === "get_evidence_count") return Promise.resolve("0");
+      if (method === "get_round") return Promise.resolve("0");
+      if (method === "get_order_settlement") return Promise.resolve({
+        courier_wei: 0,
+        customer_wei: 950,
+        restaurant_wei: 0,
+        settlement_id: settlementId,
+      });
+      throw new Error(`unexpected method ${method}`);
+    });
+
+    await expect(readAuthoritativeOrder("fg-mixed")).resolves.toMatchObject({
+      settlement: { settlement_id: settlementId },
+      state: "CANCELLED_REFUNDED",
+    });
+  });
+
+  it("fails closed instead of rendering malformed mutual allocations", () => {
+    renderLocalized(
+      <ItemOutcomeTable
+        order={{
+          ...UNRESOLVED_ORDER,
+          mutual_settlement: {
+            courier_signed: true,
+            courier_wei: "30",
+            customer_signed: true,
+            customer_wei: "170",
+            delivery_allocation: { courier_wei: "30", customer_wei: "20" },
+            digest: "0x" + "ab".repeat(32),
+            item_allocations: [],
+            proposal_json: "{}",
+            proposal_nonce: "broken",
+            restaurant_signed: true,
+            restaurant_wei: "750",
+          },
+          state: "SETTLED",
+        }}
+      />,
+      "en",
+    );
+
+    expect(screen.getByText(/no well-formed authoritative resolution/i)).toBeVisible();
+  });
+
   it("rejects a stored evidence record without its exact canonical envelope", async () => {
     genlayerMocks.readFoodGuard.mockImplementation((method: string) => {
       if (method === "get_order") return Promise.resolve({ ...BASE_ORDER, state: "ACCEPTED" });
@@ -554,16 +832,18 @@ describe("order detail readback orchestration", () => {
   });
 
   it("rejects non-conserving settlement readback", async () => {
+    const evidence = await storedPackedEvidence();
     const settledOrder = {
       ...MIXED_OUTCOME_ORDER,
       delivery_settled: true,
       items_settled: true,
-      resolution: { ...MIXED_OUTCOME_ORDER.resolution!, evidence_hashes: [] },
+      resolution: { ...MIXED_OUTCOME_ORDER.resolution!, evidence_hashes: [evidence.sha256] },
       state: "SETTLED",
     };
     genlayerMocks.readFoodGuard.mockImplementation((method: string) => {
       if (method === "get_order") return Promise.resolve(settledOrder);
-      if (method === "get_evidence_count") return Promise.resolve("0");
+      if (method === "get_evidence_count") return Promise.resolve("1");
+      if (method === "get_evidence") return Promise.resolve(evidence);
       if (method === "get_resolution") return Promise.resolve(JSON.stringify(settledOrder.resolution));
       if (method === "get_round") return Promise.resolve("1");
       if (method === "get_order_settlement") return Promise.resolve({

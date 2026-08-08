@@ -47,6 +47,27 @@ export interface SettlementView {
   settlement_id: string;
 }
 
+export interface MutualSettlementView {
+  courier_signed: true;
+  courier_wei: string;
+  customer_signed: true;
+  customer_wei: string;
+  delivery_allocation: {
+    courier_wei: string;
+    customer_wei: string;
+  };
+  digest: string;
+  item_allocations: Array<{
+    customer_wei: string;
+    item_id: string;
+    restaurant_wei: string;
+  }>;
+  proposal_json: string;
+  proposal_nonce: string;
+  restaurant_signed: true;
+  restaurant_wei: string;
+}
+
 export interface OrderDetailView {
   acceptance_deadline?: bigint | number | string;
   appeal_deadline?: bigint | number | string;
@@ -59,6 +80,7 @@ export interface OrderDetailView {
   evidence?: EvidenceRecordView[];
   items_settled?: boolean;
   manifest_json: string;
+  mutual_settlement?: MutualSettlementView | null;
   order_id: string;
   packing_deadline?: bigint | number | string;
   restaurant: string;
@@ -146,14 +168,84 @@ function deliveryAllocation(outcome: DeliveryOutcome, copy: ReturnType<typeof us
   return copy.detail.customerRefund;
 }
 
+function mutualItemAllocation(
+  allocation: MutualSettlementView["item_allocations"][number],
+  copy: ReturnType<typeof useLocale>["copy"],
+): string {
+  return `${copy.roles.CUSTOMER}: ${allocation.customer_wei} wei / ${copy.roles.RESTAURANT}: ${allocation.restaurant_wei} wei`;
+}
+
+function mutualDeliveryAllocation(
+  allocation: MutualSettlementView["delivery_allocation"],
+  copy: ReturnType<typeof useLocale>["copy"],
+): string {
+  return `${copy.roles.CUSTOMER}: ${allocation.customer_wei} wei / ${copy.roles.COURIER}: ${allocation.courier_wei} wei`;
+}
+
+function validMutualSettlement(
+  settlement: MutualSettlementView | null | undefined,
+  items: OrderItem[],
+  deliveryFee: OrderDetailView["delivery_fee"],
+): settlement is MutualSettlementView {
+  if (!settlement) return false;
+  const unsigned = (value: unknown): value is string => (
+    typeof value === "string" && /^(0|[1-9][0-9]*)$/.test(value)
+  );
+  if (
+    settlement.customer_signed !== true ||
+    settlement.restaurant_signed !== true ||
+    settlement.courier_signed !== true ||
+    !/^0x[0-9a-f]{64}$/i.test(settlement.digest) ||
+    !settlement.proposal_json ||
+    !settlement.proposal_nonce ||
+    !unsigned(settlement.customer_wei) ||
+    !unsigned(settlement.restaurant_wei) ||
+    !unsigned(settlement.courier_wei) ||
+    !Array.isArray(settlement.item_allocations) ||
+    settlement.item_allocations.length !== items.length ||
+    !settlement.delivery_allocation ||
+    !unsigned(settlement.delivery_allocation.customer_wei) ||
+    !unsigned(settlement.delivery_allocation.courier_wei)
+  ) return false;
+  try {
+    let customer = BigInt(settlement.delivery_allocation.customer_wei);
+    let restaurant = 0n;
+    const validItems = settlement.item_allocations.every((allocation, index) => {
+      if (
+        allocation.item_id !== items[index].item_id ||
+        !unsigned(allocation.customer_wei) ||
+        !unsigned(allocation.restaurant_wei)
+      ) return false;
+      const itemValue = BigInt(items[index].price_wei) * BigInt(items[index].quantity);
+      if (BigInt(allocation.customer_wei) + BigInt(allocation.restaurant_wei) !== itemValue) return false;
+      customer += BigInt(allocation.customer_wei);
+      restaurant += BigInt(allocation.restaurant_wei);
+      return true;
+    });
+    return (
+      validItems &&
+      BigInt(settlement.delivery_allocation.customer_wei) + BigInt(settlement.delivery_allocation.courier_wei) === BigInt(String(deliveryFee)) &&
+      customer === BigInt(settlement.customer_wei) &&
+      restaurant === BigInt(settlement.restaurant_wei) &&
+      BigInt(settlement.delivery_allocation.courier_wei) === BigInt(settlement.courier_wei)
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function ItemOutcomeTable({ order }: { order: OrderDetailView }) {
   const { copy } = useLocale();
   const items = readManifestItems(order.manifest_json);
   const resolution = items && validResolution(order.resolution, items)
     ? order.resolution
     : null;
+  const mutualSettlement = items && validMutualSettlement(order.mutual_settlement, items, order.delivery_fee)
+    ? order.mutual_settlement
+    : null;
+  const malformedMutualSettlement = order.mutual_settlement != null && mutualSettlement === null;
 
-  if (!items || !resolution) {
+  if (!items || !resolution || malformedMutualSettlement) {
     return (
       <section className="order-card" aria-labelledby="outcomes-title">
         <h2 id="outcomes-title">{copy.detail.outcomes}</h2>
@@ -189,7 +281,9 @@ export function ItemOutcomeTable({ order }: { order: OrderDetailView }) {
                     <span>{copy.outcomes[result.outcome]}</span>
                     <code>{result.outcome}</code>
                   </td>
-                  <td>{itemAllocation(result.outcome, copy)}</td>
+                  <td>{mutualSettlement
+                    ? mutualItemAllocation(mutualSettlement.item_allocations[index], copy)
+                    : itemAllocation(result.outcome, copy)}</td>
                 </tr>
               );
             })}
@@ -200,7 +294,9 @@ export function ItemOutcomeTable({ order }: { order: OrderDetailView }) {
                 <span>{copy.detail.deliveryOutcomes[resolution.delivery_outcome]}</span>
                 <code>{resolution.delivery_outcome}</code>
               </td>
-              <td>{deliveryAllocation(resolution.delivery_outcome, copy)}</td>
+              <td>{mutualSettlement
+                ? mutualDeliveryAllocation(mutualSettlement.delivery_allocation, copy)
+                : deliveryAllocation(resolution.delivery_outcome, copy)}</td>
             </tr>
           </tbody>
         </table>
