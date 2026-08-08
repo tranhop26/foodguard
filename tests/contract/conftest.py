@@ -181,5 +181,9 @@ def created_order(food_guard, vm, customer, restaurant, courier):
     order = food_guard.get_order("fg-1")
     assert int(order.total_value) == 130
     assert addr(order.customer).lower() == addr(customer).lower()
+    # Direct mode validates payable value but does not credit the contract
+    # balance. Mirror that executor-side custody effect so solvency checks are
+    # exercised; individual insolvency tests can then override it with deal().
+    vm.deal(vm._contract_address, 130)
     vm.value = 0
     return food_guard

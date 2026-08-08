@@ -439,6 +439,8 @@ class Order:
     state: str
     restaurant_accepted: bool
     courier_accepted: bool
+    items_settled: bool
+    delivery_settled: bool
     refund_emitted: bool
 
 
@@ -487,6 +489,15 @@ class SettlementProposal:
     courier_signed: bool
 
 
+@allow_storage
+@dataclass
+class Settlement:
+    settlement_id: str
+    customer_wei: u256
+    restaurant_wei: u256
+    courier_wei: u256
+
+
 class FoodGuard(gl.Contract):
     orders: TreeMap[str, Order]
     item_json_by_key: TreeMap[str, str]
@@ -501,6 +512,7 @@ class FoodGuard(gl.Contract):
     submitted_cure_keys: TreeMap[str, bool]
     appeal_used_keys: TreeMap[str, bool]
     settlement_proposal_by_order: TreeMap[str, SettlementProposal]
+    settlement_by_order: TreeMap[str, Settlement]
     used_settlement_nonce_keys: TreeMap[str, bool]
     deployer: Address
     creation_paused: bool
@@ -973,6 +985,120 @@ class FoodGuard(gl.Contract):
         if int(self.total_inflows) != accounted:
             raise gl.vm.UserError("[EXPECTED] accounting conservation violated")
 
+    def _settlement_id(
+        self,
+        order_id: str,
+        basis: str,
+        customer_wei: int,
+        restaurant_wei: int,
+        courier_wei: int,
+    ) -> str:
+        preimage = self._canonical_json(
+            {
+                "basis": basis,
+                "chain_id": str(int(gl.message.chain_id)),
+                "contract_address": self._address_hex(
+                    gl.message.contract_address
+                ),
+                "courier_wei": str(courier_wei),
+                "customer_wei": str(customer_wei),
+                "order_id": order_id,
+                "restaurant_wei": str(restaurant_wei),
+                "schema_version": "foodguard-settlement-v1",
+            }
+        )
+        return "0x" + hashlib.sha256(preimage.encode("utf-8")).hexdigest()
+
+    def _emit_eoa_transfer(self, recipient: Address, amount: u256) -> None:
+        if amount > u256(0):
+            gl.get_contract_at(recipient).emit_transfer(
+                value=amount,
+                on="finalized",
+            )
+
+    def _allocate_once(
+        self,
+        order_id: str,
+        order: Order,
+        basis: str,
+        customer_wei: int,
+        restaurant_wei: int,
+        courier_wei: int,
+        terminal_state: str,
+    ) -> str:
+        if order_id in self.settlement_by_order:
+            return self.settlement_by_order[order_id].settlement_id
+
+        allocation_total = customer_wei + restaurant_wei + courier_wei
+        if (
+            customer_wei < 0
+            or restaurant_wei < 0
+            or courier_wei < 0
+            or allocation_total != int(order.total_value)
+        ):
+            raise gl.vm.UserError(
+                "[EXPECTED] allocation must conserve order value"
+            )
+        if order.items_settled or order.delivery_settled:
+            raise gl.vm.UserError("[EXPECTED] order reserves already settled")
+
+        self._assert_conservation()
+        if (
+            self.reserved_items < order.subtotal
+            or self.reserved_delivery < order.delivery_fee
+        ):
+            raise gl.vm.UserError("[EXPECTED] accounting conservation violated")
+        if self.balance < order.total_value:
+            raise gl.vm.UserError("[EXPECTED] insufficient contract balance")
+
+        post_accounted = (
+            int(self.reserved_items)
+            - int(order.subtotal)
+            + int(self.reserved_delivery)
+            - int(order.delivery_fee)
+            + int(self.restaurant_payouts_emitted)
+            + restaurant_wei
+            + int(self.courier_payouts_emitted)
+            + courier_wei
+            + int(self.customer_refunds_emitted)
+            + customer_wei
+        )
+        if int(self.total_inflows) != post_accounted:
+            raise gl.vm.UserError("[EXPECTED] accounting conservation violated")
+
+        settlement_id = self._settlement_id(
+            order_id,
+            basis,
+            customer_wei,
+            restaurant_wei,
+            courier_wei,
+        )
+
+        self.reserved_items -= order.subtotal
+        self.reserved_delivery -= order.delivery_fee
+        self.restaurant_payouts_emitted += u256(restaurant_wei)
+        self.courier_payouts_emitted += u256(courier_wei)
+        self.customer_refunds_emitted += u256(customer_wei)
+        order.items_settled = True
+        order.delivery_settled = True
+        order.state = terminal_state
+        if terminal_state == "CANCELLED_REFUNDED":
+            order.restaurant_accepted = False
+            order.courier_accepted = False
+            order.refund_emitted = True
+        self.orders[order_id] = order
+        self.settlement_by_order[order_id] = Settlement(
+            settlement_id=settlement_id,
+            customer_wei=u256(customer_wei),
+            restaurant_wei=u256(restaurant_wei),
+            courier_wei=u256(courier_wei),
+        )
+
+        self._emit_eoa_transfer(order.customer, u256(customer_wei))
+        self._emit_eoa_transfer(order.restaurant, u256(restaurant_wei))
+        self._emit_eoa_transfer(order.courier, u256(courier_wei))
+        return settlement_id
+
     @gl.public.write.payable
     def create_order(
         self,
@@ -1028,6 +1154,8 @@ class FoodGuard(gl.Contract):
             state="FUNDED",
             restaurant_accepted=False,
             courier_accepted=False,
+            items_settled=False,
+            delivery_settled=False,
             refund_emitted=False,
         )
         for item in manifest["items"]:
@@ -1279,6 +1407,83 @@ class FoodGuard(gl.Contract):
         return resolution_json
 
     @gl.public.write
+    def execute_settlement(self, order_id: str) -> str:
+        if order_id not in self.orders:
+            raise gl.vm.UserError("[EXPECTED] order not found")
+        if order_id in self.settlement_by_order:
+            return self.settlement_by_order[order_id].settlement_id
+
+        order = self.orders[order_id]
+        if order.state != "RESOLVED":
+            raise gl.vm.UserError("[EXPECTED] invalid settlement transition")
+        if self._now() < int(order.appeal_deadline):
+            raise gl.vm.UserError("[EXPECTED] appeal deadline not reached")
+        if order_id not in self.resolution_json_by_order:
+            raise gl.vm.UserError("[EXPECTED] resolution not found")
+
+        try:
+            resolution = json.loads(self.resolution_json_by_order[order_id])
+            manifest = json.loads(order.manifest_json)
+        except Exception:
+            raise gl.vm.UserError("[EXPECTED] invalid final decision")
+        if (
+            type(resolution) is not dict
+            or set(resolution.keys())
+            != {"delivery_outcome", "evidence_hashes", "items"}
+            or type(resolution["items"]) is not list
+            or len(resolution["items"]) != len(manifest["items"])
+        ):
+            raise gl.vm.UserError("[EXPECTED] invalid final decision")
+
+        customer_wei = 0
+        restaurant_wei = 0
+        for manifest_item, decision in zip(
+            manifest["items"], resolution["items"]
+        ):
+            if (
+                type(decision) is not dict
+                or decision.get("item_id") != manifest_item["item_id"]
+            ):
+                raise gl.vm.UserError("[EXPECTED] invalid final decision")
+            item_value = (
+                int(manifest_item["price_wei"])
+                * manifest_item["quantity"]
+            )
+            outcome = decision.get("outcome")
+            if outcome == "MATCHED":
+                restaurant_wei += item_value
+            elif outcome in ("MISSING", "MISMATCHED", "DELIVERY_FAILED"):
+                customer_wei += item_value
+            elif outcome == "UNRESOLVED":
+                raise gl.vm.UserError("[EXPECTED] final decision unresolved")
+            else:
+                raise gl.vm.UserError("[EXPECTED] invalid final decision")
+
+        delivery_outcome = resolution["delivery_outcome"]
+        if delivery_outcome == "DELIVERED":
+            courier_wei = int(order.delivery_fee)
+        elif delivery_outcome == "DELIVERY_FAILED":
+            courier_wei = 0
+            customer_wei += int(order.delivery_fee)
+        elif delivery_outcome == "UNRESOLVED":
+            raise gl.vm.UserError("[EXPECTED] final decision unresolved")
+        else:
+            raise gl.vm.UserError("[EXPECTED] invalid final decision")
+
+        resolution_digest = "0x" + hashlib.sha256(
+            self.resolution_json_by_order[order_id].encode("utf-8")
+        ).hexdigest()
+        return self._allocate_once(
+            order_id,
+            order,
+            "resolution:" + resolution_digest,
+            customer_wei,
+            restaurant_wei,
+            courier_wei,
+            "SETTLED",
+        )
+
+    @gl.public.write
     def propose_mutual_settlement(
         self,
         order_id: str,
@@ -1334,37 +1539,16 @@ class FoodGuard(gl.Contract):
         order_id: str,
         order: Order,
         proposal: SettlementProposal,
-    ) -> None:
-        if (
-            self.reserved_items < order.subtotal
-            or self.reserved_delivery < order.delivery_fee
-        ):
-            raise gl.vm.UserError("[EXPECTED] accounting conservation violated")
-
-        self.reserved_items -= order.subtotal
-        self.reserved_delivery -= order.delivery_fee
-        self.restaurant_payouts_emitted += proposal.restaurant_wei
-        self.courier_payouts_emitted += proposal.courier_wei
-        self.customer_refunds_emitted += proposal.customer_wei
-        order.state = "SETTLED"
-        self.orders[order_id] = order
-        self._assert_conservation()
-
-        if proposal.customer_wei > u256(0):
-            gl.get_contract_at(order.customer).emit_transfer(
-                value=proposal.customer_wei,
-                on="finalized",
-            )
-        if proposal.restaurant_wei > u256(0):
-            gl.get_contract_at(order.restaurant).emit_transfer(
-                value=proposal.restaurant_wei,
-                on="finalized",
-            )
-        if proposal.courier_wei > u256(0):
-            gl.get_contract_at(order.courier).emit_transfer(
-                value=proposal.courier_wei,
-                on="finalized",
-            )
+    ) -> str:
+        return self._allocate_once(
+            order_id,
+            order,
+            "mutual:" + proposal.digest,
+            int(proposal.customer_wei),
+            int(proposal.restaurant_wei),
+            int(proposal.courier_wei),
+            "SETTLED",
+        )
 
     @gl.public.write
     def sign_mutual_settlement(self, order_id: str, digest: str) -> None:
@@ -1433,25 +1617,17 @@ class FoodGuard(gl.Contract):
         elif order.restaurant_accepted and order.courier_accepted:
             raise gl.vm.UserError("[EXPECTED] order cannot be cancelled")
 
-        if (
-            order.refund_emitted
-            or self.reserved_items < order.subtotal
-            or self.reserved_delivery < order.delivery_fee
-        ):
+        if order.refund_emitted:
             raise gl.vm.UserError("[EXPECTED] accounting conservation violated")
 
-        self.reserved_items -= order.subtotal
-        self.reserved_delivery -= order.delivery_fee
-        self.customer_refunds_emitted += order.total_value
-        order.state = "CANCELLED_REFUNDED"
-        order.restaurant_accepted = False
-        order.courier_accepted = False
-        order.refund_emitted = True
-        self.orders[order_id] = order
-        self._assert_conservation()
-        gl.get_contract_at(order.customer).emit_transfer(
-            value=order.total_value,
-            on="finalized",
+        self._allocate_once(
+            order_id,
+            order,
+            "unaccepted-cancellation",
+            int(order.total_value),
+            0,
+            0,
+            "CANCELLED_REFUNDED",
         )
 
     @gl.public.view
@@ -1499,6 +1675,14 @@ class FoodGuard(gl.Contract):
         if order_id not in self.settlement_proposal_by_order:
             raise gl.vm.UserError("[EXPECTED] settlement proposal not found")
         return self.settlement_proposal_by_order[order_id]
+
+    @gl.public.view
+    def get_order_settlement(self, order_id: str) -> Settlement:
+        if order_id not in self.orders:
+            raise gl.vm.UserError("[EXPECTED] order not found")
+        if order_id not in self.settlement_by_order:
+            raise gl.vm.UserError("[EXPECTED] settlement not found")
+        return self.settlement_by_order[order_id]
 
     @gl.public.view
     def get_accounting(self) -> Accounting:
