@@ -38,6 +38,21 @@ async function requestConnectedAddress(
   return address;
 }
 
+async function requireStudioNetWallet(
+  provider: Eip1193WalletProvider,
+): Promise<void> {
+  const expectedChainId = `0x${FOODGUARD_CHAIN.id.toString(16)}`;
+  const chainId = await provider.request({ method: "eth_chainId" });
+  if (
+    typeof chainId !== "string" ||
+    chainId.toLowerCase() !== expectedChainId
+  ) {
+    throw new Error(
+      `Wallet network mismatch: switch to GenLayer StudioNet (chain ID ${FOODGUARD_CHAIN.id}) before writing`,
+    );
+  }
+}
+
 export function getFoodGuardReadClient() {
   return createClient({ chain: FOODGUARD_CHAIN });
 }
@@ -65,6 +80,7 @@ export async function writeFoodGuard(
   const provider = getWalletProvider();
 
   onUpdate?.("WALLET_CONFIRMATION");
+  await requireStudioNetWallet(provider);
   const account = await requestConnectedAddress(provider);
   const client = createClient({
     chain: FOODGUARD_CHAIN,

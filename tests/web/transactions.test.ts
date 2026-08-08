@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { abi } from "genlayer-js";
 import { studionet } from "genlayer-js/chains";
 import {
   ExecutionResult,
@@ -16,9 +17,10 @@ const sdk = vi.hoisted(() => ({
   writeContract: vi.fn(),
 }));
 
-vi.mock("genlayer-js", () => ({
-  createClient: sdk.createClient,
-}));
+vi.mock("genlayer-js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("genlayer-js")>();
+  return { ...actual, createClient: sdk.createClient };
+});
 
 import {
   getFoodGuardConfiguration,
@@ -85,7 +87,7 @@ describe("FoodGuard StudioNet configuration", () => {
 
 describe("FoodGuard StudioNet client", () => {
   const walletProvider = {
-    request: vi.fn().mockResolvedValue([ADDRESS]),
+    request: vi.fn(),
   };
 
   beforeEach(() => {
@@ -94,7 +96,11 @@ describe("FoodGuard StudioNet client", () => {
     sdk.getTransaction.mockReset();
     sdk.readContract.mockReset();
     sdk.writeContract.mockReset();
-    walletProvider.request.mockClear();
+    walletProvider.request.mockReset();
+    walletProvider.request.mockImplementation(
+      async ({ method }: { method: string }) =>
+        method === "eth_chainId" ? `0x${studionet.id.toString(16)}` : [ADDRESS],
+    );
     sdk.createClient.mockReturnValue({
       getTransaction: sdk.getTransaction,
       readContract: sdk.readContract,
@@ -170,6 +176,23 @@ describe("FoodGuard StudioNet client", () => {
     expect(stages).toEqual(["WALLET_CONFIRMATION"]);
   });
 
+  it("blocks writes when the connected wallet is not on StudioNet", async () => {
+    const stages: TxStage[] = [];
+    walletProvider.request.mockImplementation(
+      async ({ method }: { method: string }) =>
+        method === "eth_chainId" ? "0x1" : [ADDRESS],
+    );
+
+    await expect(
+      writeFoodGuard("accept_restaurant", ["fg-1"], 0n, (stage) =>
+        stages.push(stage),
+      ),
+    ).rejects.toThrow("StudioNet");
+    expect(walletProvider.request).toHaveBeenCalledWith({ method: "eth_chainId" });
+    expect(sdk.writeContract).not.toHaveBeenCalled();
+    expect(stages).toEqual(["WALLET_CONFIRMATION"]);
+  });
+
   it("disables writes before deployment without asking the wallet", async () => {
     vi.stubEnv("NEXT_PUBLIC_FOODGUARD_ADDRESS", "");
 
@@ -236,9 +259,15 @@ describe("FoodGuard StudioNet client", () => {
     ]);
   });
 
-  it("recovers the order id from a StudioNet readable calldata receipt", async () => {
+  it("recovers the order id from real StudioNet calldata bytes", async () => {
     const stages: TxStage[] = [];
     const order = { order_id: "fg-1", state: "SETTLED" };
+    const calldata = abi.calldata.encode({
+      method: "execute_settlement",
+      args: ["fg-1"],
+    });
+    const readable = abi.calldata.toString(abi.calldata.decode(calldata));
+    expect(() => JSON.parse(readable)).toThrow();
     sdk.readContract.mockResolvedValue(order);
     sdk.getTransaction.mockResolvedValue({
       hash: HASH,
@@ -247,8 +276,8 @@ describe("FoodGuard StudioNet client", () => {
       data: {
         calldata: {
           base64: "fixture",
-          raw: [],
-          readable: '{"method":"execute_settlement","args":["fg-1"]}',
+          raw: Array.from(calldata),
+          readable,
         },
       },
     } satisfies GenLayerTransaction);

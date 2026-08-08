@@ -1,3 +1,4 @@
+import { abi } from "genlayer-js";
 import {
   ExecutionResult,
   TransactionStatus,
@@ -64,14 +65,26 @@ function getMapOrObjectValue(value: unknown, key: string): unknown {
   return undefined;
 }
 
-function orderIdFromReadableCalldata(value: unknown): string | undefined {
-  if (typeof value !== "string") {
+function orderIdFromCalldata(value: unknown): string | undefined {
+  const args = getMapOrObjectValue(value, "args");
+  return Array.isArray(args) && typeof args[0] === "string" ? args[0] : undefined;
+}
+
+function orderIdFromRawCalldata(value: unknown): string | undefined {
+  if (
+    !Array.isArray(value) ||
+    !value.every(
+      (byte) =>
+        typeof byte === "number" &&
+        Number.isInteger(byte) &&
+        byte >= 0 &&
+        byte <= 255,
+    )
+  ) {
     return undefined;
   }
   try {
-    const decoded: unknown = JSON.parse(value);
-    const args = getMapOrObjectValue(decoded, "args");
-    return Array.isArray(args) && typeof args[0] === "string" ? args[0] : undefined;
+    return orderIdFromCalldata(abi.calldata.decode(Uint8Array.from(value)));
   } catch {
     return undefined;
   }
@@ -82,15 +95,13 @@ function orderIdFromTransaction(transaction: GenLayerTransaction): string | unde
     transaction.txDataDecoded && "callData" in transaction.txDataDecoded
       ? transaction.txDataDecoded.callData
       : undefined;
-  const args = getMapOrObjectValue(callData, "args");
-  if (Array.isArray(args) && typeof args[0] === "string") {
-    return args[0];
+  const decodedOrderId = orderIdFromCalldata(callData);
+  if (decodedOrderId) {
+    return decodedOrderId;
   }
 
   const studioData = getMapOrObjectValue(transaction.data, "calldata");
-  return orderIdFromReadableCalldata(
-    getMapOrObjectValue(studioData, "readable"),
-  );
+  return orderIdFromRawCalldata(getMapOrObjectValue(studioData, "raw"));
 }
 
 function wait(ms: number): Promise<void> {
