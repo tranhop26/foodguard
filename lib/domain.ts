@@ -45,6 +45,18 @@ export interface OrderItem {
   conditions: string[];
 }
 
+export interface Restaurant {
+  restaurant_id: string;
+  name: string;
+  description: string;
+  neighborhood: string;
+  categories: string[];
+  delivery_time_minutes: [number, number];
+  image_src: string;
+  image_alt: string;
+  featured_item: OrderItem;
+}
+
 export interface EvidenceDocument {
   schema_version: "foodguard-evidence/1";
   order_id: string;

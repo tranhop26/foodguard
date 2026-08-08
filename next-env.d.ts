@@ -1,25 +1,7 @@
-declare global {
-  interface URLPatternInit {
-    baseURL?: string;
-    username?: string;
-    password?: string;
-    protocol?: string;
-    hostname?: string;
-    port?: string;
-    pathname?: string;
-    search?: string;
-    hash?: string;
-  }
+/// <reference types="next" />
+/// <reference types="next/image-types/global" />
+import "./.next/types/routes.d.ts";
+import "./.next/types/root-params.d.ts";
 
-  type URLPatternInput = URLPatternInit | string;
-
-  interface URLPatternOptions {
-    ignoreCase?: boolean;
-  }
-
-  class URLPattern {
-    constructor(input?: URLPatternInput, baseURL?: string | URL, options?: URLPatternOptions);
-  }
-}
-
-export {};
+// NOTE: This file should not be edited
+// see https://nextjs.org/docs/app/api-reference/config/typescript for more information.
