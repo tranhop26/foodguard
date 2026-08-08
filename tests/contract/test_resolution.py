@@ -497,15 +497,17 @@ def test_validator_accepts_explanation_variation_when_stable_decisions_match(
     assert vm.run_validator() is True
 
 
-def test_allowed_claim_facts_cannot_enter_the_prompt_or_select_an_outcome(
+def test_allowed_claim_facts_cannot_enter_leader_or_validator_prompt_or_select_outcome(
     resolution_order,
     vm,
     outsider,
 ):
-    prompts = []
+    leader_prompts = []
+    validator_prompts = []
+    sources = _committed_sources(resolution_order)
 
-    def answer_resolution(data):
-        prompts.append(data["prompt"])
+    def answer_leader(data):
+        leader_prompts.append(data["prompt"])
         selected = (
             MATCH_ALL_RESULT
             if CLAIM_PROMPT_ATTACK in data["prompt"]
@@ -513,29 +515,48 @@ def test_allowed_claim_facts_cannot_enter_the_prompt_or_select_an_outcome(
         )
         return {"ok": selected}
 
-    _mock_sources(vm, _committed_sources(resolution_order))
-    vm._live_llm_handler = answer_resolution
+    def answer_validator(data):
+        validator_prompts.append(data["prompt"])
+        selected = (
+            MATCH_ALL_RESULT
+            if CLAIM_PROMPT_ATTACK in data["prompt"]
+            else MIXED_RESULT
+        )
+        return {"ok": selected}
+
+    _mock_sources(vm, sources)
+    vm._live_llm_handler = answer_leader
     vm.sender = outsider
 
     resolution_order.request_resolution("fg-1")
 
-    assert len(prompts) == 1
-    assert CLAIM_PROMPT_ATTACK not in prompts[0]
+    vm.clear_mocks()
+    _mock_sources(vm, sources)
+    vm._live_llm_handler = answer_validator
+
+    assert vm.run_validator() is True
+    assert len(leader_prompts) == 1
+    assert len(validator_prompts) == 1
+    assert validator_prompts == leader_prompts
+    assert CLAIM_PROMPT_ATTACK not in leader_prompts[0]
+    assert CLAIM_PROMPT_ATTACK not in validator_prompts[0]
     assert _stable_decisions(_resolution(resolution_order)) == (
         [("item|1", "MATCHED"), ("item-2", "MISSING")],
         "DELIVERED",
     )
 
 
-def test_manifest_prose_cannot_enter_the_prompt_or_select_an_outcome(
+def test_manifest_prose_cannot_enter_leader_or_validator_prompt_or_select_outcome(
     manifest_injection_order,
     vm,
     outsider,
 ):
-    prompts = []
+    leader_prompts = []
+    validator_prompts = []
+    sources = _committed_sources(manifest_injection_order)
 
-    def answer_resolution(data):
-        prompts.append(data["prompt"])
+    def answer_leader(data):
+        leader_prompts.append(data["prompt"])
         selected = (
             MATCH_ALL_RESULT
             if MANIFEST_PROMPT_ATTACK in data["prompt"]
@@ -543,14 +564,31 @@ def test_manifest_prose_cannot_enter_the_prompt_or_select_an_outcome(
         )
         return {"ok": selected}
 
-    _mock_sources(vm, _committed_sources(manifest_injection_order))
-    vm._live_llm_handler = answer_resolution
+    def answer_validator(data):
+        validator_prompts.append(data["prompt"])
+        selected = (
+            MATCH_ALL_RESULT
+            if MANIFEST_PROMPT_ATTACK in data["prompt"]
+            else MIXED_RESULT
+        )
+        return {"ok": selected}
+
+    _mock_sources(vm, sources)
+    vm._live_llm_handler = answer_leader
     vm.sender = outsider
 
     manifest_injection_order.request_resolution("fg-1")
 
-    assert len(prompts) == 1
-    assert MANIFEST_PROMPT_ATTACK not in prompts[0]
+    vm.clear_mocks()
+    _mock_sources(vm, sources)
+    vm._live_llm_handler = answer_validator
+
+    assert vm.run_validator() is True
+    assert len(leader_prompts) == 1
+    assert len(validator_prompts) == 1
+    assert validator_prompts == leader_prompts
+    assert MANIFEST_PROMPT_ATTACK not in leader_prompts[0]
+    assert MANIFEST_PROMPT_ATTACK not in validator_prompts[0]
     assert _stable_decisions(_resolution(manifest_injection_order)) == (
         [("item|1", "MATCHED"), ("item-2", "MISSING")],
         "DELIVERED",
