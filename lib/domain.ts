@@ -49,6 +49,7 @@ export interface EvidenceDocument {
   schema_version: "foodguard-evidence/1";
   order_id: string;
   item_id?: string;
+  subject: string;
   action: EvidenceAction;
   actor_wallet: string;
   issuer_id: string;
