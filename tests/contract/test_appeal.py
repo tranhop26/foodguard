@@ -236,6 +236,96 @@ def test_affected_actor_can_appeal_once_and_prior_decision_is_preserved(
         )
 
 
+def test_each_affected_role_can_append_one_appeal_without_replacing_the_decision(
+    resolved_order,
+    vm,
+    customer,
+    restaurant,
+    courier,
+):
+    first_resolution = resolved_order.get_resolution("fg-1")
+    before_count = int(resolved_order.get_evidence_count("fg-1"))
+    appeals = [
+        (customer, "item-2", "customer-appeal-1"),
+        (restaurant, "item-2", "restaurant-appeal-1"),
+        (courier, None, "courier-appeal-1"),
+    ]
+
+    for appeal_index, (actor, item_id, nonce) in enumerate(appeals, start=1):
+        vm.sender = actor
+        resolved_order.appeal(
+            "fg-1",
+            evidence_json(
+                vm,
+                actor,
+                "APPEAL",
+                item_id=item_id,
+                nonce=nonce,
+            ),
+        )
+
+        assert resolved_order.get_order("fg-1").state == "APPEALED"
+        assert resolved_order.get_resolution("fg-1") == first_resolution
+        assert int(resolved_order.get_evidence_count("fg-1")) == (
+            before_count + appeal_index
+        )
+
+    for actor, item_id, nonce in appeals:
+        vm.sender = actor
+        with vm.expect_revert("appeal already used"):
+            resolved_order.appeal(
+                "fg-1",
+                evidence_json(
+                    vm,
+                    actor,
+                    "APPEAL",
+                    item_id=item_id,
+                    nonce=nonce + "-replay",
+                ),
+            )
+
+    stored_appeals = [
+        resolved_order.get_evidence("fg-1", evidence_index)
+        for evidence_index in range(before_count, before_count + len(appeals))
+    ]
+    assert [evidence.action for evidence in stored_appeals] == [
+        "APPEAL",
+        "APPEAL",
+        "APPEAL",
+    ]
+    assert [evidence.nonce for evidence in stored_appeals] == [
+        nonce for _actor, _item_id, nonce in appeals
+    ]
+
+
+def test_unaffected_addresses_cannot_appeal(
+    resolved_order,
+    vm,
+    deployer,
+    outsider,
+):
+    before_order = resolved_order.get_order("fg-1")
+    before_count = resolved_order.get_evidence_count("fg-1")
+    before_resolution = resolved_order.get_resolution("fg-1")
+
+    for label, actor in (("deployer", deployer), ("outsider", outsider)):
+        vm.sender = actor
+        with vm.expect_revert("affected actor required"):
+            resolved_order.appeal(
+                "fg-1",
+                evidence_json(
+                    vm,
+                    actor,
+                    "APPEAL",
+                    nonce=label + "-appeal",
+                ),
+            )
+
+    assert resolved_order.get_order("fg-1") == before_order
+    assert resolved_order.get_evidence_count("fg-1") == before_count
+    assert resolved_order.get_resolution("fg-1") == before_resolution
+
+
 def test_appeal_rejects_outsider_and_resolution_waits_for_appeal_deadline(
     resolved_order,
     vm,

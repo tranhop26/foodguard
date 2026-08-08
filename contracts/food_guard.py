@@ -499,7 +499,7 @@ class FoodGuard(gl.Contract):
     resolution_round_by_order: TreeMap[str, u256]
     unresolved_count_by_order: TreeMap[str, u256]
     submitted_cure_keys: TreeMap[str, bool]
-    appeal_used_by_order: TreeMap[str, bool]
+    appeal_used_keys: TreeMap[str, bool]
     settlement_proposal_by_order: TreeMap[str, SettlementProposal]
     used_settlement_nonce_keys: TreeMap[str, bool]
     deployer: Address
@@ -1154,18 +1154,20 @@ class FoodGuard(gl.Contract):
     def appeal(self, order_id: str, envelope_json: str) -> None:
         if order_id not in self.orders:
             raise gl.vm.UserError("[EXPECTED] order not found")
-        if order_id in self.appeal_used_by_order:
-            raise gl.vm.UserError("[EXPECTED] appeal already used")
         order = self.orders[order_id]
-        if order.state != "RESOLVED":
+        if order.state not in ("RESOLVED", "APPEALED"):
             raise gl.vm.UserError("[EXPECTED] invalid appeal transition")
         if self._now() >= int(order.appeal_deadline):
             raise gl.vm.UserError("[EXPECTED] appeal deadline passed")
         actor = gl.message.sender_address
-        if not self._participant_role(order, actor):
+        role = self._participant_role(order, actor)
+        if not role:
             raise gl.vm.UserError("[EXPECTED] affected actor required")
+        appeal_key = self._canonical_json([order_id, role])
+        if appeal_key in self.appeal_used_keys:
+            raise gl.vm.UserError("[EXPECTED] appeal already used")
         self._append_evidence(order_id, "APPEAL", envelope_json, actor)
-        self.appeal_used_by_order[order_id] = True
+        self.appeal_used_keys[appeal_key] = True
         order.state = "APPEALED"
         self.orders[order_id] = order
 
