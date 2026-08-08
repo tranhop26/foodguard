@@ -1,0 +1,65 @@
+export type OrderState =
+  | "FUNDED"
+  | "PARTIALLY_ACCEPTED"
+  | "ACCEPTED"
+  | "READY_FOR_PICKUP"
+  | "IN_TRANSIT"
+  | "REVIEW_WINDOW"
+  | "RESOLVING"
+  | "EVIDENCE_CURE"
+  | "RESOLVED"
+  | "APPEALED"
+  | "ESCALATED"
+  | "SETTLED"
+  | "CANCELLED_REFUNDED";
+
+export type ItemOutcome =
+  | "MATCHED"
+  | "MISSING"
+  | "MISMATCHED"
+  | "DELIVERY_FAILED"
+  | "UNRESOLVED";
+
+export type DeliveryOutcome = "DELIVERED" | "DELIVERY_FAILED" | "UNRESOLVED";
+
+export type EvidenceAction =
+  | "ORDER_MANIFEST"
+  | "PACKED"
+  | "PICKED_UP"
+  | "DELIVERED"
+  | "CUSTOMER_CLAIM"
+  | "CURE"
+  | "APPEAL";
+
+export type HexDigest = `0x${string}`;
+
+export type JsonPrimitive = boolean | null | number | string;
+export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+
+export interface OrderItem {
+  item_id: string;
+  name: string;
+  quantity: number;
+  permitted_substitutions: string[];
+  price_wei: string;
+  conditions: string[];
+}
+
+export interface EvidenceDocument {
+  schema_version: "foodguard-evidence/1";
+  order_id: string;
+  item_id?: string;
+  action: EvidenceAction;
+  actor_wallet: string;
+  issuer_id: string;
+  source_url: string;
+  sha256: HexDigest;
+  observed_at: string;
+  submitted_at: string;
+  expires_at: string;
+  chain_id: string;
+  contract_address: string;
+  nonce: string;
+  items?: OrderItem[];
+  [key: string]: JsonValue | OrderItem[] | undefined;
+}
