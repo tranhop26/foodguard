@@ -2,7 +2,10 @@ import catalogData from "../../public/catalog/catalog-v1.json";
 import { OrderBuilder, type OrderBuilderConfiguration } from "../../components/food/OrderBuilder";
 import { LocaleProvider, type Locale, WorkflowShell } from "../../lib/i18n";
 import type { OrderItem } from "../../lib/domain";
-import { getFoodGuardConfiguration } from "../../lib/genlayer/config";
+import {
+  getFoodGuardConfiguration,
+  getFoodGuardPublicAppOriginConfiguration,
+} from "../../lib/genlayer/config";
 
 type PageSearchParams = Promise<{ locale?: string | string[] }>;
 
@@ -35,7 +38,11 @@ export default async function CreateOrderPage({
   return (
     <LocaleProvider hasExplicitLocale={Boolean(rawLocale)} initialLocale={locale}>
       <WorkflowShell page="create">
-        <OrderBuilder configuration={configurationView()} item={item} />
+        <OrderBuilder
+          configuration={configurationView()}
+          item={item}
+          publicAppConfiguration={getFoodGuardPublicAppOriginConfiguration()}
+        />
       </WorkflowShell>
     </LocaleProvider>
   );

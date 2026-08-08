@@ -6,7 +6,11 @@ import { isAddress, zeroAddress } from "viem";
 import type { EvidenceDocument, HexDigest, OrderItem } from "../../lib/domain";
 import { canonicalizeEvidence, hashEvidence } from "../../lib/evidence";
 import { writeFoodGuard } from "../../lib/genlayer/client";
-import { getFoodGuardConfiguration } from "../../lib/genlayer/config";
+import {
+  getFoodGuardConfiguration,
+  getFoodGuardPublicAppOriginConfiguration,
+  type FoodGuardPublicAppOriginConfiguration,
+} from "../../lib/genlayer/config";
 import { trackTransaction, type TxStage } from "../../lib/genlayer/transactions";
 import { useLocale } from "../../lib/i18n";
 import { RoleConsole, type FoodGuardOrderView } from "../order/RoleConsole";
@@ -33,7 +37,7 @@ interface OrderBuilderProps {
   initialActors?: OrderActors;
   item?: OrderItem;
   orderId?: string;
-  sourceUrl?: string;
+  publicAppConfiguration?: FoodGuardPublicAppOriginConfiguration;
 }
 
 const DEMO_ITEM: OrderItem = {
@@ -158,24 +162,13 @@ function sameAddress(left: string | null, right: string): boolean {
   return Boolean(left && left.toLowerCase() === right.toLowerCase());
 }
 
-function manifestSourceUrl(configuredUrl?: string): string {
-  const origin = configuredUrl ?? process.env.NEXT_PUBLIC_FOODGUARD_APP_ORIGIN;
-  try {
-    const url = new URL("/create", origin || "https://foodguard.example");
-    if (url.protocol === "https:") return url.toString();
-  } catch {
-    // Fall through to a deterministic preview-only URL.
-  }
-  return "https://foodguard.example/create";
-}
-
 export function OrderBuilder({
   configuration = configuredContract(),
   deliveryFeeWei: initialDeliveryFee = "50000000000000000",
   initialActors = ["", "", ""],
   item = DEMO_ITEM,
   orderId: initialOrderId = "fg-demo-order",
-  sourceUrl,
+  publicAppConfiguration = getFoodGuardPublicAppOriginConfiguration(),
 }: OrderBuilderProps) {
   const { copy } = useLocale();
   const [actors, setActors] = useState<OrderActors>(initialActors);
@@ -197,7 +190,9 @@ export function OrderBuilder({
     () => deadlineBaseMs === null ? "CLOCK_REQUIRED" : canonicalDeadlines(deadlineBaseMs),
     [deadlineBaseMs],
   );
-  const evidenceSourceUrl = useMemo(() => manifestSourceUrl(sourceUrl), [sourceUrl]);
+  const evidenceSourceUrl = publicAppConfiguration.status === "READY"
+    ? publicAppConfiguration.createOrderSourceUrl
+    : "PUBLIC_APP_ORIGIN_REQUIRED";
   const amounts = useMemo(() => {
     try {
       return calculateOrderValueWei(items, deliveryFeeWei);
@@ -281,6 +276,7 @@ export function OrderBuilder({
   const customerConnected = sameAddress(wallet.address, actors[0]);
   const canCreate =
     configuration.writesEnabled &&
+    publicAppConfiguration.writesEnabled &&
     validation === "VALID" &&
     wallet.status === "READY" &&
     customerConnected &&
@@ -420,6 +416,12 @@ export function OrderBuilder({
           <div className="deployment-note" role="status">
             <strong>DEPLOYMENT_REQUIRED</strong>
             <span>{copy.order.deploymentRequired}</span>
+          </div>
+        )}
+        {publicAppConfiguration.status === "PUBLIC_APP_ORIGIN_REQUIRED" && (
+          <div className="deployment-note" role="status">
+            <strong>PUBLIC_APP_ORIGIN_REQUIRED</strong>
+            <span>{publicAppConfiguration.message}</span>
           </div>
         )}
 

@@ -3,6 +3,27 @@ import { isAddress, zeroAddress, type Address } from "viem";
 
 export const FOODGUARD_CHAIN = studionet;
 
+export type FoodGuardPublicAppOriginConfiguration =
+  | {
+      status: "READY";
+      origin: string;
+      createOrderSourceUrl: string;
+      writesEnabled: true;
+    }
+  | {
+      status: "PUBLIC_APP_ORIGIN_REQUIRED";
+      origin: null;
+      createOrderSourceUrl: null;
+      writesEnabled: false;
+      reason:
+        | "MISSING"
+        | "INVALID_URL"
+        | "HTTPS_REQUIRED"
+        | "ORIGIN_ONLY_REQUIRED"
+        | "PLACEHOLDER_HOST";
+      message: string;
+    };
+
 export type FoodGuardConfiguration =
   | {
       status: "READY";
@@ -23,6 +44,86 @@ export class FoodGuardDeploymentRequiredError extends Error {
     super(message);
     this.name = "FoodGuardDeploymentRequiredError";
   }
+}
+
+function publicAppOriginRequired(
+  reason: Extract<
+    FoodGuardPublicAppOriginConfiguration,
+    { status: "PUBLIC_APP_ORIGIN_REQUIRED" }
+  >["reason"],
+  detail: string,
+): FoodGuardPublicAppOriginConfiguration {
+  return {
+    status: "PUBLIC_APP_ORIGIN_REQUIRED",
+    origin: null,
+    createOrderSourceUrl: null,
+    writesEnabled: false,
+    reason,
+    message: `Public app origin required: ${detail}`,
+  };
+}
+
+function isPlaceholderHostname(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/\.$/, "");
+  const reservedDomains = ["example.com", "example.net", "example.org"];
+  return (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "0.0.0.0" ||
+    host === "127.0.0.1" ||
+    host === "[::1]" ||
+    host.endsWith(".example") ||
+    host.endsWith(".invalid") ||
+    host.endsWith(".test") ||
+    reservedDomains.some((domain) => host === domain || host.endsWith(`.${domain}`))
+  );
+}
+
+export function getFoodGuardPublicAppOriginConfiguration(
+  rawOrigin = process.env.NEXT_PUBLIC_FOODGUARD_APP_ORIGIN,
+): FoodGuardPublicAppOriginConfiguration {
+  const value = rawOrigin?.trim();
+  if (!value) {
+    return publicAppOriginRequired(
+      "MISSING",
+      "configure NEXT_PUBLIC_FOODGUARD_APP_ORIGIN before enabling payable orders",
+    );
+  }
+
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return publicAppOriginRequired("INVALID_URL", "configure a valid absolute URL");
+  }
+  if (url.protocol !== "https:") {
+    return publicAppOriginRequired("HTTPS_REQUIRED", "configure an HTTPS URL");
+  }
+  if (
+    url.username ||
+    url.password ||
+    url.pathname !== "/" ||
+    url.search ||
+    url.hash
+  ) {
+    return publicAppOriginRequired(
+      "ORIGIN_ONLY_REQUIRED",
+      "configure only the canonical origin without credentials, path, query, or fragment",
+    );
+  }
+  if (isPlaceholderHostname(url.hostname)) {
+    return publicAppOriginRequired(
+      "PLACEHOLDER_HOST",
+      "configure a real public host instead of a placeholder or local host",
+    );
+  }
+
+  return {
+    status: "READY",
+    origin: url.origin,
+    createOrderSourceUrl: `${url.origin}/create`,
+    writesEnabled: true,
+  };
 }
 
 export function getFoodGuardConfiguration(

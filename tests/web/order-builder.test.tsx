@@ -41,6 +41,9 @@ const COURIER = "0x3333333333333333333333333333333333333333";
 const OUTSIDER = "0x4444444444444444444444444444444444444444";
 const CONTRACT = "0x5555555555555555555555555555555555555555";
 const HASH = `0x${"a".repeat(64)}`;
+const PUBLIC_APP_ORIGIN_ENV = "NEXT_PUBLIC_FOODGUARD_APP_ORIGIN";
+const VALID_PUBLIC_APP_ORIGIN = "https://app.foodguard.vn";
+const originalPublicAppOrigin = process.env.NEXT_PUBLIC_FOODGUARD_APP_ORIGIN;
 
 const ITEM: OrderItem = {
   item_id: "pho-1",
@@ -124,6 +127,7 @@ function renderBuilder(
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.stubEnv(PUBLIC_APP_ORIGIN_ENV, VALID_PUBLIC_APP_ORIGIN);
   window.localStorage.clear();
   installWallet();
   mocks.writeFoodGuard.mockResolvedValue(HASH);
@@ -140,6 +144,12 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   vi.useRealTimers();
+  vi.unstubAllEnvs();
+  if (originalPublicAppOrigin === undefined) {
+    Reflect.deleteProperty(process.env, PUBLIC_APP_ORIGIN_ENV);
+  } else {
+    process.env.NEXT_PUBLIC_FOODGUARD_APP_ORIGIN = originalPublicAppOrigin;
+  }
   Reflect.deleteProperty(window, "ethereum");
 });
 
@@ -217,13 +227,61 @@ describe("FoodGuard order builder", () => {
 
   it("uses a stable configured public source URL instead of browser location", async () => {
     window.history.replaceState({}, "", "/create?locale=en#draft");
-    renderBuilder({ sourceUrl: "https://foodguard.example/create" });
+    renderBuilder();
 
     await waitFor(() =>
       expect(screen.getByTestId("canonical-evidence")).toHaveTextContent(
-        '"source_url":"https://foodguard.example/create"',
+        '"source_url":"https://app.foodguard.vn/create"',
       ),
     );
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["blank", ""],
+    ["reserved example TLD", "https://foodguard.example"],
+    ["reserved example domain", "https://example.com"],
+    ["non-HTTPS", "http://app.foodguard.vn"],
+    ["credentials", "https://user:secret@app.foodguard.vn"],
+    ["path", "https://app.foodguard.vn/subpath"],
+    ["query", "https://app.foodguard.vn?preview=1"],
+    ["fragment", "https://app.foodguard.vn#preview"],
+    ["malformed", "not-a-url"],
+  ])("keeps preview read-only when public app origin is %s", async (_case, rawOrigin) => {
+    vi.unstubAllEnvs();
+    if (rawOrigin === undefined) {
+      Reflect.deleteProperty(process.env, PUBLIC_APP_ORIGIN_ENV);
+    } else {
+      vi.stubEnv(PUBLIC_APP_ORIGIN_ENV, rawOrigin);
+    }
+    renderBuilder();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("manifest-digest")).toHaveTextContent(/^0x[0-9a-f]{64}$/),
+    );
+    expect(screen.getByText("PUBLIC_APP_ORIGIN_REQUIRED")).toBeVisible();
+    fireEvent.click(screen.getAllByRole("button")[0]);
+    await screen.findByText(CUSTOMER);
+
+    const createButton = screen.getAllByRole("button").at(-1)!;
+    expect(createButton).toBeDisabled();
+    fireEvent.click(createButton);
+    expect(mocks.writeFoodGuard).not.toHaveBeenCalled();
+  });
+
+  it("canonicalizes a valid public origin and enables its exact source commitment", async () => {
+    vi.stubEnv(PUBLIC_APP_ORIGIN_ENV, "  https://App.FoodGuard.VN/  ");
+    renderBuilder();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("canonical-evidence")).toHaveTextContent(
+        '"source_url":"https://app.foodguard.vn/create"',
+      ),
+    );
+    fireEvent.click(screen.getAllByRole("button")[0]);
+    await screen.findByText(CUSTOMER);
+    await waitFor(() => expect(screen.getAllByRole("button").at(-1)).toBeEnabled());
+    expect(screen.queryByText("PUBLIC_APP_ORIGIN_REQUIRED")).not.toBeInTheDocument();
   });
 
   it("server-renders and hydrates the initial commitment without clock or URL drift", async () => {
@@ -234,7 +292,6 @@ describe("FoodGuard order builder", () => {
           initialActors={[CUSTOMER, RESTAURANT, COURIER]}
           item={ITEM}
           orderId="fg-9"
-          sourceUrl="https://foodguard.example/create"
         />
       </LocaleProvider>
     );
@@ -322,7 +379,6 @@ describe("FoodGuard order builder", () => {
     mocks.writeFoodGuard.mockImplementation(() => new Promise(() => undefined));
     const view = renderBuilder({
       deliveryFeeWei: "50",
-      sourceUrl: "https://foodguard.example/create",
     });
     fireEvent.click(screen.getAllByRole("button")[0]);
     const createButton = screen.getAllByRole("button").at(-1)!;
@@ -347,7 +403,12 @@ describe("FoodGuard order builder", () => {
           initialActors={[CUSTOMER, RESTAURANT, COURIER]}
           item={{ ...ITEM, item_id: "changed-item", price_wei: "999" }}
           orderId="changed-order"
-          sourceUrl="https://changed.example/create"
+          publicAppConfiguration={{
+            status: "READY",
+            origin: "https://changed.foodguard.vn",
+            createOrderSourceUrl: "https://changed.foodguard.vn/create",
+            writesEnabled: true,
+          }}
         />
       </LocaleProvider>,
     );
