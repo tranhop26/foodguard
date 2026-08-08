@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join, relative } from "node:path";
 
 const publicSourcePathspecs = [
   ".env.example",
@@ -24,6 +25,30 @@ const publicSourcePathspecs = [
   "tsconfig.json",
   "vitest.config.ts",
 ];
+
+const localEnvironmentSearchRoots = [
+  "app",
+  "components",
+  "contracts",
+  "deploy",
+  "docs",
+  "lib",
+  "locales",
+  "public",
+  "scripts",
+  "tests",
+];
+const excludedTraversalDirectories = new Set([
+  ".git",
+  ".next",
+  ".turbo",
+  "build",
+  "coverage",
+  "dist",
+  "node_modules",
+  "out",
+]);
+const maximumLocalEnvironmentDepth = 8;
 
 const unsafePathRules = [
   {
@@ -104,9 +129,39 @@ function contentFindings(path, buffer) {
     .map((rule) => `${path} [${rule.id}]`);
 }
 
+function localEnvironmentFiles() {
+  const repositoryRoot = process.cwd();
+  const found = new Set();
+  if (existsSync(join(repositoryRoot, ".env.local"))) found.add(".env.local");
+
+  function inspect(directory, depth) {
+    if (depth > maximumLocalEnvironmentDepth) return;
+    const entries = readdirSync(directory, { withFileTypes: true })
+      .sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const path = join(directory, entry.name);
+      if (entry.isFile() && entry.name.toLowerCase() === ".env.local") {
+        found.add(relative(repositoryRoot, path).replaceAll("\\", "/"));
+      } else if (
+        entry.isDirectory() &&
+        !excludedTraversalDirectories.has(entry.name.toLowerCase())
+      ) {
+        inspect(path, depth + 1);
+      }
+    }
+  }
+
+  for (const root of localEnvironmentSearchRoots) {
+    const path = join(repositoryRoot, root);
+    if (existsSync(path)) inspect(path, 1);
+  }
+  return [...found].sort();
+}
+
 let tracked;
 let staged;
 let publicUntracked;
+let localEnvironments;
 try {
   tracked = nulPaths(gitOutput(["ls-files", "--cached", "-z"]));
   staged = nulPaths(gitOutput(["diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z"]));
@@ -118,8 +173,9 @@ try {
     "--",
     ...publicSourcePathspecs,
   ]));
+  localEnvironments = localEnvironmentFiles();
 } catch {
-  console.error("Secret scan failed: run this command from a FoodGuard Git worktree.");
+  console.error("Secret scan failed: could not inspect this FoodGuard Git worktree.");
   process.exit(1);
 }
 
@@ -131,6 +187,8 @@ for (const path of [...trackedOrStaged].sort()) {
     if (rule.pattern.test(path)) findings.add(`${path} [${rule.id}]`);
   }
 }
+
+for (const path of localEnvironments) findings.add(`${path} [LOCAL_ENV_FILE]`);
 
 for (const path of [...new Set([...tracked, ...publicUntracked])].sort()) {
   for (const finding of contentFindings(path, worktreeBuffer(path))) findings.add(finding);

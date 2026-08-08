@@ -1,6 +1,6 @@
 # FoodGuard frozen-contract recovery runbook
 
-This runbook applies after a confirmed defect, compromised deployment context, unsafe frontend binding, or evidence-service incident. FoodGuard V1 is frozen and non-upgradeable. The deployer can pause new creation with `set_creation_paused`; that control does not rewrite or migrate active orders and must not be represented as a full contract pause.
+This runbook applies after a confirmed defect, compromised deployment context, unsafe frontend binding, or evidence-service incident. FoodGuard V1's exact contract classification is `INTENTIONALLY_FROZEN`: it is frozen and non-upgradeable. The deployer can pause new creation with `set_creation_paused`; that control does not rewrite or migrate active orders and must not be represented as a full contract pause.
 
 ## 1. Declare and bound the incident
 
@@ -64,7 +64,7 @@ Publish participant guidance that names the exact permitted method and consequen
 
 Fix the defect in a new contract version with regression tests. Run contract, web, browser, lint, typecheck, build, and secret checks. Independently verify the exact source SHA-256 and Git commit.
 
-Before deployment, display the deployer wallet, StudioNet network, reviewed source hash, commit, constructor inputs, contract classification, and exact deployment command. Deploy only after explicit confirmation of that identity and action. Require a receipt plus finality, execution success, contract readback, explorer record, and source-hash match before recording V2 as verified.
+Before deployment, display the deployer wallet, StudioNet network, reviewed source hash, commit, constructor inputs, exact contract classification token `INTENTIONALLY_FROZEN`, and exact deployment command. Deploy only after explicit confirmation of that identity and action. Require a receipt plus finality, execution success, contract readback, explorer record, and source-hash match before recording V2 as verified.
 
 ## 7. Migrate the frontend, not active custody
 

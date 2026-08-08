@@ -80,6 +80,26 @@ describe("repository secret scanner", () => {
     expect(result.stderr).toContain(path);
   });
 
+  it.each([".env.local", "app/.env.local"])(
+    "rejects an ordinary ignored local environment file: %s",
+    (path) => {
+      const secret = "ignored local configuration must not be read or printed\n";
+      const directory = createRepository(
+        {
+          ".gitignore": ".env.local\n",
+          [path]: secret,
+        },
+        [".gitignore"],
+      );
+
+      const result = scan(directory);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(path);
+      expect(result.stderr).not.toContain(secret.trim());
+    },
+  );
+
   it("scans untracked public-source files before they are staged", () => {
     const directory = createRepository(
       { "app/untracked.ts": "export const VERCEL_TOKEN = 'vercel_" + "abcdefghijklmnopqrstuvwxyz012345" + "';\n" },

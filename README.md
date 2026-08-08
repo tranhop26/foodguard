@@ -71,11 +71,11 @@ npm run verify:no-secrets
 
 `npm run test:e2e` starts two local servers: a configured test instance and a `DEPLOYMENT_REQUIRED` instance. Wallet and RPC behavior is mocked deterministically at the browser boundary. These tests never contact a deployment and **do not count as live StudioNet proof**.
 
-The secret scan reads tracked worktree content, staged index content, and untracked public-source files. It rejects private-key, mnemonic/seed-phrase, and Vercel-token patterns and unsafe tracked paths such as `.env.local`, generated output, dependency/cache directories, `.superpowers`, `work`, `research`, and task artifacts. Findings report only the path and rule ID; matched values are redacted. Blank `.env.example` keys and documentation variable names are allowed.
+The secret scan reads tracked worktree content, staged index content, and untracked public-source files. A separate bounded filesystem presence check also catches ordinary ignored `.env.local` files at the root and relevant source subtrees without reading their contents; it skips `.git`, `node_modules`, and symlinks. The gate rejects private-key, mnemonic/seed-phrase, and Vercel-token patterns plus unsafe tracked paths such as generated output, dependency/cache directories, `.superpowers`, `work`, `research`, and task artifacts. Findings report only the path and rule ID; matched values are redacted. Blank `.env.example` keys and documentation variable names are allowed.
 
 ### Deployment and action-time confirmation gates
 
-1. Before any StudioNet deployment, show the exact deployer wallet, network, source SHA-256, Git commit, contract classification, and command. Execute only after explicit confirmation of that wallet and action.
+1. Before any StudioNet deployment, show the exact deployer wallet, network, source SHA-256, Git commit, contract classification token `INTENTIONALLY_FROZEN`, and command. Execute only after explicit confirmation of that wallet and action.
 2. Populate a real `deploy/studionet-manifest.json` only from the confirmed receipt and authoritative readback. The committed `.example.json` is deliberately non-deployable.
 3. Before any Vercel link/create/deploy, show the authenticated identity/team, project, production action, and public configuration. Accept credentials only through a secure environment mechanism; never print or persist them. Execute only after a separate confirmation.
 4. Before any GitHub push, show author/account, repository owner, remote, branch, commits, staged files, and untracked files. Push only after a separate confirmation.
@@ -83,7 +83,7 @@ The secret scan reads tracked worktree content, staged index content, and untrac
 
 ### Frozen V1 classification and known limits
 
-FoodGuard V1 is a frozen, non-upgradeable contract design. The deployer can pause **new order creation only**; there is no upgrade proxy, arbitrary admin rewrite, custody sweep, or automatic migration of active orders. A defect therefore requires pausing creation, auditing every active V1 order, exporting public evidence, deploying reviewed V2 source after confirmation, routing only new orders to V2, and preserving V1 readback/action access until its orders are terminal. See `docs/recovery-runbook.md`.
+FoodGuard V1's exact contract classification is `INTENTIONALLY_FROZEN`: it is a frozen, non-upgradeable contract design. The deployer can pause **new order creation only**; there is no upgrade proxy, arbitrary admin rewrite, custody sweep, or automatic migration of active orders. A defect therefore requires pausing creation, auditing every active V1 order, exporting public evidence, deploying reviewed V2 source after confirmation, routing only new orders to V2, and preserving V1 readback/action access until its orders are terminal. See `docs/recovery-runbook.md`.
 
 Known limits: StudioNet and Simulated GEN are non-production; evidence availability and truth remain external assumptions; a digest proves integrity, not physical correctness; browser tests use local doubles; no live contract address, transaction, explorer record, or production URL is asserted by this repository; and unresolved/escalated funds may require cure or a fully signed mutual settlement.
 
@@ -109,7 +109,7 @@ Các JSON trong `public/evidence/` là **fixture offline cố định**, không 
 
 Dùng các lệnh trong phần English để chạy contract test, web test, browser E2E, lint, typecheck, build và quét secret. Khi chưa có địa chỉ đã triển khai/xác minh, ứng dụng phải hiển thị `DEPLOYMENT_REQUIRED` và khóa mọi write.
 
-V1 là contract đóng băng, không upgrade. Deployer chỉ có thể dừng tạo **đơn mới**; không thể sửa tùy ý, quét escrow hoặc tự động chuyển đơn đang chạy. Khi có lỗi: dừng tạo đơn sau xác nhận, kiểm kê đơn V1, xuất bằng chứng, review/deploy V2 sau xác nhận, chuyển đơn mới sang V2, và tiếp tục giữ giao diện V1 cho đến khi mọi đơn cũ kết thúc. Mọi deployment StudioNet, deployment Vercel và push GitHub đều có cổng xác nhận riêng ngay tại thời điểm hành động.
+Phân loại contract chính xác của V1 là `INTENTIONALLY_FROZEN`: contract đóng băng, không upgrade. Deployer chỉ có thể dừng tạo **đơn mới**; không thể sửa tùy ý, quét escrow hoặc tự động chuyển đơn đang chạy. Khi có lỗi: dừng tạo đơn sau xác nhận, kiểm kê đơn V1, xuất bằng chứng, review/deploy V2 sau xác nhận, chuyển đơn mới sang V2, và tiếp tục giữ giao diện V1 cho đến khi mọi đơn cũ kết thúc. Xác nhận deployment phải hiển thị chính token `INTENTIONALLY_FROZEN`. Mọi deployment StudioNet, deployment Vercel và push GitHub đều có cổng xác nhận riêng ngay tại thời điểm hành động.
 
 ## Repository references
 

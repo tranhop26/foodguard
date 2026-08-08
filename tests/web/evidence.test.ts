@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import type { EvidenceDocument, HexDigest } from "../../lib/domain";
@@ -12,6 +15,14 @@ import deliveredFixture from "../../public/evidence/order-fg-demo-delivered.json
 import manifestFixture from "../../public/evidence/order-fg-demo-manifest.json";
 import packedFixture from "../../public/evidence/order-fg-demo-packed.json";
 import pickupFixture from "../../public/evidence/order-fg-demo-pickup.json";
+
+const FIXTURE_DIGESTS = Object.freeze({
+  "order-fg-demo-claim-missing-item.json": "0xc6b1996f8fb0350c217679fdd40b425c5b0385f32d7db608713087e3f6d989c3",
+  "order-fg-demo-delivered.json": "0x1f75f32767e97a2dfe7bdec507fe3b963d7ff151e3a13cb5a169a1570bfccd0f",
+  "order-fg-demo-manifest.json": "0xc8b3c3caf0d9c51e79a636095a5c8b1a603b61a39bc80027e7ae9ab91ac76ac5",
+  "order-fg-demo-packed.json": "0x81aeb38f325af53321789f67ca05cd2423f5cb4d5c4511eaf9ebd0a896ef8d48",
+  "order-fg-demo-pickup.json": "0x1619d7c15f830b0c6279f2cee4ee2687b800aba22590c7fba5d2114ca7035344",
+} as const satisfies Record<string, HexDigest>);
 
 const validEvidence = {
   schema_version: "foodguard-evidence/1",
@@ -144,19 +155,22 @@ describe("FoodGuard evidence", () => {
 
 describe("committed demo evidence fixtures", () => {
   const fixtures = [
-    ["order-fg-demo-manifest.json", manifestFixture],
-    ["order-fg-demo-packed.json", packedFixture],
-    ["order-fg-demo-pickup.json", pickupFixture],
-    ["order-fg-demo-delivered.json", deliveredFixture],
-    ["order-fg-demo-claim-missing-item.json", claimFixture],
+    ["order-fg-demo-manifest.json", manifestFixture, FIXTURE_DIGESTS["order-fg-demo-manifest.json"]],
+    ["order-fg-demo-packed.json", packedFixture, FIXTURE_DIGESTS["order-fg-demo-packed.json"]],
+    ["order-fg-demo-pickup.json", pickupFixture, FIXTURE_DIGESTS["order-fg-demo-pickup.json"]],
+    ["order-fg-demo-delivered.json", deliveredFixture, FIXTURE_DIGESTS["order-fg-demo-delivered.json"]],
+    ["order-fg-demo-claim-missing-item.json", claimFixture, FIXTURE_DIGESTS["order-fg-demo-claim-missing-item.json"]],
   ] as const;
 
-  it.each(fixtures)("recomputes the committed canonical digest for %s", async (_name, rawFixture) => {
+  it.each(fixtures)("pins the canonical envelope and digest for %s", async (name, rawFixture, expectedDigest) => {
     const fixture = rawFixture as unknown as EvidenceDocument;
+    const canonicalEnvelope = canonicalizeEvidenceEnvelope(fixture);
+    const committedBytes = readFileSync(resolve("public/evidence", name));
 
-    expect(await hashEvidence(fixture)).toBe(fixture.sha256);
+    expect(fixture.sha256).toBe(expectedDigest);
+    expect(await hashEvidence(fixture)).toBe(expectedDigest);
     expect(validateEvidenceDocument(fixture, new Date("2030-01-01T00:00:00.000Z"))).toEqual(fixture);
-    expect(JSON.stringify(fixture)).toBe(canonicalizeEvidenceEnvelope(fixture));
+    expect(committedBytes.equals(Buffer.from(`${canonicalEnvelope}\n`, "utf8"))).toBe(true);
   });
 
   it.each(fixtures)("binds %s to its committed public fixture path", (name, rawFixture) => {
