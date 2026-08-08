@@ -119,6 +119,15 @@ describe("FoodGuard proof marketplace landing", () => {
     expect(screen.queryByText("DEPLOYMENT_REQUIRED")).not.toBeInTheDocument();
   });
 
+  it("keeps English selected on the real create-order route", () => {
+    render(<LandingPage configuration={READY} locale="en" />);
+
+    expect(screen.getByRole("link", { name: /create contract order/i })).toHaveAttribute(
+      "href",
+      "/create?locale=en",
+    );
+  });
+
   it("provides a real English content path while preserving active discovery filters", () => {
     renderLanding({ categorySlug: "mon-nuoc", locale: "en", searchQuery: "pho" });
 

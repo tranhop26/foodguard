@@ -75,6 +75,7 @@ export async function writeFoodGuard(
   args: CalldataEncodable[] = [],
   value = 0n,
   onUpdate?: TxStageHandler,
+  expectedAccount?: string,
 ): Promise<TransactionHash> {
   const { address } = requireFoodGuardConfiguration();
   const provider = getWalletProvider();
@@ -82,6 +83,15 @@ export async function writeFoodGuard(
   onUpdate?.("WALLET_CONFIRMATION");
   await requireStudioNetWallet(provider);
   const account = await requestConnectedAddress(provider);
+  if (
+    expectedAccount !== undefined &&
+    (!isAddress(expectedAccount, { strict: false }) ||
+      account.toLowerCase() !== expectedAccount.toLowerCase())
+  ) {
+    throw new Error(
+      "The connected wallet account changed after preview; reconnect and review the commitments again",
+    );
+  }
   const client = createClient({
     chain: FOODGUARD_CHAIN,
     account,

@@ -194,6 +194,16 @@ describe("FoodGuard StudioNet client", () => {
     expect(stages).toEqual(["WALLET_CONFIRMATION"]);
   });
 
+  it("blocks a write when the confirmed account changed after preview", async () => {
+    const previewedCustomer = "0x3333333333333333333333333333333333333333";
+    sdk.writeContract.mockResolvedValue(HASH);
+
+    await expect(
+      writeFoodGuard("create_order", ["fg-1"], 1n, undefined, previewedCustomer),
+    ).rejects.toThrow(/changed after preview/i);
+    expect(sdk.writeContract).not.toHaveBeenCalled();
+  });
+
   it("disables writes before deployment without asking the wallet", async () => {
     vi.stubEnv("NEXT_PUBLIC_FOODGUARD_ADDRESS", "");
 

@@ -1,0 +1,281 @@
+"use client";
+
+import { useCallback, useState } from "react";
+
+import type { OrderState } from "../../lib/domain";
+import { readFoodGuard, writeFoodGuard } from "../../lib/genlayer/client";
+import { trackTransaction, type TxStage } from "../../lib/genlayer/transactions";
+import { useLocale } from "../../lib/i18n";
+import {
+  deriveWalletRole,
+  WalletButton,
+  type WalletRole,
+  type WalletSnapshot,
+} from "../wallet/WalletButton";
+
+export interface FoodGuardOrderView {
+  acceptance_deadline?: number | string;
+  courier: string;
+  courier_accepted: boolean;
+  customer: string;
+  order_id: string;
+  restaurant: string;
+  restaurant_accepted: boolean;
+  state: OrderState;
+  [key: string]: unknown;
+}
+
+export type RoleActionId =
+  | "acceptRestaurant"
+  | "acceptCourier"
+  | "pack"
+  | "pickup"
+  | "deliver"
+  | "claim"
+  | "cancel";
+
+export interface RoleAction {
+  id: RoleActionId;
+  method:
+    | "accept_restaurant"
+    | "accept_courier"
+    | "submit_packed_evidence"
+    | "submit_pickup_evidence"
+    | "submit_delivery_evidence"
+    | "submit_claim_evidence"
+    | "cancel_unaccepted";
+  requiresEvidence: boolean;
+}
+
+interface RoleConsoleProps {
+  address?: string | null;
+  onAction?(action: RoleAction, order: FoodGuardOrderView): Promise<FoodGuardOrderView>;
+  order: FoodGuardOrderView;
+  writesEnabled?: boolean;
+}
+
+function acceptedState(state: OrderState): boolean {
+  return state === "FUNDED" || state === "PARTIALLY_ACCEPTED";
+}
+
+function actionFor(role: WalletRole, order: FoodGuardOrderView): RoleAction | null {
+  if (role === "RESTAURANT") {
+    if (acceptedState(order.state) && !order.restaurant_accepted) {
+      return { id: "acceptRestaurant", method: "accept_restaurant", requiresEvidence: false };
+    }
+    if (order.state === "ACCEPTED") {
+      return { id: "pack", method: "submit_packed_evidence", requiresEvidence: true };
+    }
+  }
+  if (role === "COURIER") {
+    if (acceptedState(order.state) && !order.courier_accepted) {
+      return { id: "acceptCourier", method: "accept_courier", requiresEvidence: false };
+    }
+    if (order.state === "READY_FOR_PICKUP") {
+      return { id: "pickup", method: "submit_pickup_evidence", requiresEvidence: true };
+    }
+    if (order.state === "IN_TRANSIT") {
+      return { id: "deliver", method: "submit_delivery_evidence", requiresEvidence: true };
+    }
+  }
+  if (role === "CUSTOMER" && order.state === "REVIEW_WINDOW") {
+    return { id: "claim", method: "submit_claim_evidence", requiresEvidence: true };
+  }
+  if (
+    role === "CUSTOMER" &&
+    acceptedState(order.state) &&
+    order.acceptance_deadline !== undefined &&
+    BigInt(order.acceptance_deadline) <= BigInt(Date.now()) * 1_000n
+  ) {
+    return { id: "cancel", method: "cancel_unaccepted", requiresEvidence: false };
+  }
+  return null;
+}
+
+export function RoleConsole({
+  address,
+  onAction,
+  order,
+  writesEnabled = true,
+}: RoleConsoleProps) {
+  const { copy } = useLocale();
+  const [authoritativeOrder, setAuthoritativeOrder] = useState(order);
+  const [pending, setPending] = useState(false);
+  const [stage, setStage] = useState<TxStage | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const actors = [
+    authoritativeOrder.customer,
+    authoritativeOrder.restaurant,
+    authoritativeOrder.courier,
+  ] as const;
+  const role = address ? deriveWalletRole(address, actors) : null;
+  const action = role ? actionFor(role, authoritativeOrder) : null;
+
+  async function performAction() {
+    if (!action || pending || !writesEnabled) return;
+    setError(null);
+    setNotice(null);
+    if (action.requiresEvidence && !onAction) {
+      setNotice(copy.console.evidenceRequired);
+      return;
+    }
+    setPending(true);
+    try {
+      const readback = onAction
+        ? await onAction(action, authoritativeOrder)
+        : await (async () => {
+            const hash = await writeFoodGuard(
+              action.method,
+              [authoritativeOrder.order_id],
+              0n,
+              setStage,
+              address ?? undefined,
+            );
+            return trackTransaction<FoodGuardOrderView>(hash, setStage);
+          })();
+      setAuthoritativeOrder(readback);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "FoodGuard write failed");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <section className="role-console" aria-labelledby="role-console-title">
+      <p className="eyebrow">{copy.console.eyebrow}</p>
+      <h2 id="role-console-title">{copy.console.title}</h2>
+      <dl className="role-console__facts">
+        <div>
+          <dt>Order ID</dt>
+          <dd><code>{authoritativeOrder.order_id}</code></dd>
+        </div>
+        <div>
+          <dt>{copy.console.state}</dt>
+          <dd><code data-testid="raw-order-state">{authoritativeOrder.state}</code></dd>
+        </div>
+        {address && (
+          <div>
+            <dt>Address</dt>
+            <dd><code>{address}</code></dd>
+          </div>
+        )}
+      </dl>
+
+      {!address && <p className="form-notice">{copy.console.connect}</p>}
+      {role === "OUTSIDER" && <p className="form-notice">{copy.console.readOnly}</p>}
+      {role && role !== "OUTSIDER" && !action && (
+        <p className="form-notice">{copy.console.noAction}</p>
+      )}
+      {action && (
+        <button
+          className="button button--primary"
+          disabled={pending || !writesEnabled}
+          onClick={performAction}
+          type="button"
+        >
+          {copy.console.actions[action.id]}
+        </button>
+      )}
+      {pending && <p className="form-notice" role="status">{copy.console.pending}</p>}
+      {stage && <p className="transaction-stage"><code>{stage}</code></p>}
+      {notice && <p className="form-notice" role="status">{notice}</p>}
+      {error && <p className="form-notice form-notice--error" role="alert">{error}</p>}
+    </section>
+  );
+}
+
+type OrdersWorkspaceConfiguration =
+  | { address: string; status: "READY"; writesEnabled: true }
+  | {
+      address: null;
+      message: string;
+      status: "DEPLOYMENT_REQUIRED";
+      writesEnabled: false;
+    };
+
+const EMPTY_ACTORS = ["", "", ""] as const;
+
+export function OrdersWorkspace({
+  configuration,
+}: {
+  configuration: OrdersWorkspaceConfiguration;
+}) {
+  const { copy } = useLocale();
+  const [orderId, setOrderId] = useState("");
+  const [order, setOrder] = useState<FoodGuardOrderView | null>(null);
+  const [wallet, setWallet] = useState<WalletSnapshot | null>(null);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const actors = order
+    ? ([order.customer, order.restaurant, order.courier] as const)
+    : EMPTY_ACTORS;
+
+  const handleWalletChange = useCallback((snapshot: WalletSnapshot) => {
+    setWallet(snapshot);
+  }, []);
+
+  async function loadOrder() {
+    if (!orderId.trim() || !configuration.writesEnabled || pending) return;
+    setPending(true);
+    setError(null);
+    setOrder(null);
+    try {
+      const readback = await readFoodGuard<FoodGuardOrderView>("get_order", [orderId.trim()]);
+      setOrder(readback);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "FoodGuard read failed");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <div className="orders-workspace">
+      <form
+        className="order-lookup"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void loadOrder();
+        }}
+      >
+        <label>
+          <span>{copy.order.orderId}</span>
+          <input
+            aria-label={copy.order.orderId}
+            autoComplete="off"
+            onChange={(event) => setOrderId(event.target.value)}
+            type="text"
+            value={orderId}
+          />
+        </label>
+        <button
+          className="button button--primary"
+          disabled={!configuration.writesEnabled || !orderId.trim() || pending}
+          type="submit"
+        >
+          {copy.pages.loadOrder}
+        </button>
+      </form>
+      {configuration.status === "DEPLOYMENT_REQUIRED" && (
+        <div className="deployment-note" role="status">
+          <strong>DEPLOYMENT_REQUIRED</strong>
+          <span>{copy.order.deploymentRequired}</span>
+        </div>
+      )}
+      {pending && <p className="form-notice" role="status">{copy.order.writing}</p>}
+      {error && <p className="form-notice form-notice--error" role="alert">{error}</p>}
+      {order && (
+        <div className="orders-workspace__console">
+          <WalletButton actors={actors} onChange={handleWalletChange} />
+          <RoleConsole
+            address={wallet?.address}
+            order={order}
+            writesEnabled={configuration.writesEnabled && wallet?.status === "READY"}
+          />
+        </div>
+      )}
+    </div>
+  );
+}

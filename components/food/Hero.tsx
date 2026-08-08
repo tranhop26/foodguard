@@ -69,7 +69,10 @@ export function Hero({ categorySlug = "", contractReady, locale, resultCount, se
             <span aria-hidden="true">↓</span>
           </a>
           {contractReady ? (
-            <a className="button button--quiet" href="/create">
+            <a
+              className="button button--quiet"
+              href={locale === "en" ? "/create?locale=en" : "/create"}
+            >
               {copy.createOrder}
             </a>
           ) : (

@@ -1,0 +1,383 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { isAddress, zeroAddress } from "viem";
+
+import type { EvidenceDocument, HexDigest, OrderItem } from "../../lib/domain";
+import { canonicalizeEvidence, hashEvidence } from "../../lib/evidence";
+import { writeFoodGuard } from "../../lib/genlayer/client";
+import { getFoodGuardConfiguration } from "../../lib/genlayer/config";
+import { trackTransaction, type TxStage } from "../../lib/genlayer/transactions";
+import { useLocale } from "../../lib/i18n";
+import { RoleConsole, type FoodGuardOrderView } from "../order/RoleConsole";
+import { WalletButton, type WalletSnapshot } from "../wallet/WalletButton";
+
+export type OrderActors = [customer: string, restaurant: string, courier: string];
+
+export type OrderBuilderConfiguration =
+  | {
+      address: string;
+      status: "READY";
+      writesEnabled: true;
+    }
+  | {
+      address: null;
+      message: string;
+      status: "DEPLOYMENT_REQUIRED";
+      writesEnabled: false;
+    };
+
+interface OrderBuilderProps {
+  configuration?: OrderBuilderConfiguration;
+  deliveryFeeWei?: string;
+  initialActors?: OrderActors;
+  item?: OrderItem;
+  orderId?: string;
+}
+
+const DEMO_ITEM: OrderItem = {
+  conditions: ["giao đúng món và còn nguyên niêm phong"],
+  item_id: "foodguard-demo-item",
+  name: "Món Việt demo",
+  permitted_substitutions: [],
+  price_wei: "400000000000000000",
+  quantity: 1,
+};
+
+const EMPTY_WALLET: WalletSnapshot = {
+  address: null,
+  chainId: null,
+  role: "OUTSIDER",
+  status: "DISCONNECTED",
+};
+
+const MAX_U256 = (1n << 256n) - 1n;
+
+function configuredContract(): OrderBuilderConfiguration {
+  const configuration = getFoodGuardConfiguration();
+  return configuration.status === "READY"
+    ? {
+        address: configuration.address,
+        status: "READY",
+        writesEnabled: true,
+      }
+    : {
+        address: null,
+        message: configuration.message,
+        status: "DEPLOYMENT_REQUIRED",
+        writesEnabled: false,
+      };
+}
+
+function canonicalItem(item: OrderItem): OrderItem {
+  return {
+    conditions: [...item.conditions],
+    item_id: item.item_id,
+    name: item.name,
+    permitted_substitutions: [...item.permitted_substitutions],
+    price_wei: item.price_wei,
+    quantity: item.quantity,
+  };
+}
+
+export function canonicalOrderManifest(items: readonly OrderItem[]): string {
+  return JSON.stringify({ items: items.map(canonicalItem) });
+}
+
+function parseWei(value: string, allowZero: boolean): bigint {
+  const pattern = allowZero ? /^(0|[1-9][0-9]*)$/ : /^[1-9][0-9]*$/;
+  if (!pattern.test(value)) throw new TypeError("invalid wei amount");
+  const amount = BigInt(value);
+  if (amount > MAX_U256) throw new RangeError("wei amount exceeds u256");
+  return amount;
+}
+
+export function calculateOrderValueWei(
+  items: readonly OrderItem[],
+  deliveryFeeWei: string,
+): { deliveryFee: bigint; subtotal: bigint; total: bigint } {
+  const deliveryFee = parseWei(deliveryFeeWei, true);
+  let subtotal = 0n;
+  for (const item of items) {
+    if (!Number.isSafeInteger(item.quantity) || item.quantity <= 0) {
+      throw new TypeError("quantity must be a positive safe integer");
+    }
+    subtotal += parseWei(item.price_wei, false) * BigInt(item.quantity);
+    if (subtotal > MAX_U256) throw new RangeError("subtotal exceeds u256");
+  }
+  const total = subtotal + deliveryFee;
+  if (total > MAX_U256) throw new RangeError("total exceeds u256");
+  return { deliveryFee, subtotal, total };
+}
+
+function validActor(address: string): boolean {
+  return (
+    isAddress(address, { strict: false }) &&
+    address.toLowerCase() !== zeroAddress
+  );
+}
+
+function actorValidation(actors: OrderActors): "VALID" | "INVALID" | "DUPLICATE" {
+  if (!actors.every(validActor)) return "INVALID";
+  if (new Set(actors.map((actor) => actor.toLowerCase())).size !== actors.length) {
+    return "DUPLICATE";
+  }
+  return "VALID";
+}
+
+function canonicalDeadlines(createdAtMs: number): string {
+  const base = BigInt(createdAtMs) * 1_000n;
+  const minute = 60_000_000n;
+  const acceptanceDeadline = base + 30n * minute;
+  const packingDeadline = base + 120n * minute;
+  const deliveryDeadline = base + 240n * minute;
+  const reviewDeadline = base + 360n * minute;
+  const appealDeadline = base + 480n * minute;
+  return JSON.stringify({
+    acceptance_deadline: Number(acceptanceDeadline),
+    appeal_deadline: Number(appealDeadline),
+    delivery_deadline: Number(deliveryDeadline),
+    packing_deadline: Number(packingDeadline),
+    review_deadline: Number(reviewDeadline),
+  });
+}
+
+function sameAddress(left: string | null, right: string): boolean {
+  return Boolean(left && left.toLowerCase() === right.toLowerCase());
+}
+
+function manifestSourceUrl(): string {
+  if (typeof window === "undefined") return "/create";
+  const url = new URL(window.location.href);
+  url.searchParams.delete("locale");
+  url.hash = "";
+  return url.toString();
+}
+
+export function OrderBuilder({
+  configuration = configuredContract(),
+  deliveryFeeWei: initialDeliveryFee = "50000000000000000",
+  initialActors = ["", "", ""],
+  item = DEMO_ITEM,
+  orderId: initialOrderId = "fg-demo-order",
+}: OrderBuilderProps) {
+  const { copy } = useLocale();
+  const [actors, setActors] = useState<OrderActors>(initialActors);
+  const [deliveryFeeWei, setDeliveryFeeWei] = useState(initialDeliveryFee);
+  const [orderId, setOrderId] = useState(initialOrderId);
+  const [createdAtMs] = useState(() => Date.now());
+  const [wallet, setWallet] = useState<WalletSnapshot>(EMPTY_WALLET);
+  const [digest, setDigest] = useState<HexDigest | null>(null);
+  const [pending, setPending] = useState(false);
+  const [stage, setStage] = useState<TxStage | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [authoritativeOrder, setAuthoritativeOrder] = useState<FoodGuardOrderView | null>(null);
+
+  const items = useMemo(() => [canonicalItem(item)], [item]);
+  const canonicalManifest = useMemo(() => canonicalOrderManifest(items), [items]);
+  const amounts = useMemo(() => {
+    try {
+      return calculateOrderValueWei(items, deliveryFeeWei);
+    } catch {
+      return null;
+    }
+  }, [deliveryFeeWei, items]);
+  const validation = actorValidation(actors);
+
+  const manifestEvidence = useMemo<EvidenceDocument>(() => {
+    const observedAt = new Date(createdAtMs).toISOString();
+    return {
+      action: "ORDER_MANIFEST",
+      actor_wallet: actors[0] || "CUSTOMER_WALLET_REQUIRED",
+      chain_id: "61999",
+      contract_address: configuration.address ?? "DEPLOYMENT_REQUIRED",
+      expires_at: new Date(createdAtMs + 86_400_000).toISOString(),
+      issuer_id: "foodguard-web",
+      items,
+      nonce: orderId || "ORDER_ID_REQUIRED",
+      observed_at: observedAt,
+      order_id: orderId || "ORDER_ID_REQUIRED",
+      schema_version: "foodguard-evidence/1",
+      sha256: `0x${"0".repeat(64)}`,
+      source_url: manifestSourceUrl(),
+      subject: "FoodGuard canonical order manifest",
+      submitted_at: observedAt,
+    };
+  }, [actors, configuration.address, createdAtMs, items, orderId]);
+  const canonicalEvidence = useMemo(
+    () => canonicalizeEvidence(manifestEvidence),
+    [manifestEvidence],
+  );
+
+  useEffect(() => {
+    let active = true;
+    setDigest(null);
+    hashEvidence(manifestEvidence).then(
+      (value) => {
+        if (active) setDigest(value);
+      },
+      (caught: unknown) => {
+        if (active) setError(caught instanceof Error ? caught.message : "Manifest hashing failed");
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [manifestEvidence]);
+
+  const handleWalletChange = useCallback((nextWallet: WalletSnapshot) => {
+    setWallet(nextWallet);
+  }, []);
+
+  const customerConnected = sameAddress(wallet.address, actors[0]);
+  const canCreate =
+    configuration.writesEnabled &&
+    validation === "VALID" &&
+    wallet.status === "READY" &&
+    customerConnected &&
+    Boolean(digest) &&
+    Boolean(amounts) &&
+    Boolean(orderId.trim()) &&
+    !pending;
+
+  function setActor(index: number, value: string) {
+    setActors((current) => {
+      const next: OrderActors = [...current];
+      next[index] = value.trim();
+      return next;
+    });
+  }
+
+  async function createOrder() {
+    if (!canCreate || !amounts) return;
+    setPending(true);
+    setError(null);
+    setAuthoritativeOrder(null);
+    try {
+      const hash = await writeFoodGuard(
+        "create_order",
+        [
+          orderId,
+          actors[1],
+          actors[2],
+          canonicalManifest,
+          amounts.deliveryFee,
+          canonicalDeadlines(createdAtMs),
+        ],
+        amounts.total,
+        setStage,
+        actors[0],
+      );
+      const readback = await trackTransaction<FoodGuardOrderView>(hash, setStage);
+      setAuthoritativeOrder(readback);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "FoodGuard write failed");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <div className="order-workflow">
+      <section className="order-builder" aria-labelledby="order-builder-title">
+        <p className="eyebrow">{copy.order.eyebrow}</p>
+        <h1 id="order-builder-title">{copy.order.title}</h1>
+        <p className="order-builder__intro">{copy.order.intro}</p>
+
+        <div className="actor-grid">
+          {([copy.order.customer, copy.order.restaurant, copy.order.courier] as const).map(
+            (label, index) => (
+              <label key={label}>
+                <span>{label}</span>
+                <input
+                  aria-label={label}
+                  autoComplete="off"
+                  onChange={(event) => setActor(index, event.target.value)}
+                  spellCheck={false}
+                  type="text"
+                  value={actors[index]}
+                />
+              </label>
+            ),
+          )}
+        </div>
+        {validation === "DUPLICATE" && (
+          <p className="form-notice form-notice--error" role="alert">{copy.order.threeDistinct}</p>
+        )}
+        {validation === "INVALID" && (
+          <p className="form-notice" role="status">{copy.order.threeValid}</p>
+        )}
+
+        <div className="order-fields">
+          <label>
+            <span>{copy.order.orderId}</span>
+            <input
+              autoComplete="off"
+              onChange={(event) => setOrderId(event.target.value)}
+              type="text"
+              value={orderId}
+            />
+          </label>
+          <label>
+            <span>{copy.order.deliveryFee}</span>
+            <input
+              inputMode="numeric"
+              onChange={(event) => setDeliveryFeeWei(event.target.value.trim())}
+              type="text"
+              value={deliveryFeeWei}
+            />
+          </label>
+        </div>
+
+        <dl className="amount-summary">
+          <div><dt>{copy.order.itemSubtotal}</dt><dd><code>{amounts?.subtotal.toString() ?? "INVALID"}</code></dd></div>
+          <div><dt>{copy.order.deliveryFee}</dt><dd><code>{amounts?.deliveryFee.toString() ?? "INVALID"}</code></dd></div>
+          <div><dt>{copy.order.total}</dt><dd><code>{amounts?.total.toString() ?? "INVALID"}</code></dd></div>
+        </dl>
+        {!amounts && <p className="form-notice form-notice--error" role="alert">{copy.order.invalidAmount}</p>}
+
+        <section className="manifest-preview" aria-labelledby="manifest-title">
+          <h2 id="manifest-title">{copy.order.manifest}</h2>
+          <pre data-testid="canonical-manifest">{canonicalManifest}</pre>
+          <h3>{copy.order.evidenceManifest}</h3>
+          <pre>{canonicalEvidence}</pre>
+          <h3>{copy.order.digest}</h3>
+          <code className="digest" data-testid="manifest-digest">
+            {digest ?? copy.order.awaitingDigest}
+          </code>
+        </section>
+
+        {configuration.status === "DEPLOYMENT_REQUIRED" && (
+          <div className="deployment-note" role="status">
+            <strong>DEPLOYMENT_REQUIRED</strong>
+            <span>{copy.order.deploymentRequired}</span>
+          </div>
+        )}
+
+        <WalletButton actors={actors} onChange={handleWalletChange} />
+        {wallet.status === "READY" && !customerConnected && (
+          <p className="form-notice form-notice--error" role="alert">{copy.order.customerMustConnect}</p>
+        )}
+
+        <button
+          className="button button--primary order-builder__submit"
+          disabled={!canCreate}
+          onClick={createOrder}
+          type="button"
+        >
+          {copy.order.create}
+        </button>
+        {pending && <p className="form-notice" role="status">{copy.order.writing}</p>}
+        {stage && <p className="transaction-stage"><code>{stage}</code></p>}
+        {error && <p className="form-notice form-notice--error" role="alert">{error}</p>}
+      </section>
+
+      {authoritativeOrder && (
+        <div>
+          <h2 className="sr-only">{copy.order.authoritativeState}</h2>
+          <RoleConsole address={wallet.address} order={authoritativeOrder} />
+        </div>
+      )}
+    </div>
+  );
+}
