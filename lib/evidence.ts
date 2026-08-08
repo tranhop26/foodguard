@@ -150,6 +150,10 @@ export function canonicalizeEvidence(value: EvidenceDocument): string {
   return canonicalize(digestPreimage(validateEvidenceShape(value)));
 }
 
+export function canonicalizeEvidenceEnvelope(value: EvidenceDocument): string {
+  return canonicalize(validateEvidenceShape(value) as JsonValue);
+}
+
 export async function hashEvidence(value: EvidenceDocument): Promise<HexDigest> {
   const bytes = new TextEncoder().encode(canonicalizeEvidence(value));
   const digest = await crypto.subtle.digest("SHA-256", bytes);

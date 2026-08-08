@@ -12,6 +12,7 @@ import {
   type WalletRole,
   type WalletSnapshot,
 } from "../wallet/WalletButton";
+import { authoritativeNowMs, type AuthoritativeClock } from "./authoritativeClock";
 
 export interface FoodGuardOrderView {
   acceptance_deadline?: bigint | number | string;
@@ -50,6 +51,8 @@ export interface RoleAction {
 
 interface RoleConsoleProps {
   address?: string | null;
+  clock?: AuthoritativeClock | null;
+  evidenceWritesEnabled?: boolean;
   onAction?(action: RoleAction, order: FoodGuardOrderView): Promise<FoodGuardOrderView>;
   order: FoodGuardOrderView;
   writesEnabled?: boolean;
@@ -153,6 +156,8 @@ function actionFor(
 
 export function RoleConsole({
   address,
+  clock,
+  evidenceWritesEnabled = true,
   onAction,
   order,
   writesEnabled = true,
@@ -178,7 +183,11 @@ export function RoleConsole({
 
     const refreshAtBoundary = () => {
       if (!active) return;
-      const nowMs = BigInt(Date.now());
+      const nowMs = authoritativeNowMs(clock);
+      if (nowMs === null) {
+        setNowSeconds(null);
+        return;
+      }
       const currentSeconds = nowMs / 1_000n;
       setNowSeconds(currentSeconds);
 
@@ -203,10 +212,10 @@ export function RoleConsole({
       active = false;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [authoritativeOrder.acceptance_deadline, authoritativeOrder.review_deadline]);
+  }, [authoritativeOrder.acceptance_deadline, authoritativeOrder.review_deadline, clock]);
 
   async function performAction() {
-    if (!action || pending || !writesEnabled) return;
+    if (!action || pending || !writesEnabled || (action.requiresEvidence && !evidenceWritesEnabled)) return;
     setError(null);
     setNotice(null);
     if (action.requiresEvidence && !onAction) {
@@ -264,7 +273,7 @@ export function RoleConsole({
       {action && (
         <button
           className="button button--primary"
-          disabled={pending || !writesEnabled}
+          disabled={pending || !writesEnabled || (action.requiresEvidence && !evidenceWritesEnabled)}
           onClick={performAction}
           type="button"
         >

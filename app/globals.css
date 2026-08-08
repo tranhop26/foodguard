@@ -1384,3 +1384,330 @@ button.button--quiet:disabled {
     width: 100%;
   }
 }
+
+.order-detail-workspace,
+.proof-view {
+  display: grid;
+  gap: 24px;
+}
+
+.order-detail-heading,
+.proof-view__header {
+  padding: clamp(26px, 5vw, 52px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background:
+    radial-gradient(circle at 92% 8%, rgba(229, 111, 85, 0.18), transparent 18rem),
+    var(--green-900);
+  color: var(--white);
+  box-shadow: var(--shadow-soft);
+}
+
+.order-detail-heading .eyebrow,
+.proof-view__header .eyebrow {
+  margin-top: 0;
+  color: #f6ac91;
+}
+
+.order-detail-heading h1,
+.proof-view__header h1 {
+  max-width: 760px;
+  margin-bottom: 20px;
+  font-size: clamp(2.4rem, 5vw, 4.5rem);
+}
+
+.proof-view__header > p:last-child {
+  max-width: 720px;
+  margin-bottom: 0;
+  color: #d7e4df;
+}
+
+.order-detail-heading .button {
+  margin-top: 20px;
+  border-color: rgba(255, 255, 255, 0.34);
+  color: var(--white);
+}
+
+.order-card,
+.transaction-lifecycle {
+  min-width: 0;
+  padding: clamp(22px, 4vw, 36px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--white);
+  box-shadow: var(--shadow-soft);
+}
+
+.order-card h2,
+.transaction-lifecycle h2 {
+  margin-bottom: 18px;
+  font-size: clamp(1.65rem, 3vw, 2.35rem);
+}
+
+.order-facts,
+.order-deadlines {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 20px 0;
+  padding: 0;
+  gap: 12px;
+}
+
+.order-facts > div,
+.order-deadlines > div {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  background: var(--cream-100);
+}
+
+.order-detail-heading .order-facts > div {
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.order-facts dt,
+.order-deadlines dt {
+  margin-bottom: 6px;
+  color: var(--ink-soft);
+  font-size: 0.69rem;
+  font-weight: 850;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.order-detail-heading .order-facts dt {
+  color: #cbdad4;
+}
+
+.order-facts dd,
+.order-deadlines dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 0.8rem;
+  font-weight: 750;
+}
+
+.order-facts dd span,
+.order-deadlines dd span {
+  display: block;
+  margin-top: 3px;
+  color: var(--ink-soft);
+  font-size: 0.7rem;
+}
+
+.order-detail-heading .order-facts dd span {
+  color: #cbdad4;
+}
+
+.order-timeline {
+  display: flex;
+  margin: 0;
+  padding: 8px 3px 14px;
+  gap: 8px;
+  overflow-x: auto;
+  list-style: none;
+  scrollbar-width: thin;
+}
+
+.order-timeline li {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  min-height: 38px;
+  padding: 5px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--cream-100);
+  color: var(--ink-soft);
+  font-size: 0.68rem;
+}
+
+.order-timeline li[data-active="true"] {
+  border-color: var(--green-900);
+  background: var(--green-900);
+  color: var(--white);
+}
+
+.outcome-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.outcome-table {
+  width: 100%;
+  min-width: 620px;
+  border-collapse: collapse;
+}
+
+.outcome-table th,
+.outcome-table td {
+  padding: 15px 13px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.outcome-table thead th {
+  color: var(--ink-soft);
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.outcome-table tbody th code,
+.outcome-table td code {
+  display: block;
+  margin-top: 4px;
+  color: var(--coral-700);
+  font-size: 0.72rem;
+}
+
+.evidence-history,
+.transaction-lifecycle ol {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  gap: 10px;
+  list-style: none;
+}
+
+.evidence-history li,
+.transaction-lifecycle li {
+  display: grid;
+  min-width: 0;
+  padding: 13px 15px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  gap: 5px;
+  background: var(--cream-100);
+  overflow-wrap: anywhere;
+  font-size: 0.76rem;
+}
+
+.evidence-history a {
+  color: var(--green-700);
+}
+
+.transaction-lifecycle ol {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.transaction-lifecycle li[data-complete="true"] {
+  border-color: rgba(33, 96, 77, 0.4);
+  background: var(--green-100);
+}
+
+.transaction-lifecycle li span {
+  color: var(--ink-soft);
+  font-size: 0.7rem;
+}
+
+.evidence-drawer > label,
+.evidence-facts label {
+  display: grid;
+  margin: 14px 0;
+  gap: 7px;
+  color: var(--green-900);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.evidence-drawer input,
+.evidence-drawer select {
+  width: 100%;
+  min-height: 48px;
+  padding: 9px 12px;
+  border: 1px solid rgba(23, 55, 46, 0.24);
+  border-radius: 11px;
+  background: var(--cream-50);
+  color: var(--ink);
+  font: inherit;
+}
+
+.evidence-facts {
+  margin: 20px 0;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+}
+
+.evidence-facts legend {
+  padding: 0 7px;
+  color: var(--green-900);
+  font-weight: 850;
+}
+
+.evidence-preview {
+  margin: 24px 0;
+  padding: clamp(18px, 3vw, 28px);
+  border-radius: 17px;
+  background: var(--green-900);
+  color: var(--white);
+}
+
+.evidence-preview h3 {
+  margin: 20px 0 8px;
+  font-size: 0.85rem;
+}
+
+.evidence-preview pre,
+.proof-readback {
+  max-width: 100%;
+  margin: 0;
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 10px;
+  overflow: auto;
+  background: rgba(0, 0, 0, 0.16);
+  color: #f8ded4;
+  font-size: 0.7rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.evidence-metadata > div {
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.evidence-metadata dt,
+.evidence-metadata dd span {
+  color: #cbdad4;
+}
+
+.proof-readback {
+  border-color: var(--border);
+  background: var(--green-900);
+}
+
+.proof-resolution-digests {
+  display: grid;
+  margin-top: 20px;
+  gap: 8px;
+}
+
+.proof-resolution-digests code {
+  overflow-wrap: anywhere;
+  font-size: 0.72rem;
+}
+
+@media (max-width: 900px) {
+  .transaction-lifecycle ol {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .order-facts,
+  .order-deadlines {
+    grid-template-columns: 1fr;
+  }
+
+  .order-card,
+  .transaction-lifecycle {
+    border-radius: 16px;
+  }
+}
