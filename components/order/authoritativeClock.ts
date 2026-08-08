@@ -33,9 +33,15 @@ export function sampleAuthoritativeClock(
   ) return null;
   if (previous !== null && seconds === previous.seconds) return previous;
   const sampledAtMonotonicMs = now();
-  return sampledAtMonotonicMs === null
-    ? null
-    : { sampledAtMonotonicMs, seconds };
+  if (sampledAtMonotonicMs === null) return null;
+  if (previous !== null) {
+    if (sampledAtMonotonicMs < previous.sampledAtMonotonicMs) return null;
+    const elapsedMs = Math.floor(sampledAtMonotonicMs - previous.sampledAtMonotonicMs);
+    const lastTrustedElapsedMs = Math.min(elapsedMs, MAX_CHAIN_SAMPLE_AGE_MS);
+    const previousEffectiveMs = previous.seconds * 1_000n + BigInt(lastTrustedElapsedMs);
+    if (seconds * 1_000n < previousEffectiveMs) return previous;
+  }
+  return { sampledAtMonotonicMs, seconds };
 }
 
 export function authoritativeNowMs(

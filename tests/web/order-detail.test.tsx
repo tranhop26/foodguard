@@ -31,7 +31,7 @@ import { ItemOutcomeTable, type OrderDetailView } from "../../components/order/I
 import { OrderTimeline } from "../../components/order/OrderTimeline";
 import { TransactionLifecycle } from "../../components/order/TransactionLifecycle";
 import { LocaleProvider, type Locale } from "../../lib/i18n";
-import type { EvidenceDocument } from "../../lib/domain";
+import type { EvidenceDocument, OrderState } from "../../lib/domain";
 import { canonicalizeEvidenceEnvelope, hashEvidence } from "../../lib/evidence";
 import {
   OrderDetailWorkspace,
@@ -285,6 +285,16 @@ describe("authoritative order outcome presentation", () => {
     expect(sampleAuthoritativeClock(MAX_AUTHORITATIVE_CHAIN_SECONDS + 1n, () => 1)).toBeNull();
     expect(sampleAuthoritativeClock(999n, () => 2, previous)).toBeNull();
     expect(sampleAuthoritativeClock(1_000n, () => 2, previous)).toBe(previous);
+  });
+
+  it("preserves the prior clock when a higher block second trails its extrapolated time", () => {
+    const previous = { sampledAtMonotonicMs: 1, seconds: 1_000n };
+
+    expect(sampleAuthoritativeClock(1_005n, () => 15_001, previous)).toBe(previous);
+    expect(sampleAuthoritativeClock(1_015n, () => 15_001, previous)).toEqual({
+      sampledAtMonotonicMs: 15_001,
+      seconds: 1_015n,
+    });
   });
 
   it("names the eligible actor for an actor-bound consensus retry", () => {
@@ -726,6 +736,45 @@ describe("order detail readback orchestration", () => {
     genlayerMocks.readFoodGuard.mockResolvedValue(inconsistentOrder);
     await expect(readAuthoritativeOrder("fg-mixed")).rejects.toThrow(/refund|cancel/i);
   });
+
+  const normalAcceptedStates: OrderState[] = [
+    "ACCEPTED", "READY_FOR_PICKUP", "IN_TRANSIT", "REVIEW_WINDOW", "RESOLVING",
+    "EVIDENCE_CURE", "RESOLVED", "APPEALED", "ESCALATED", "SETTLED",
+  ];
+  const malformedAcceptanceCases: Array<[OrderState, boolean, boolean]> = [
+    ["FUNDED", true, false],
+    ["FUNDED", false, true],
+    ["FUNDED", true, true],
+    ["PARTIALLY_ACCEPTED", false, false],
+    ["PARTIALLY_ACCEPTED", true, true],
+    ...normalAcceptedStates.flatMap((state): Array<[OrderState, boolean, boolean]> => [
+      [state, false, false],
+      [state, true, false],
+      [state, false, true],
+    ]),
+    ["CANCELLED_REFUNDED", true, false],
+    ["CANCELLED_REFUNDED", false, true],
+    ["CANCELLED_REFUNDED", true, true],
+  ];
+
+  it.each(malformedAcceptanceCases)(
+    "rejects %s with malformed acceptance flags restaurant=%s courier=%s",
+    async (state, restaurantAccepted, courierAccepted) => {
+      const terminal = state === "SETTLED" || state === "CANCELLED_REFUNDED";
+      const cancelled = state === "CANCELLED_REFUNDED";
+      genlayerMocks.readFoodGuard.mockResolvedValue({
+        ...BASE_ORDER,
+        courier_accepted: courierAccepted,
+        delivery_settled: terminal,
+        items_settled: terminal,
+        refund_emitted: cancelled,
+        restaurant_accepted: restaurantAccepted,
+        state,
+      });
+
+      await expect(readAuthoritativeOrder("fg-mixed")).rejects.toThrow(/acceptance flags/i);
+    },
+  );
 
   it.each([
     ["RESOLVED", "1"],

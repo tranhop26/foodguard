@@ -180,10 +180,17 @@ function authoritativeBase(value: unknown, expectedOrderId: string): OrderDetail
     throw new TypeError("Order settlement flags are inconsistent with its state");
   }
   const cancelled = value.state === "CANCELLED_REFUNDED";
-  if (
-    Boolean(value.refund_emitted) !== cancelled ||
-    (cancelled && (value.restaurant_accepted || value.courier_accepted))
-  ) throw new TypeError("Order refund and cancellation flags are inconsistent with its state");
+  const acceptanceIsConsistent = value.state === "FUNDED" || cancelled
+    ? !value.restaurant_accepted && !value.courier_accepted
+    : value.state === "PARTIALLY_ACCEPTED"
+      ? value.restaurant_accepted !== value.courier_accepted
+      : value.restaurant_accepted && value.courier_accepted;
+  if (!acceptanceIsConsistent) {
+    throw new TypeError("Order acceptance flags are inconsistent with its state or cancellation");
+  }
+  if (Boolean(value.refund_emitted) !== cancelled) {
+    throw new TypeError("Order refund and cancellation flags are inconsistent with its state");
+  }
   const base = {
     ...value,
     acceptance_deadline: unsignedRaw(value.acceptance_deadline, "acceptance_deadline"),
