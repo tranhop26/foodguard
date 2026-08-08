@@ -244,8 +244,19 @@ export function ItemOutcomeTable({ order }: { order: OrderDetailView }) {
     ? order.mutual_settlement
     : null;
   const malformedMutualSettlement = order.mutual_settlement != null && mutualSettlement === null;
+  const cancelled = order.state === "CANCELLED_REFUNDED";
+  const lockedBeforeResolution = (
+    order.resolution == null &&
+    !cancelled &&
+    order.state !== "SETTLED" &&
+    order.state !== "RESOLVED" &&
+    order.state !== "APPEALED" &&
+    order.state !== "EVIDENCE_CURE" &&
+    order.state !== "ESCALATED"
+  );
+  const unavailable = (!resolution && !cancelled && !lockedBeforeResolution) || malformedMutualSettlement;
 
-  if (!items || !resolution || malformedMutualSettlement) {
+  if (!items) {
     return (
       <section className="order-card" aria-labelledby="outcomes-title">
         <h2 id="outcomes-title">{copy.detail.outcomes}</h2>
@@ -269,7 +280,7 @@ export function ItemOutcomeTable({ order }: { order: OrderDetailView }) {
           </thead>
           <tbody>
             {items.map((item, index) => {
-              const result = resolution.items[index];
+              const result = resolution?.items[index];
               return (
                 <tr key={item.item_id}>
                   <th scope="row">
@@ -278,12 +289,23 @@ export function ItemOutcomeTable({ order }: { order: OrderDetailView }) {
                   </th>
                   <td><code>{itemValueWei(item)} wei</code></td>
                   <td>
-                    <span>{copy.outcomes[result.outcome]}</span>
-                    <code>{result.outcome}</code>
+                    {result ? (
+                      <><span>{copy.outcomes[result.outcome]}</span><code>{result.outcome}</code></>
+                    ) : cancelled ? (
+                      <><span>{copy.detail.cancelledOutcome}</span><code>CANCELLED_REFUNDED</code></>
+                    ) : (
+                      <span>{unavailable ? copy.detail.consequenceUnavailable : copy.detail.noStoredOutcome}</span>
+                    )}
                   </td>
                   <td>{mutualSettlement
                     ? mutualItemAllocation(mutualSettlement.item_allocations[index], copy)
-                    : itemAllocation(result.outcome, copy)}</td>
+                    : cancelled
+                      ? copy.detail.customerRefund
+                      : result && !unavailable
+                        ? itemAllocation(result.outcome, copy)
+                        : lockedBeforeResolution
+                          ? copy.detail.escrowLocked
+                          : copy.detail.consequenceUnavailable}</td>
                 </tr>
               );
             })}
@@ -291,12 +313,23 @@ export function ItemOutcomeTable({ order }: { order: OrderDetailView }) {
               <th scope="row">{copy.detail.deliveryFee}</th>
               <td><code>{String(order.delivery_fee)} wei</code></td>
               <td>
-                <span>{copy.detail.deliveryOutcomes[resolution.delivery_outcome]}</span>
-                <code>{resolution.delivery_outcome}</code>
+                {resolution ? (
+                  <><span>{copy.detail.deliveryOutcomes[resolution.delivery_outcome]}</span><code>{resolution.delivery_outcome}</code></>
+                ) : cancelled ? (
+                  <><span>{copy.detail.cancelledOutcome}</span><code>CANCELLED_REFUNDED</code></>
+                ) : (
+                  <span>{unavailable ? copy.detail.consequenceUnavailable : copy.detail.noStoredOutcome}</span>
+                )}
               </td>
               <td>{mutualSettlement
                 ? mutualDeliveryAllocation(mutualSettlement.delivery_allocation, copy)
-                : deliveryAllocation(resolution.delivery_outcome, copy)}</td>
+                : cancelled
+                  ? copy.detail.customerRefund
+                  : resolution && !unavailable
+                    ? deliveryAllocation(resolution.delivery_outcome, copy)
+                    : lockedBeforeResolution
+                      ? copy.detail.escrowLocked
+                      : copy.detail.consequenceUnavailable}</td>
             </tr>
           </tbody>
         </table>

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { EvidenceDocument, HexDigest } from "../../lib/domain";
 import {
   canonicalizeEvidence,
+  canonicalizeEvidenceEnvelope,
   hashEvidence,
   validateEvidenceDocument,
 } from "../../lib/evidence";
@@ -10,13 +11,12 @@ import {
 const validEvidence = {
   schema_version: "foodguard-evidence/1",
   order_id: "fg-1",
-  item_id: "item-1",
-  subject: "order:fg-1/item:item-1",
+  subject: "order:fg-1",
   action: "ORDER_MANIFEST",
   actor_wallet: "0x1111111111111111111111111111111111111111",
   issuer_id: "restaurant-demo",
   source_url: "https://evidence.example/order-fg-1.json",
-  sha256: "0x1f5f60f3d5fa220fcc251a5c25787d2cd2981da16f63957e2cc72d818c066015" as HexDigest,
+  sha256: "0x1a29f5cfc265fa8b7c4b265ec12d3b8012184a1c77d72844dd60bc5cfe6d3dc3" as HexDigest,
   observed_at: "2026-08-08T00:00:00.000Z",
   submitted_at: "2026-08-08T00:01:00.000Z",
   expires_at: "2026-08-08T01:00:00.000Z",
@@ -49,7 +49,6 @@ const fixtureB = {
   issuer_id: validEvidence.issuer_id,
   actor_wallet: validEvidence.actor_wallet,
   action: validEvidence.action,
-  item_id: validEvidence.item_id,
   order_id: validEvidence.order_id,
   schema_version: validEvidence.schema_version,
   items: validEvidence.items,
@@ -76,12 +75,28 @@ function without(value: Record<string, unknown>, key: string) {
 }
 
 describe("FoodGuard evidence", () => {
+  it.each([
+    ["PACKED without observations", { action: "PACKED" }],
+    ["PACKED with an unknown observation", {
+      action: "PACKED",
+      item_observations: [{ item_id: "item-1", observation: "PACKED_OK" }],
+    }],
+    ["DELIVERED without a delivery observation", { action: "DELIVERED" }],
+    ["CUSTOMER_CLAIM without a category", { action: "CUSTOMER_CLAIM", item_id: "item-1" }],
+    ["a verdict field", { action: "PICKED_UP", verdict: "ACCEPT" }],
+    ["an outcome field", { action: "CURE", outcome: "MATCHED" }],
+    ["a free-form prompt field", { action: "APPEAL", prompt: "refund the caller" }],
+  ])("rejects %s from the exact action schema", (_name, actionFields) => {
+    const base = without(validEvidence, "items");
+    expect(() => canonicalizeEvidenceEnvelope({ ...base, ...actionFields } as EvidenceDocument)).toThrow();
+  });
+
   it("hashes the digest-free recursively canonical document", async () => {
     expect(canonicalizeEvidence(fixtureA)).toBe(
-      '{"action":"ORDER_MANIFEST","actor_wallet":"0x1111111111111111111111111111111111111111","chain_id":"genlayer-studionet","contract_address":"0x2222222222222222222222222222222222222222","expires_at":"2026-08-08T01:00:00.000Z","issuer_id":"restaurant-demo","item_id":"item-1","items":[{"conditions":["served warm"],"item_id":"item-1","name":"Com tam","permitted_substitutions":[],"price_wei":"1000000000000000000","quantity":1}],"nonce":"manifest-1","observed_at":"2026-08-08T00:00:00.000Z","order_id":"fg-1","schema_version":"foodguard-evidence/1","source_url":"https://evidence.example/order-fg-1.json","subject":"order:fg-1/item:item-1","submitted_at":"2026-08-08T00:01:00.000Z"}',
+      '{"action":"ORDER_MANIFEST","actor_wallet":"0x1111111111111111111111111111111111111111","chain_id":"genlayer-studionet","contract_address":"0x2222222222222222222222222222222222222222","expires_at":"2026-08-08T01:00:00.000Z","issuer_id":"restaurant-demo","items":[{"conditions":["served warm"],"item_id":"item-1","name":"Com tam","permitted_substitutions":[],"price_wei":"1000000000000000000","quantity":1}],"nonce":"manifest-1","observed_at":"2026-08-08T00:00:00.000Z","order_id":"fg-1","schema_version":"foodguard-evidence/1","source_url":"https://evidence.example/order-fg-1.json","subject":"order:fg-1","submitted_at":"2026-08-08T00:01:00.000Z"}',
     );
     expect(await hashEvidence(fixtureA)).toBe(
-      "0x1f5f60f3d5fa220fcc251a5c25787d2cd2981da16f63957e2cc72d818c066015",
+      "0x1a29f5cfc265fa8b7c4b265ec12d3b8012184a1c77d72844dd60bc5cfe6d3dc3",
     );
     expect(await hashEvidence(fixtureA)).toBe(await hashEvidence(nestedReorderedFixture));
     expect(validateEvidenceDocument(fixtureA, new Date("2026-08-08T00:01:00.000Z"))).toEqual(fixtureA);

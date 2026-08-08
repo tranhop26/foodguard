@@ -16,6 +16,14 @@ const requiredStringFields = [
   "order_id", "subject", "actor_wallet", "issuer_id", "source_url", "sha256", "observed_at",
   "submitted_at", "expires_at", "chain_id", "contract_address", "nonce",
 ] as const;
+const baseEvidenceFields = new Set([
+  "action", "actor_wallet", "chain_id", "contract_address", "expires_at", "issuer_id",
+  "nonce", "observed_at", "order_id", "schema_version", "sha256", "source_url", "subject",
+  "submitted_at",
+]);
+const packedObservationCodes = new Set(["PACKED_AS_ORDERED", "NOT_PACKED", "PACKED_DIFFERENT"]);
+const deliveryObservationCodes = new Set(["HANDOFF_CONFIRMED", "HANDOFF_FAILED"]);
+const claimCategoryCodes = new Set(["ABSENT_AT_RECEIPT", "NOT_AS_ORDERED", "HANDOFF_NOT_RECEIVED"]);
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
@@ -47,6 +55,9 @@ function assertJsonValue(value: unknown, path: string, ancestors = new WeakSet<o
 
 function assertOrderItem(value: unknown, index: number): asserts value is OrderItem {
   if (!isPlainObject(value)) throw new TypeError(`items[${index}] must be an object`);
+  if (Object.keys(value).sort().join(",") !== "conditions,item_id,name,permitted_substitutions,price_wei,quantity") {
+    throw new TypeError(`items[${index}] must use the exact order-item schema`);
+  }
   for (const field of ["item_id", "name", "price_wei"] as const) {
     if (typeof value[field] !== "string" || value[field].length === 0) {
       throw new TypeError(`items[${index}].${field} must be a non-empty string`);
@@ -60,6 +71,66 @@ function assertOrderItem(value: unknown, index: number): asserts value is OrderI
       throw new TypeError(`items[${index}].${field} must be an array of strings`);
     }
   }
+}
+
+function assertExactEvidenceFields(
+  value: Record<string, unknown>,
+  requiredActionFields: string[],
+  optionalActionFields: string[] = [],
+): void {
+  const allowed = new Set([...baseEvidenceFields, ...requiredActionFields, ...optionalActionFields]);
+  if (Object.keys(value).some((field) => !allowed.has(field))) {
+    throw new TypeError("evidence contains a field outside its exact action schema");
+  }
+  if (requiredActionFields.some((field) => !(field in value))) {
+    throw new TypeError("evidence is missing an action-specific typed fact");
+  }
+}
+
+function validateActionSchema(value: Record<string, unknown>, action: EvidenceAction): void {
+  if (action === "ORDER_MANIFEST") {
+    assertExactEvidenceFields(value, ["items"]);
+    if (!Array.isArray(value.items) || value.items.length === 0) throw new TypeError("items must be a non-empty array");
+    value.items.forEach(assertOrderItem);
+    return;
+  }
+  if (action === "PACKED") {
+    assertExactEvidenceFields(value, ["item_observations"]);
+    if (!Array.isArray(value.item_observations) || value.item_observations.length === 0) {
+      throw new TypeError("PACKED evidence requires item_observations");
+    }
+    const ids = new Set<string>();
+    for (const observation of value.item_observations) {
+      if (
+        !isPlainObject(observation) ||
+        Object.keys(observation).sort().join(",") !== "item_id,observation" ||
+        typeof observation.item_id !== "string" || !observation.item_id || ids.has(observation.item_id) ||
+        typeof observation.observation !== "string" || !packedObservationCodes.has(observation.observation)
+      ) throw new TypeError("PACKED evidence item_observations are malformed");
+      ids.add(observation.item_id);
+    }
+    return;
+  }
+  if (action === "DELIVERED") {
+    assertExactEvidenceFields(value, ["delivery_observation"]);
+    if (typeof value.delivery_observation !== "string" || !deliveryObservationCodes.has(value.delivery_observation)) {
+      throw new TypeError("DELIVERED evidence delivery_observation is malformed");
+    }
+    return;
+  }
+  if (action === "CUSTOMER_CLAIM") {
+    assertExactEvidenceFields(value, ["claim_category", "item_id"]);
+    if (
+      typeof value.item_id !== "string" || !value.item_id ||
+      typeof value.claim_category !== "string" || !claimCategoryCodes.has(value.claim_category)
+    ) throw new TypeError("CUSTOMER_CLAIM evidence typed facts are malformed");
+    return;
+  }
+  if (action === "CURE" || action === "APPEAL") {
+    assertExactEvidenceFields(value, [], ["item_id"]);
+    return;
+  }
+  assertExactEvidenceFields(value, []);
 }
 
 function parseTimestamp(value: string, field: string): number {
@@ -79,6 +150,7 @@ function validateEvidenceShape(value: unknown): EvidenceDocument {
   if (typeof value.action !== "string" || !evidenceActions.has(value.action as EvidenceAction)) {
     throw new TypeError("action must be a FoodGuard evidence action");
   }
+  validateActionSchema(value, value.action as EvidenceAction);
   for (const field of requiredStringFields) {
     if (typeof value[field] !== "string" || value[field].trim().length === 0) {
       throw new TypeError(`${field} must be a non-empty string`);
@@ -89,10 +161,6 @@ function validateEvidenceShape(value: unknown): EvidenceDocument {
   }
   if (value.item_id !== undefined && (typeof value.item_id !== "string" || value.item_id.length === 0)) {
     throw new TypeError("item_id must be a non-empty string when present");
-  }
-  if (value.items !== undefined) {
-    if (!Array.isArray(value.items)) throw new TypeError("items must be an array");
-    value.items.forEach(assertOrderItem);
   }
   return value as EvidenceDocument;
 }

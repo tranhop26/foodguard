@@ -29,13 +29,24 @@ export function ProofView({
   order: OrderDetailView;
 }) {
   const { copy } = useLocale();
+  const terminalVerified = (
+    (order.state === "SETTLED" || order.state === "CANCELLED_REFUNDED") &&
+    order.settlement != null
+  );
 
   return (
     <article className="proof-view" aria-labelledby="proof-title">
       <header className="proof-view__header">
-        <p className="eyebrow">{copy.detail.proofEyebrow}</p>
-        <h1 id="proof-title">{copy.detail.proofTitle}</h1>
+        <p className="eyebrow">
+          {terminalVerified ? copy.detail.proofEyebrowTerminal : copy.detail.proofEyebrowCurrent}
+        </p>
+        <h1 id="proof-title">
+          {terminalVerified ? copy.detail.proofTitleTerminal : copy.detail.proofTitleCurrent}
+        </h1>
         <p>{copy.detail.proofIntro}</p>
+        {!terminalVerified && (
+          <p className="form-notice form-notice--warning">{copy.detail.nonterminalProof}</p>
+        )}
       </header>
       <section className="order-card" aria-labelledby="proof-domain-title">
         <h2 id="proof-domain-title">{copy.detail.proofDomain}</h2>

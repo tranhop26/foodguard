@@ -17,6 +17,7 @@ import {
 import { OrderTimeline } from "../../../components/order/OrderTimeline";
 import {
   authoritativeNowMs,
+  MAX_AUTHORITATIVE_CHAIN_SECONDS,
   MAX_CHAIN_SAMPLE_AGE_MS,
   sampleAuthoritativeClock,
   type AuthoritativeClock,
@@ -178,6 +179,11 @@ function authoritativeBase(value: unknown, expectedOrderId: string): OrderDetail
   if (Boolean(value.items_settled) !== finalState || Boolean(value.delivery_settled) !== finalState) {
     throw new TypeError("Order settlement flags are inconsistent with its state");
   }
+  const cancelled = value.state === "CANCELLED_REFUNDED";
+  if (
+    Boolean(value.refund_emitted) !== cancelled ||
+    (cancelled && (value.restaurant_accepted || value.courier_accepted))
+  ) throw new TypeError("Order refund and cancellation flags are inconsistent with its state");
   const base = {
     ...value,
     acceptance_deadline: unsignedRaw(value.acceptance_deadline, "acceptance_deadline"),
@@ -233,6 +239,16 @@ async function evidenceRecord(value: unknown, order: OrderDetailView): Promise<E
   if ((envelope.item_id ?? "") !== itemId) throw new TypeError("Evidence item binding is malformed");
   const items = authoritativeManifest(order.manifest_json);
   if (itemId && !items.some((item) => item.item_id === itemId)) throw new TypeError("Evidence item binding is malformed");
+  if (value.action === "PACKED") {
+    const observations = envelope.item_observations;
+    if (
+      !Array.isArray(observations) ||
+      observations.length !== items.length ||
+      observations.some((observation, index) => (
+        !plainObject(observation) || observation.item_id !== items[index].item_id
+      ))
+    ) throw new TypeError("Evidence packed item bindings are malformed");
+  }
   const expectedSubject = itemId ? `order:${order.order_id}/item:${itemId}` : `order:${order.order_id}`;
   if (value.subject !== expectedSubject) throw new TypeError("Evidence subject binding is malformed");
   const actor = (value.actor_wallet as string).toLowerCase();
@@ -304,6 +320,40 @@ function parseResolution(value: unknown, manifestJson: string): ResolutionView {
     evidence_hashes: parsed.evidence_hashes as string[],
     items,
   };
+}
+
+function hasUnresolvedOutcome(resolution: ResolutionView): boolean {
+  return (
+    resolution.delivery_outcome === "UNRESOLVED" ||
+    resolution.items.some((item) => item.outcome === "UNRESOLVED")
+  );
+}
+
+function assertStateResolutionConsistency(
+  order: OrderDetailView,
+  roundRaw: string,
+  resolution: ResolutionView | null,
+): void {
+  const round = BigInt(roundRaw);
+  if (round > MAX_U64) throw new TypeError("Resolution round is outside its safe domain");
+  if (!resolutionStates.has(order.state)) {
+    if (round !== 0n || resolution !== null) throw new TypeError("Order state and resolution round are inconsistent");
+    return;
+  }
+  if (!resolution || round === 0n) throw new TypeError("Order state requires a stored resolution round");
+  const unresolved = hasUnresolvedOutcome(resolution);
+  if ((order.state === "RESOLVED" || order.state === "APPEALED") && unresolved) {
+    throw new TypeError("Resolved order state cannot contain UNRESOLVED outcomes");
+  }
+  if (order.state === "EVIDENCE_CURE") {
+    if (!unresolved) throw new TypeError("EVIDENCE_CURE requires an UNRESOLVED outcome");
+  }
+  if (order.state === "ESCALATED" && (round < 2n || !unresolved)) {
+    throw new TypeError("ESCALATED requires a later UNRESOLVED round");
+  }
+  if (order.state === "SETTLED" && unresolved && round < 2n) {
+    throw new TypeError("A mutually settled UNRESOLVED order requires an escalated round");
+  }
 }
 
 function parseSettlement(value: unknown): SettlementView {
@@ -447,6 +497,7 @@ export async function readAuthoritativeOrder(orderId: string): Promise<OrderDeta
       )
     ) throw new TypeError("Resolution evidence digests do not match append-only evidence");
   }
+  assertStateResolutionConsistency(order, round, resolution);
   const settlement = order.state === "SETTLED" || order.state === "CANCELLED_REFUNDED"
     ? parseSettlement(await readFoodGuard<unknown>("get_order_settlement", [normalizedOrderId]))
     : null;
@@ -466,10 +517,7 @@ export async function readAuthoritativeOrder(orderId: string): Promise<OrderDeta
     if (order.state === "SETTLED") {
       if (!resolution) throw new TypeError("Settled order resolution is missing");
       const items = authoritativeManifest(order.manifest_json);
-      const hasUnresolved = (
-        resolution.delivery_outcome === "UNRESOLVED" ||
-        resolution.items.some((item) => item.outcome === "UNRESOLVED")
-      );
+      const hasUnresolved = hasUnresolvedOutcome(resolution);
       if (hasUnresolved) {
         mutualSettlement = await parseMutualSettlement(
           await readFoodGuard<unknown>("get_settlement_proposal", [normalizedOrderId]),
@@ -519,7 +567,11 @@ export async function readAuthoritativeOrder(orderId: string): Promise<OrderDeta
 
 export async function readAuthoritativeChainTime(): Promise<bigint> {
   const block = await getFoodGuardReadClient().getBlock();
-  if (typeof block.timestamp !== "bigint" || block.timestamp < 0n) {
+  if (
+    typeof block.timestamp !== "bigint" ||
+    block.timestamp < 0n ||
+    block.timestamp > MAX_AUTHORITATIVE_CHAIN_SECONDS
+  ) {
     throw new TypeError("Authoritative chain time is unavailable");
   }
   return block.timestamp;
@@ -593,21 +645,25 @@ export function OrderDetailWorkspace({
     let refreshTimer: number | undefined;
     let staleTimer: number | undefined;
     let sampleGeneration = 0;
+    let lastAcceptedClock: AuthoritativeClock | null = null;
     const refresh = async () => {
       try {
         const seconds = await readChainTime();
         if (!active) return;
-        const sample = sampleAuthoritativeClock(seconds);
+        const sample = sampleAuthoritativeClock(seconds, undefined, lastAcceptedClock);
         if (!sample) throw new TypeError("Monotonic time is unavailable");
-        const generation = ++sampleGeneration;
-        if (staleTimer !== undefined) window.clearTimeout(staleTimer);
-        setClock(sample);
-        setClockError(null);
-        staleTimer = window.setTimeout(() => {
-          if (!active || generation !== sampleGeneration) return;
-          setClock(null);
-          setClockError(copy.detail.chainTimeUnavailable);
-        }, MAX_CHAIN_SAMPLE_AGE_MS + 1);
+        if (sample !== lastAcceptedClock) {
+          lastAcceptedClock = sample;
+          const generation = ++sampleGeneration;
+          if (staleTimer !== undefined) window.clearTimeout(staleTimer);
+          setClock(sample);
+          setClockError(null);
+          staleTimer = window.setTimeout(() => {
+            if (!active || generation !== sampleGeneration) return;
+            setClock(null);
+            setClockError(copy.detail.chainTimeUnavailable);
+          }, MAX_CHAIN_SAMPLE_AGE_MS + 1);
+        }
       } catch {
         if (!active) return;
         sampleGeneration += 1;

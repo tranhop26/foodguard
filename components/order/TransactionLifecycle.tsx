@@ -30,6 +30,7 @@ export function TransactionLifecycle({
   const consensusPending = currentIndex >= progression.indexOf("CONSENSUS_PENDING") || stage === "CONSENSUS_FAILED" || stage === "EXECUTION_ERROR";
   const finalized = currentIndex >= progression.indexOf("FINALIZED") || stage === "EXECUTION_ERROR";
   const readbackConfirmed = stage === "READBACK_CONFIRMED";
+  const permissionlessRetry = operation === "request_resolution" || operation === "execute_settlement";
 
   return (
     <section className="transaction-lifecycle" aria-live="polite" aria-labelledby="transaction-title">
@@ -72,16 +73,16 @@ export function TransactionLifecycle({
           <span>{readbackConfirmed ? copy.detail.readbackConfirmed : copy.detail.readbackPending}</span>
         </li>
       </ol>
-      {stage === "CONSENSUS_FAILED" && operation === "request_resolution" && (
+      {stage === "CONSENSUS_FAILED" && permissionlessRetry && (
         <p className="form-notice form-notice--warning">{copy.detail.consensusUnchanged}</p>
       )}
-      {stage === "CONSENSUS_FAILED" && operation !== "request_resolution" && actorAddress && operation && (
+      {stage === "CONSENSUS_FAILED" && !permissionlessRetry && actorAddress && operation && (
         <p className="form-notice form-notice--warning">
           {copy.detail.consensusActorRetry} <code>{actorAddress}</code>{" "}
           {copy.detail.consensusOperation} <code>{operation}</code>
         </p>
       )}
-      {stage === "CONSENSUS_FAILED" && operation !== "request_resolution" && (!actorAddress || !operation) && (
+      {stage === "CONSENSUS_FAILED" && !permissionlessRetry && (!actorAddress || !operation) && (
         <p className="form-notice form-notice--warning">{copy.detail.consensusRetryUnspecified}</p>
       )}
     </section>

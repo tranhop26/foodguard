@@ -21,7 +21,9 @@ vi.mock("../../lib/genlayer/transactions", () => ({
 import { AppealPanel } from "../../components/order/AppealPanel";
 import {
   authoritativeNowMs,
+  MAX_AUTHORITATIVE_CHAIN_SECONDS,
   MAX_CHAIN_SAMPLE_AGE_MS,
+  sampleAuthoritativeClock,
 } from "../../components/order/authoritativeClock";
 import { ConsensusPanel } from "../../components/order/ConsensusPanel";
 import { EvidenceDrawer } from "../../components/order/EvidenceDrawer";
@@ -156,6 +158,15 @@ async function sha256Text(value: string): Promise<string> {
   return `0x${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
+function canonicalTestJson(value: unknown): string {
+  if (value === null || typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalTestJson).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalTestJson(record[key])}`).join(",")}}`;
+}
+
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
@@ -188,6 +199,39 @@ describe("authoritative order outcome presentation", () => {
     expect(screen.getByText("DELIVERY_FAILED")).toBeVisible();
     expect(screen.getByText("Restaurant allocation")).toBeVisible();
     expect(screen.getAllByText("Customer refund")).toHaveLength(2);
+  });
+
+  it("renders every reserved consequence before a resolution exists", () => {
+    renderLocalized(
+      <ItemOutcomeTable order={{ ...BASE_ORDER, resolution: null, state: "ACCEPTED" }} />,
+      "en",
+    );
+
+    expect(screen.getAllByRole("row")).toHaveLength(4);
+    expect(screen.getAllByText("Locked in escrow")).toHaveLength(3);
+    expect(screen.getAllByText(/no stored outcome/i)).toHaveLength(3);
+  });
+
+  it("renders every cancelled commitment as refunded", () => {
+    renderLocalized(
+      <ItemOutcomeTable
+        order={{
+          ...BASE_ORDER,
+          courier_accepted: false,
+          delivery_settled: true,
+          items_settled: true,
+          refund_emitted: true,
+          resolution: null,
+          restaurant_accepted: false,
+          state: "CANCELLED_REFUNDED",
+        }}
+      />,
+      "en",
+    );
+
+    expect(screen.getAllByRole("row")).toHaveLength(4);
+    expect(screen.getAllByText("Customer refund")).toHaveLength(3);
+    expect(screen.getAllByText("CANCELLED_REFUNDED")).toHaveLength(3);
   });
 
   it("shows UNRESOLVED as locked funds with a cure action", () => {
@@ -235,6 +279,14 @@ describe("authoritative order outcome presentation", () => {
     expect(authoritativeNowMs(clock, () => 500 + MAX_CHAIN_SAMPLE_AGE_MS + 1)).toBeNull();
   });
 
+  it("rejects out-of-domain and regressing authoritative chain samples", () => {
+    const previous = { sampledAtMonotonicMs: 1, seconds: 1_000n };
+    expect(sampleAuthoritativeClock(-1n, () => 1)).toBeNull();
+    expect(sampleAuthoritativeClock(MAX_AUTHORITATIVE_CHAIN_SECONDS + 1n, () => 1)).toBeNull();
+    expect(sampleAuthoritativeClock(999n, () => 2, previous)).toBeNull();
+    expect(sampleAuthoritativeClock(1_000n, () => 2, previous)).toBe(previous);
+  });
+
   it("names the eligible actor for an actor-bound consensus retry", () => {
     renderLocalized(
       <TransactionLifecycle
@@ -257,6 +309,16 @@ describe("authoritative order outcome presentation", () => {
     );
 
     expect(screen.getByText(/anyone may retry safely/i)).toBeVisible();
+  });
+
+  it("keeps execute_settlement consensus retry explicitly permissionless", () => {
+    renderLocalized(
+      <TransactionLifecycle operation="execute_settlement" stage="CONSENSUS_FAILED" />,
+      "en",
+    );
+
+    expect(screen.getByText(/anyone may retry safely/i)).toBeVisible();
+    expect(screen.queryByText(/depends on the original contract operation/i)).not.toBeInTheDocument();
   });
 
   it("hides appeal after its strict deadline", () => {
@@ -613,6 +675,99 @@ describe("order detail readback orchestration", () => {
     expect(result.resolution_round).toBe("2");
   });
 
+  it("rejects stored evidence that omits its action-specific typed facts", async () => {
+    const valid = await storedPackedEvidence();
+    const malformed = JSON.parse(valid.envelope_json) as Record<string, unknown>;
+    delete malformed.item_observations;
+    delete malformed.sha256;
+    const sha256 = await sha256Text(canonicalTestJson(malformed));
+    const envelopeJson = canonicalTestJson({ ...malformed, sha256 });
+    genlayerMocks.readFoodGuard.mockImplementation((method: string) => {
+      if (method === "get_order") return Promise.resolve({ ...BASE_ORDER, state: "ACCEPTED" });
+      if (method === "get_evidence_count") return Promise.resolve("1");
+      if (method === "get_evidence") return Promise.resolve({
+        ...malformed,
+        envelope_json: envelopeJson,
+        item_id: "",
+        sha256,
+      });
+      if (method === "get_round") return Promise.resolve("0");
+      throw new Error(`unexpected method ${method}`);
+    });
+
+    await expect(readAuthoritativeOrder("fg-mixed")).rejects.toThrow(/evidence envelope readback/i);
+  });
+
+  it.each([
+    ["a cancelled order without its refund marker", {
+      ...BASE_ORDER,
+      courier_accepted: false,
+      delivery_settled: true,
+      items_settled: true,
+      refund_emitted: false,
+      restaurant_accepted: false,
+      state: "CANCELLED_REFUNDED",
+    }],
+    ["a cancelled order retaining an acceptance flag", {
+      ...BASE_ORDER,
+      courier_accepted: false,
+      delivery_settled: true,
+      items_settled: true,
+      refund_emitted: true,
+      restaurant_accepted: true,
+      state: "CANCELLED_REFUNDED",
+    }],
+    ["a non-cancelled order with a refund marker", {
+      ...BASE_ORDER,
+      refund_emitted: true,
+      state: "ACCEPTED",
+    }],
+  ])("rejects %s", async (_name, inconsistentOrder) => {
+    genlayerMocks.readFoodGuard.mockResolvedValue(inconsistentOrder);
+    await expect(readAuthoritativeOrder("fg-mixed")).rejects.toThrow(/refund|cancel/i);
+  });
+
+  it.each([
+    ["RESOLVED", "1"],
+  ])("rejects a categorically inconsistent %s resolution readback", async (state, round) => {
+    const order = { ...UNRESOLVED_ORDER, state };
+    genlayerMocks.readFoodGuard.mockImplementation((method: string) => {
+      if (method === "get_order") return Promise.resolve(order);
+      if (method === "get_evidence_count") return Promise.resolve("0");
+      if (method === "get_resolution") return Promise.resolve(JSON.stringify(UNRESOLVED_ORDER.resolution));
+      if (method === "get_round") return Promise.resolve(round);
+      throw new Error(`unexpected method ${method}`);
+    });
+
+    await expect(readAuthoritativeOrder("fg-mixed")).rejects.toThrow(/state|round|resolution/i);
+  });
+
+  it("accepts a later first-unresolved EVIDENCE_CURE round with mixed outcomes", async () => {
+    const evidence = await storedPackedEvidence();
+    const mixedFirstUnresolved = {
+      delivery_outcome: "UNRESOLVED",
+      evidence_hashes: [evidence.sha256],
+      items: [
+        { facts: ["matched"], item_id: "item-1", outcome: "MATCHED" },
+        { facts: ["insufficient"], item_id: "item-2", outcome: "UNRESOLVED" },
+      ],
+    };
+    genlayerMocks.readFoodGuard.mockImplementation((method: string) => {
+      if (method === "get_order") return Promise.resolve({ ...UNRESOLVED_ORDER, state: "EVIDENCE_CURE" });
+      if (method === "get_evidence_count") return Promise.resolve("1");
+      if (method === "get_evidence") return Promise.resolve(evidence);
+      if (method === "get_resolution") return Promise.resolve(JSON.stringify(mixedFirstUnresolved));
+      if (method === "get_round") return Promise.resolve("2");
+      throw new Error(`unexpected method ${method}`);
+    });
+
+    await expect(readAuthoritativeOrder("fg-mixed")).resolves.toMatchObject({
+      resolution: { delivery_outcome: "UNRESOLVED" },
+      resolution_round: "2",
+      state: "EVIDENCE_CURE",
+    });
+  });
+
   it("rejects a resolution digest that is absent from append-only evidence", async () => {
     genlayerMocks.readFoodGuard.mockImplementation((method: string) => {
       if (method === "get_order") return Promise.resolve(MIXED_OUTCOME_ORDER);
@@ -751,9 +906,11 @@ describe("order detail readback orchestration", () => {
     }));
     const cancelledOrder = {
       ...BASE_ORDER,
+      courier_accepted: false,
       delivery_settled: true,
       items_settled: true,
       refund_emitted: true,
+      restaurant_accepted: false,
       state: "CANCELLED_REFUNDED",
     };
     genlayerMocks.readFoodGuard.mockImplementation((method: string) => {
@@ -799,7 +956,8 @@ describe("order detail readback orchestration", () => {
       "en",
     );
 
-    expect(screen.getByText(/no well-formed authoritative resolution/i)).toBeVisible();
+    expect(screen.getAllByRole("row")).toHaveLength(4);
+    expect(screen.getAllByText(/unavailable from malformed readback/i)).toHaveLength(3);
   });
 
   it("rejects a stored evidence record without its exact canonical envelope", async () => {
@@ -1123,6 +1281,7 @@ describe("immutable settlement proof", () => {
     expect(screen.queryByText(/contract source hash/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/transaction hash/i)).not.toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /immutable verified settlement/i })).toBeVisible();
   });
 
   it("omits unavailable transaction and settlement identifiers without placeholders", () => {
@@ -1138,5 +1297,8 @@ describe("immutable settlement proof", () => {
     expect(screen.queryByText("Transaction hash")).not.toBeInTheDocument();
     expect(screen.queryByText("Settlement ID")).not.toBeInTheDocument();
     expect(screen.queryByText(/unknown|placeholder|0x000000/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /current contract readback/i })).toBeVisible();
+    expect(screen.getByText(/nonterminal/i)).toBeVisible();
+    expect(screen.queryByText(/immutable/i)).not.toBeInTheDocument();
   });
 });
