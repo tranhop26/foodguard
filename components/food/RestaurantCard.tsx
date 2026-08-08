@@ -3,6 +3,7 @@ import Image from "next/image";
 import type { Restaurant } from "../../lib/domain";
 
 interface RestaurantCardProps {
+  eager?: boolean;
   restaurant: Restaurant;
 }
 
@@ -20,7 +21,7 @@ export function formatSimulatedGen(priceWei: string): string {
   return fraction ? `${whole},${fraction}` : whole.toString();
 }
 
-export function RestaurantCard({ restaurant }: RestaurantCardProps) {
+export function RestaurantCard({ eager = false, restaurant }: RestaurantCardProps) {
   const titleId = `restaurant-${restaurant.restaurant_id}`;
 
   return (
@@ -30,6 +31,7 @@ export function RestaurantCard({ restaurant }: RestaurantCardProps) {
           src={restaurant.image_src}
           alt={restaurant.image_alt}
           fill
+          loading={eager ? "eager" : "lazy"}
           sizes="(max-width: 639px) calc(100vw - 40px), (max-width: 1023px) 46vw, 30vw"
         />
         <span className="restaurant-card__proof">

@@ -4,17 +4,60 @@ import { Hero } from "../components/food/Hero";
 import { ProofStrip } from "../components/food/ProofStrip";
 import { RestaurantCard } from "../components/food/RestaurantCard";
 import type { Restaurant } from "../lib/domain";
-import { getFoodGuardConfiguration } from "../lib/genlayer/config";
+import {
+  getFoodGuardConfiguration,
+  type FoodGuardConfiguration,
+} from "../lib/genlayer/config";
 
 const categories: FoodCategory[] = [
-  { label: "Cơm Việt", slug: "com-viet" },
-  { label: "Món nước", slug: "mon-nuoc" },
-  { label: "Món chay", slug: "mon-chay" },
-  { label: "Cuốn & gỏi", slug: "cuon-goi" },
-  { label: "Bánh mì", slug: "banh-mi" },
+  { catalogValue: "Cơm Việt", label: "Cơm Việt", slug: "com-viet" },
+  { catalogValue: "Món nước", label: "Món nước", slug: "mon-nuoc" },
+  { catalogValue: "Món chay", label: "Món chay", slug: "mon-chay" },
+  { catalogValue: "Cuốn & gỏi", label: "Cuốn & gỏi", slug: "cuon-goi" },
+  { catalogValue: "Bánh mì", label: "Bánh mì", slug: "banh-mi" },
 ];
 
 const restaurants = catalogData.restaurants as Restaurant[];
+
+function normalizeSearch(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .replace(/đ/giu, "d")
+    .toLocaleLowerCase("vi")
+    .trim();
+}
+
+function filterRestaurants(searchQuery: string, categorySlug: string): Restaurant[] {
+  const normalizedQuery = normalizeSearch(searchQuery);
+  const queryTerms = normalizedQuery.split(/\s+/).filter(Boolean);
+  const selectedCategory = categories.find((category) => category.slug === categorySlug);
+
+  return restaurants.filter((restaurant) => {
+    const matchesCategory = selectedCategory
+      ? restaurant.categories.includes(selectedCategory.catalogValue)
+      : true;
+    const searchable = normalizeSearch(
+      [
+        restaurant.name,
+        restaurant.description,
+        restaurant.neighborhood,
+        ...restaurant.categories,
+        restaurant.featured_item.name,
+        ...restaurant.featured_item.conditions,
+      ].join(" "),
+    );
+    const searchableTerms = searchable.split(/[^a-z0-9]+/).filter(Boolean);
+    const matchesQuery = queryTerms.every((queryTerm) =>
+      searchableTerms.some(
+        (searchableTerm) =>
+          searchableTerm === queryTerm ||
+          (queryTerm.length >= 4 && searchableTerm.startsWith(queryTerm)),
+      ),
+    );
+    return matchesCategory && matchesQuery;
+  });
+}
 
 function BrandMark() {
   return (
@@ -66,15 +109,30 @@ function SiteFooter() {
   );
 }
 
-export default function HomePage() {
-  const configuration = getFoodGuardConfiguration();
+interface LandingPageProps {
+  categorySlug?: string;
+  configuration: FoodGuardConfiguration;
+  searchQuery?: string;
+}
+
+export function LandingPage({
+  categorySlug = "",
+  configuration,
+  searchQuery = "",
+}: LandingPageProps) {
+  const selectedCategory = categories.find((category) => category.slug === categorySlug);
+  const visibleRestaurants = filterRestaurants(searchQuery, categorySlug);
+  const hasFilters = Boolean(searchQuery.trim() || selectedCategory);
 
   return (
     <div className="page-shell">
       <a className="skip-link" href="#main-content">Bỏ qua đến nội dung chính</a>
       <SiteHeader />
       <main id="main-content">
-        <Hero contractReady={configuration.status === "READY"} />
+        <Hero
+          contractReady={configuration.status === "READY"}
+          searchQuery={searchQuery}
+        />
 
         <div id="bang-chung" className="section-wrap section-wrap--proof">
           <ProofStrip />
@@ -86,18 +144,34 @@ export default function HomePage() {
               <p className="eyebrow">Catalog demo · Phiên bản 1</p>
               <h2 id="restaurants-title">Quán Việt đáng để mở thực đơn</h2>
             </div>
-            <p>
-              Sáu hồ sơ minh họa, mỗi món có dữ liệu đủ để tạo manifest ở bước đặt hàng.
+            <p aria-live="polite">
+              {hasFilters
+                ? `${visibleRestaurants.length} nhà hàng phù hợp với bộ lọc hiện tại.`
+                : "Sáu hồ sơ minh họa, mỗi món có dữ liệu đủ để tạo manifest ở bước đặt hàng."}
             </p>
           </div>
 
-          <CategoryChips categories={categories} />
+          <CategoryChips
+            activeSlug={selectedCategory?.slug}
+            categories={categories}
+            searchQuery={searchQuery}
+          />
 
-          <div className="restaurant-grid">
-            {restaurants.map((restaurant) => (
-              <RestaurantCard restaurant={restaurant} key={restaurant.restaurant_id} />
+          <div className="restaurant-grid" aria-label="Kết quả nhà hàng">
+            {visibleRestaurants.map((restaurant, index) => (
+              <RestaurantCard
+                eager={hasFilters && index === 0}
+                restaurant={restaurant}
+                key={restaurant.restaurant_id}
+              />
             ))}
           </div>
+          {visibleRestaurants.length === 0 && (
+            <div className="empty-results" role="status">
+              <h3>Chưa tìm thấy món phù hợp</h3>
+              <p>Thử từ khóa ngắn hơn hoặc quay lại danh mục “Tất cả”.</p>
+            </div>
+          )}
         </section>
 
         <section className="closing-note" aria-labelledby="closing-title">
@@ -114,5 +188,25 @@ export default function HomePage() {
       </main>
       <SiteFooter />
     </div>
+  );
+}
+
+type PageSearchParams = Promise<{
+  category?: string | string[];
+  q?: string | string[];
+}>;
+
+function firstSearchValue(value: string | string[] | undefined): string {
+  return Array.isArray(value) ? (value[0] ?? "") : (value ?? "");
+}
+
+export default async function HomePage({ searchParams }: { searchParams: PageSearchParams }) {
+  const params = await searchParams;
+  return (
+    <LandingPage
+      categorySlug={firstSearchValue(params.category)}
+      configuration={getFoodGuardConfiguration()}
+      searchQuery={firstSearchValue(params.q)}
+    />
   );
 }

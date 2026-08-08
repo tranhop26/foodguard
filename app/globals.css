@@ -603,6 +603,25 @@ button.button--quiet:disabled {
   gap: 24px;
 }
 
+.empty-results {
+  padding: 46px 28px;
+  border: 1px dashed rgba(23, 55, 46, 0.28);
+  border-radius: var(--radius-md);
+  background: var(--cream-100);
+  text-align: center;
+}
+
+.empty-results h3 {
+  margin: 0 0 6px;
+  font-family: "Iowan Old Style", Georgia, serif;
+  font-size: 1.55rem;
+}
+
+.empty-results p {
+  margin: 0;
+  color: var(--ink-soft);
+}
+
 .restaurant-card {
   min-width: 0;
   border: 1px solid rgba(23, 55, 46, 0.1);

@@ -4,13 +4,23 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
-import HomePage from "../../app/page";
+import { LandingPage } from "../../app/page";
+import { getFoodGuardConfiguration } from "../../lib/genlayer/config";
+
+const UNDEPLOYED = getFoodGuardConfiguration("");
+const READY = getFoodGuardConfiguration("0x2222222222222222222222222222222222222222");
+
+function renderLanding(
+  options: { categorySlug?: string; searchQuery?: string } = {},
+) {
+  return render(<LandingPage configuration={UNDEPLOYED} {...options} />);
+}
 
 afterEach(cleanup);
 
 describe("FoodGuard proof marketplace landing", () => {
   it("renders Vietnamese discovery with an explicit simulated-value disclosure", () => {
-    render(<HomePage />);
+    renderLanding();
 
     expect(
       screen.getByRole("heading", { name: /món ngon.*bằng chứng/i, level: 1 }),
@@ -20,7 +30,7 @@ describe("FoodGuard proof marketplace landing", () => {
   });
 
   it("provides semantic, image-led restaurant discovery", () => {
-    render(<HomePage />);
+    renderLanding();
 
     expect(screen.getByRole("banner")).toBeVisible();
     expect(screen.getByRole("main")).toBeVisible();
@@ -43,7 +53,7 @@ describe("FoodGuard proof marketplace landing", () => {
   });
 
   it("keeps marketplace discovery available while contract actions are unavailable", () => {
-    render(<HomePage />);
+    renderLanding();
 
     expect(screen.getByRole("link", { name: /khám phá 6 nhà hàng/i })).toHaveAttribute(
       "href",
@@ -56,10 +66,52 @@ describe("FoodGuard proof marketplace landing", () => {
   });
 
   it("describes hash-bound evidence and escrow as a demo rather than production trust", () => {
-    render(<HomePage />);
+    renderLanding();
 
     expect(screen.getByText(/JSON công khai.*SHA-256/i)).toBeVisible();
     expect(screen.getByText(/không phải tiền thật/i)).toBeVisible();
     expect(screen.getByText(/không tự bảo đảm món ăn đúng/i)).toBeVisible();
+  });
+
+  it("filters restaurant discovery with a diacritic-insensitive search", () => {
+    renderLanding({ searchQuery: "pho" });
+
+    expect(screen.getByRole("searchbox", { name: /tìm món ăn hoặc nhà hàng/i })).toHaveValue(
+      "pho",
+    );
+    expect(screen.getAllByRole("article")).toHaveLength(2);
+    expect(screen.getByRole("heading", { name: "Phở Sớm" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Trạm Nước Lèo" })).toBeVisible();
+    expect(screen.getByText(/2 nhà hàng phù hợp/i)).toBeVisible();
+    expect(
+      within(screen.getAllByRole("article")[0]).getByRole("img"),
+    ).not.toHaveAttribute("loading", "lazy");
+  });
+
+  it("filters by category and marks only the selected chip current", () => {
+    renderLanding({ categorySlug: "mon-chay" });
+
+    expect(screen.getAllByRole("article")).toHaveLength(1);
+    expect(screen.getByRole("heading", { name: "Bếp Lá" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "Món chay" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    expect(screen.getByRole("link", { name: "Tất cả" })).not.toHaveAttribute(
+      "aria-current",
+    );
+  });
+
+  it("shows the contract route without the deployment warning when configuration is ready", () => {
+    render(<LandingPage configuration={READY} />);
+
+    expect(screen.getByRole("link", { name: /tạo đơn qua hợp đồng/i })).toHaveAttribute(
+      "href",
+      "/create",
+    );
+    expect(
+      screen.queryByRole("button", { name: /tạo đơn qua hợp đồng/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/chưa triển khai contract trên StudioNet/i)).not.toBeInTheDocument();
   });
 });

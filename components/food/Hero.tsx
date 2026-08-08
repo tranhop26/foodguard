@@ -2,6 +2,7 @@ import Image from "next/image";
 
 interface HeroProps {
   contractReady: boolean;
+  searchQuery?: string;
 }
 
 function SearchIcon() {
@@ -13,7 +14,7 @@ function SearchIcon() {
   );
 }
 
-export function Hero({ contractReady }: HeroProps) {
+export function Hero({ contractReady, searchQuery = "" }: HeroProps) {
   return (
     <section className="hero" aria-labelledby="hero-title">
       <div className="hero__media">
@@ -40,7 +41,7 @@ export function Hero({ contractReady }: HeroProps) {
           bằng chứng công khai có thể đi cùng từng đơn.
         </p>
 
-        <form className="hero-search" role="search" action="#nha-hang">
+        <form className="hero-search" role="search" action="/#nha-hang">
           <label className="sr-only" htmlFor="marketplace-search">
             Tìm món ăn hoặc nhà hàng
           </label>
@@ -49,6 +50,7 @@ export function Hero({ contractReady }: HeroProps) {
             id="marketplace-search"
             name="q"
             type="search"
+            defaultValue={searchQuery}
             placeholder="Tìm phở, cơm nhà, món chay…"
           />
           <button type="submit">Tìm món</button>
