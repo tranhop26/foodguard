@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -166,11 +167,31 @@ describe("committed demo evidence fixtures", () => {
     const fixture = rawFixture as unknown as EvidenceDocument;
     const canonicalEnvelope = canonicalizeEvidenceEnvelope(fixture);
     const committedBytes = readFileSync(resolve("public/evidence", name));
+    const indexedBytes = execFileSync("git", ["show", `:public/evidence/${name}`]);
+    const expectedFileBytes = Buffer.from(`${canonicalEnvelope}\n`, "utf8");
 
     expect(fixture.sha256).toBe(expectedDigest);
     expect(await hashEvidence(fixture)).toBe(expectedDigest);
     expect(validateEvidenceDocument(fixture, new Date("2030-01-01T00:00:00.000Z"))).toEqual(fixture);
-    expect(committedBytes.equals(Buffer.from(`${canonicalEnvelope}\n`, "utf8"))).toBe(true);
+    expect(indexedBytes.equals(expectedFileBytes)).toBe(true);
+    expect(committedBytes.equals(expectedFileBytes)).toBe(true);
+  });
+
+  it("forces LF checkout bytes for every evidence fixture", () => {
+    const paths = fixtures.map(([name]) => `public/evidence/${name}`);
+    const values = execFileSync("git", ["check-attr", "-z", "text", "eol", "--", ...paths], {
+      encoding: "utf8",
+    }).split("\0").filter(Boolean);
+    const attributes = new Map<string, Record<string, string>>();
+
+    for (let index = 0; index < values.length; index += 3) {
+      const [path, attribute, value] = values.slice(index, index + 3);
+      attributes.set(path, { ...attributes.get(path), [attribute]: value });
+    }
+
+    for (const path of paths) {
+      expect(attributes.get(path)).toEqual({ eol: "lf", text: "set" });
+    }
   });
 
   it.each(fixtures)("binds %s to its committed public fixture path", (name, rawFixture) => {
