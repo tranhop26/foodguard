@@ -21,6 +21,8 @@ EVIDENCE_ACTION_CODES = {
     "PICKED_UP": 2,
     "DELIVERED": 3,
     "CUSTOMER_CLAIM": 4,
+    "CURE": 5,
+    "APPEAL": 6,
 }
 PACKED_ITEM_OBSERVATION_CODES = {
     "PACKED_AS_ORDERED": 1,
@@ -124,7 +126,7 @@ def _resolution_stable_fields(value, item_ids):
         type(items) is not list
         or len(items) != len(item_ids)
         or type(hashes) is not list
-        or len(hashes) > 103
+        or len(hashes) > 107
         or type(value["delivery_outcome"]) is not str
         or value["delivery_outcome"] not in DELIVERY_OUTCOMES
     ):
@@ -392,7 +394,8 @@ def _derive_resolution(manifest_json, item_ids, evidence_inputs, resolution_time
         "FOODGUARD_RESOLUTION_V1\n"
         "Resolve one delivery using only the contract-generated typed payload below. "
         "The payload contains no participant prose. action_code meanings are "
-        "1=PACKED, 2=PICKED_UP, 3=DELIVERED, 4=CUSTOMER_CLAIM. "
+        "1=PACKED, 2=PICKED_UP, 3=DELIVERED, 4=CUSTOMER_CLAIM, "
+        "5=CURE, 6=APPEAL. "
         "Packed item observation codes mean 1=affirmed as ordered, "
         "2=reported absent while packing, 3=reported different while packing. "
         "Delivery observation codes mean 1=handoff affirmed, 2=handoff failed. "
@@ -470,6 +473,20 @@ class Evidence:
     envelope_json: str
 
 
+@allow_storage
+@dataclass
+class SettlementProposal:
+    proposal_json: str
+    digest: str
+    proposal_nonce: str
+    customer_wei: u256
+    restaurant_wei: u256
+    courier_wei: u256
+    customer_signed: bool
+    restaurant_signed: bool
+    courier_signed: bool
+
+
 class FoodGuard(gl.Contract):
     orders: TreeMap[str, Order]
     item_json_by_key: TreeMap[str, str]
@@ -478,6 +495,13 @@ class FoodGuard(gl.Contract):
     used_evidence_replay_keys: TreeMap[str, bool]
     submitted_claim_keys: TreeMap[str, bool]
     resolution_json_by_order: TreeMap[str, str]
+    resolution_json_by_round: TreeMap[str, str]
+    resolution_round_by_order: TreeMap[str, u256]
+    unresolved_count_by_order: TreeMap[str, u256]
+    submitted_cure_keys: TreeMap[str, bool]
+    appeal_used_by_order: TreeMap[str, bool]
+    settlement_proposal_by_order: TreeMap[str, SettlementProposal]
+    used_settlement_nonce_keys: TreeMap[str, bool]
     deployer: Address
     creation_paused: bool
     total_inflows: u256
@@ -506,8 +530,144 @@ class FoodGuard(gl.Contract):
     def _evidence_key(self, order_id: str, evidence_index: int) -> str:
         return self._canonical_json([order_id, evidence_index])
 
+    def _resolution_key(self, order_id: str, resolution_round: int) -> str:
+        return self._canonical_json([order_id, resolution_round])
+
     def _address_hex(self, address: Address) -> str:
         return address.as_hex.lower()
+
+    def _participant_role(self, order: Order, actor: Address) -> str:
+        if actor == order.customer:
+            return "customer"
+        if actor == order.restaurant:
+            return "restaurant"
+        if actor == order.courier:
+            return "courier"
+        return ""
+
+    def _parse_allocation_wei(self, value) -> int:
+        if (
+            type(value) is not str
+            or not value
+            or len(value) > 78
+            or any(character < "0" or character > "9" for character in value)
+            or (len(value) > 1 and value.startswith("0"))
+        ):
+            raise gl.vm.UserError("[EXPECTED] invalid settlement proposal")
+        try:
+            parsed = int(value)
+            u256(parsed)
+            return parsed
+        except Exception:
+            raise gl.vm.UserError("[EXPECTED] invalid settlement proposal")
+
+    def _parse_mutual_allocation(self, order_id: str, allocation_json: str):
+        try:
+            allocation = json.loads(allocation_json)
+        except Exception:
+            raise gl.vm.UserError("[EXPECTED] invalid settlement proposal")
+        if (
+            type(allocation) is not dict
+            or set(allocation.keys()) != {
+                "delivery_allocation",
+                "item_allocations",
+                "proposal_nonce",
+            }
+            or allocation_json != self._canonical_json(allocation)
+        ):
+            raise gl.vm.UserError("[EXPECTED] invalid settlement proposal")
+
+        proposal_nonce = allocation["proposal_nonce"]
+        if (
+            type(proposal_nonce) is not str
+            or not proposal_nonce.strip()
+            or len(proposal_nonce.encode("utf-8")) > 128
+        ):
+            raise gl.vm.UserError("[EXPECTED] invalid settlement proposal")
+
+        order = self.orders[order_id]
+        manifest = json.loads(order.manifest_json)
+        item_allocations = allocation["item_allocations"]
+        delivery_allocation = allocation["delivery_allocation"]
+        if type(item_allocations) is not list or len(item_allocations) != len(
+            manifest["items"]
+        ):
+            raise gl.vm.UserError(
+                "[EXPECTED] settlement proposal recipients required"
+            )
+        if (
+            type(delivery_allocation) is not dict
+            or set(delivery_allocation.keys())
+            != {"courier_wei", "customer_wei"}
+        ):
+            raise gl.vm.UserError(
+                "[EXPECTED] settlement proposal recipients required"
+            )
+
+        restaurant_total = 0
+        customer_total = 0
+        for manifest_item, proposed_item in zip(
+            manifest["items"], item_allocations
+        ):
+            if (
+                type(proposed_item) is not dict
+                or set(proposed_item.keys())
+                != {"customer_wei", "item_id", "restaurant_wei"}
+                or proposed_item["item_id"] != manifest_item["item_id"]
+            ):
+                raise gl.vm.UserError(
+                    "[EXPECTED] settlement proposal recipients required"
+                )
+            customer_amount = self._parse_allocation_wei(
+                proposed_item["customer_wei"]
+            )
+            restaurant_amount = self._parse_allocation_wei(
+                proposed_item["restaurant_wei"]
+            )
+            item_value = int(manifest_item["price_wei"]) * manifest_item["quantity"]
+            if customer_amount + restaurant_amount != item_value:
+                raise gl.vm.UserError(
+                    "[EXPECTED] allocation must conserve order value"
+                )
+            customer_total += customer_amount
+            restaurant_total += restaurant_amount
+
+        delivery_customer = self._parse_allocation_wei(
+            delivery_allocation["customer_wei"]
+        )
+        courier_total = self._parse_allocation_wei(
+            delivery_allocation["courier_wei"]
+        )
+        if delivery_customer + courier_total != int(order.delivery_fee):
+            raise gl.vm.UserError(
+                "[EXPECTED] allocation must conserve order value"
+            )
+        customer_total += delivery_customer
+        if customer_total + restaurant_total + courier_total != int(
+            order.total_value
+        ):
+            raise gl.vm.UserError(
+                "[EXPECTED] allocation must conserve order value"
+            )
+
+        bound_proposal = dict(allocation)
+        bound_proposal["chain_id"] = str(int(gl.message.chain_id))
+        bound_proposal["contract_address"] = self._address_hex(
+            gl.message.contract_address
+        )
+        bound_proposal["order_id"] = order_id
+        proposal_json = self._canonical_json(bound_proposal)
+        digest = "0x" + hashlib.sha256(
+            proposal_json.encode("utf-8")
+        ).hexdigest()
+        return (
+            proposal_nonce,
+            proposal_json,
+            digest,
+            customer_total,
+            restaurant_total,
+            courier_total,
+        )
 
     def _now(self) -> int:
         try:
@@ -974,16 +1134,55 @@ class FoodGuard(gl.Contract):
         )
 
     @gl.public.write
+    def submit_cure_evidence(self, order_id: str, envelope_json: str) -> None:
+        if order_id not in self.orders:
+            raise gl.vm.UserError("[EXPECTED] order not found")
+        order = self.orders[order_id]
+        if order.state != "EVIDENCE_CURE":
+            raise gl.vm.UserError("[EXPECTED] invalid cure transition")
+        actor = gl.message.sender_address
+        role = self._participant_role(order, actor)
+        if not role:
+            raise gl.vm.UserError("[EXPECTED] affected actor required")
+        cure_key = self._canonical_json([order_id, role])
+        if cure_key in self.submitted_cure_keys:
+            raise gl.vm.UserError("[EXPECTED] cure already submitted")
+        self._append_evidence(order_id, "CURE", envelope_json, actor)
+        self.submitted_cure_keys[cure_key] = True
+
+    @gl.public.write
+    def appeal(self, order_id: str, envelope_json: str) -> None:
+        if order_id not in self.orders:
+            raise gl.vm.UserError("[EXPECTED] order not found")
+        if order_id in self.appeal_used_by_order:
+            raise gl.vm.UserError("[EXPECTED] appeal already used")
+        order = self.orders[order_id]
+        if order.state != "RESOLVED":
+            raise gl.vm.UserError("[EXPECTED] invalid appeal transition")
+        if self._now() >= int(order.appeal_deadline):
+            raise gl.vm.UserError("[EXPECTED] appeal deadline passed")
+        actor = gl.message.sender_address
+        if not self._participant_role(order, actor):
+            raise gl.vm.UserError("[EXPECTED] affected actor required")
+        self._append_evidence(order_id, "APPEAL", envelope_json, actor)
+        self.appeal_used_by_order[order_id] = True
+        order.state = "APPEALED"
+        self.orders[order_id] = order
+
+    @gl.public.write
     def request_resolution(self, order_id: str) -> str:
         if order_id not in self.orders:
             raise gl.vm.UserError("[EXPECTED] order not found")
         order = self.orders[order_id]
-        if order.state != "REVIEW_WINDOW":
+        if order.state not in ("REVIEW_WINDOW", "EVIDENCE_CURE", "APPEALED"):
             raise gl.vm.UserError("[EXPECTED] invalid resolution transition")
-        if self._now() < int(order.review_deadline):
+        if (
+            order.state == "REVIEW_WINDOW"
+            and self._now() < int(order.review_deadline)
+        ):
             raise gl.vm.UserError("[EXPECTED] review deadline not reached")
-        if order_id in self.resolution_json_by_order:
-            raise gl.vm.UserError("[EXPECTED] resolution already requested")
+        if order.state == "APPEALED" and self._now() < int(order.appeal_deadline):
+            raise gl.vm.UserError("[EXPECTED] appeal deadline not reached")
 
         manifest = json.loads(order.manifest_json)
         item_ids = [item["item_id"] for item in manifest["items"]]
@@ -1047,18 +1246,163 @@ class FoodGuard(gl.Contract):
             raise gl.vm.UserError("[EXPECTED] invalid consensus result")
 
         resolution_json = self._canonical_json(result)
+        resolution_round = (
+            int(self.resolution_round_by_order[order_id]) + 1
+            if order_id in self.resolution_round_by_order
+            else 1
+        )
+        self.resolution_json_by_round[
+            self._resolution_key(order_id, resolution_round)
+        ] = resolution_json
         self.resolution_json_by_order[order_id] = resolution_json
+        self.resolution_round_by_order[order_id] = u256(resolution_round)
         has_unresolved_item = any(
             item["outcome"] == "UNRESOLVED" for item in result["items"]
         )
-        order.state = (
-            "EVIDENCE_CURE"
-            if has_unresolved_item
+        is_unresolved = (
+            has_unresolved_item
             or result["delivery_outcome"] == "UNRESOLVED"
-            else "RESOLVED"
         )
+        if is_unresolved:
+            unresolved_count = (
+                int(self.unresolved_count_by_order[order_id]) + 1
+                if order_id in self.unresolved_count_by_order
+                else 1
+            )
+            self.unresolved_count_by_order[order_id] = u256(unresolved_count)
+            order.state = "ESCALATED" if unresolved_count >= 2 else "EVIDENCE_CURE"
+        else:
+            order.state = "RESOLVED"
         self.orders[order_id] = order
         return resolution_json
+
+    @gl.public.write
+    def propose_mutual_settlement(
+        self,
+        order_id: str,
+        allocation_json: str,
+    ) -> str:
+        if order_id not in self.orders:
+            raise gl.vm.UserError("[EXPECTED] order not found")
+        order = self.orders[order_id]
+        if order.state != "ESCALATED":
+            raise gl.vm.UserError("[EXPECTED] invalid settlement transition")
+        if self._now() < int(order.appeal_deadline):
+            raise gl.vm.UserError("[EXPECTED] appeal deadline not reached")
+        if not self._participant_role(order, gl.message.sender_address):
+            raise gl.vm.UserError("[EXPECTED] affected actor required")
+
+        (
+            proposal_nonce,
+            proposal_json,
+            digest,
+            customer_total,
+            restaurant_total,
+            courier_total,
+        ) = self._parse_mutual_allocation(order_id, allocation_json)
+        nonce_key = self._canonical_json(
+            [
+                str(int(gl.message.chain_id)),
+                self._address_hex(gl.message.contract_address),
+                order_id,
+                proposal_nonce,
+            ]
+        )
+        if nonce_key in self.used_settlement_nonce_keys:
+            raise gl.vm.UserError("[EXPECTED] proposal nonce already used")
+        if order_id in self.settlement_proposal_by_order:
+            raise gl.vm.UserError("[EXPECTED] settlement proposal already exists")
+
+        self.settlement_proposal_by_order[order_id] = SettlementProposal(
+            proposal_json=proposal_json,
+            digest=digest,
+            proposal_nonce=proposal_nonce,
+            customer_wei=u256(customer_total),
+            restaurant_wei=u256(restaurant_total),
+            courier_wei=u256(courier_total),
+            customer_signed=False,
+            restaurant_signed=False,
+            courier_signed=False,
+        )
+        self.used_settlement_nonce_keys[nonce_key] = True
+        return digest
+
+    def _complete_mutual_settlement(
+        self,
+        order_id: str,
+        order: Order,
+        proposal: SettlementProposal,
+    ) -> None:
+        if (
+            self.reserved_items < order.subtotal
+            or self.reserved_delivery < order.delivery_fee
+        ):
+            raise gl.vm.UserError("[EXPECTED] accounting conservation violated")
+
+        self.reserved_items -= order.subtotal
+        self.reserved_delivery -= order.delivery_fee
+        self.restaurant_payouts_emitted += proposal.restaurant_wei
+        self.courier_payouts_emitted += proposal.courier_wei
+        self.customer_refunds_emitted += proposal.customer_wei
+        order.state = "SETTLED"
+        self.orders[order_id] = order
+        self._assert_conservation()
+
+        if proposal.customer_wei > u256(0):
+            gl.get_contract_at(order.customer).emit_transfer(
+                value=proposal.customer_wei,
+                on="finalized",
+            )
+        if proposal.restaurant_wei > u256(0):
+            gl.get_contract_at(order.restaurant).emit_transfer(
+                value=proposal.restaurant_wei,
+                on="finalized",
+            )
+        if proposal.courier_wei > u256(0):
+            gl.get_contract_at(order.courier).emit_transfer(
+                value=proposal.courier_wei,
+                on="finalized",
+            )
+
+    @gl.public.write
+    def sign_mutual_settlement(self, order_id: str, digest: str) -> None:
+        if order_id not in self.orders:
+            raise gl.vm.UserError("[EXPECTED] order not found")
+        if order_id not in self.settlement_proposal_by_order:
+            raise gl.vm.UserError("[EXPECTED] settlement proposal not found")
+        order = self.orders[order_id]
+        role = self._participant_role(order, gl.message.sender_address)
+        if not role:
+            raise gl.vm.UserError("[EXPECTED] affected actor required")
+        proposal = self.settlement_proposal_by_order[order_id]
+        if digest != proposal.digest:
+            raise gl.vm.UserError(
+                "[EXPECTED] settlement proposal digest mismatch"
+            )
+        if (
+            (role == "customer" and proposal.customer_signed)
+            or (role == "restaurant" and proposal.restaurant_signed)
+            or (role == "courier" and proposal.courier_signed)
+        ):
+            raise gl.vm.UserError(
+                "[EXPECTED] settlement signature already recorded"
+            )
+        if order.state != "ESCALATED":
+            raise gl.vm.UserError("[EXPECTED] invalid settlement transition")
+
+        if role == "customer":
+            proposal.customer_signed = True
+        elif role == "restaurant":
+            proposal.restaurant_signed = True
+        else:
+            proposal.courier_signed = True
+        self.settlement_proposal_by_order[order_id] = proposal
+        if (
+            proposal.customer_signed
+            and proposal.restaurant_signed
+            and proposal.courier_signed
+        ):
+            self._complete_mutual_settlement(order_id, order, proposal)
 
     @gl.public.write
     def set_creation_paused(self, paused: bool) -> None:
@@ -1137,6 +1481,22 @@ class FoodGuard(gl.Contract):
         if order_id not in self.resolution_json_by_order:
             raise gl.vm.UserError("[EXPECTED] resolution not found")
         return self.resolution_json_by_order[order_id]
+
+    @gl.public.view
+    def get_round(self, order_id: str) -> u256:
+        if order_id not in self.orders:
+            raise gl.vm.UserError("[EXPECTED] order not found")
+        if order_id not in self.resolution_round_by_order:
+            return u256(0)
+        return self.resolution_round_by_order[order_id]
+
+    @gl.public.view
+    def get_settlement_proposal(self, order_id: str) -> SettlementProposal:
+        if order_id not in self.orders:
+            raise gl.vm.UserError("[EXPECTED] order not found")
+        if order_id not in self.settlement_proposal_by_order:
+            raise gl.vm.UserError("[EXPECTED] settlement proposal not found")
+        return self.settlement_proposal_by_order[order_id]
 
     @gl.public.view
     def get_accounting(self) -> Accounting:
