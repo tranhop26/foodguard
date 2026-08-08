@@ -1,15 +1,17 @@
 import Image from "next/image";
 
 import type { Restaurant } from "../../lib/domain";
+import type { LandingLocale } from "../../lib/landing-copy";
 
 interface RestaurantCardProps {
   eager?: boolean;
+  locale: LandingLocale;
   restaurant: Restaurant;
 }
 
 const WEI_PER_GEN = 1_000_000_000_000_000_000n;
 
-export function formatSimulatedGen(priceWei: string): string {
+export function formatSimulatedGen(priceWei: string, locale: LandingLocale = "vi"): string {
   const value = BigInt(priceWei);
   const whole = value / WEI_PER_GEN;
   const fraction = (value % WEI_PER_GEN)
@@ -18,10 +20,10 @@ export function formatSimulatedGen(priceWei: string): string {
     .slice(0, 2)
     .replace(/0+$/, "");
 
-  return fraction ? `${whole},${fraction}` : whole.toString();
+  return fraction ? `${whole}${locale === "en" ? "." : ","}${fraction}` : whole.toString();
 }
 
-export function RestaurantCard({ eager = false, restaurant }: RestaurantCardProps) {
+export function RestaurantCard({ eager = false, locale, restaurant }: RestaurantCardProps) {
   const titleId = `restaurant-${restaurant.restaurant_id}`;
 
   return (
@@ -36,7 +38,7 @@ export function RestaurantCard({ eager = false, restaurant }: RestaurantCardProp
         />
         <span className="restaurant-card__proof">
           <span aria-hidden="true">✓</span>
-          Catalog có phiên bản
+          {locale === "en" ? "Versioned catalog" : "Catalog có phiên bản"}
         </span>
       </div>
 
@@ -45,7 +47,7 @@ export function RestaurantCard({ eager = false, restaurant }: RestaurantCardProp
           <span>{restaurant.neighborhood}</span>
           <span aria-hidden="true">•</span>
           <span>
-            {restaurant.delivery_time_minutes[0]}–{restaurant.delivery_time_minutes[1]} phút
+            {restaurant.delivery_time_minutes[0]}–{restaurant.delivery_time_minutes[1]} {locale === "en" ? "min" : "phút"}
           </span>
         </div>
         <h3 id={titleId}>{restaurant.name}</h3>
@@ -53,11 +55,11 @@ export function RestaurantCard({ eager = false, restaurant }: RestaurantCardProp
 
         <div className="restaurant-card__footer">
           <div>
-            <span className="restaurant-card__item-label">Món nổi bật</span>
+            <span className="restaurant-card__item-label">{locale === "en" ? "Featured dish" : "Món nổi bật"}</span>
             <strong>{restaurant.featured_item.name}</strong>
           </div>
           <span className="restaurant-card__price">
-            Từ {formatSimulatedGen(restaurant.featured_item.price_wei)} Simulated GEN
+            {locale === "en" ? "From" : "Từ"} {formatSimulatedGen(restaurant.featured_item.price_wei, locale)} Simulated GEN
           </span>
         </div>
       </div>

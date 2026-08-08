@@ -4,17 +4,18 @@ import { Hero } from "../components/food/Hero";
 import { ProofStrip } from "../components/food/ProofStrip";
 import { RestaurantCard } from "../components/food/RestaurantCard";
 import type { Restaurant } from "../lib/domain";
+import { landingCopy, type LandingLocale } from "../lib/landing-copy";
 import {
   getFoodGuardConfiguration,
   type FoodGuardConfiguration,
 } from "../lib/genlayer/config";
 
-const categories: FoodCategory[] = [
-  { catalogValue: "Cơm Việt", label: "Cơm Việt", slug: "com-viet" },
-  { catalogValue: "Món nước", label: "Món nước", slug: "mon-nuoc" },
-  { catalogValue: "Món chay", label: "Món chay", slug: "mon-chay" },
-  { catalogValue: "Cuốn & gỏi", label: "Cuốn & gỏi", slug: "cuon-goi" },
-  { catalogValue: "Bánh mì", label: "Bánh mì", slug: "banh-mi" },
+const categoryDefinitions = [
+  { catalogValue: "Cơm Việt", en: "Vietnamese rice", vi: "Cơm Việt", slug: "com-viet" },
+  { catalogValue: "Món nước", en: "Noodle soups", vi: "Món nước", slug: "mon-nuoc" },
+  { catalogValue: "Món chay", en: "Vegetarian", vi: "Món chay", slug: "mon-chay" },
+  { catalogValue: "Cuốn & gỏi", en: "Rolls & salads", vi: "Cuốn & gỏi", slug: "cuon-goi" },
+  { catalogValue: "Bánh mì", en: "Banh mi", vi: "Bánh mì", slug: "banh-mi" },
 ];
 
 const restaurants = catalogData.restaurants as Restaurant[];
@@ -31,7 +32,7 @@ function normalizeSearch(value: string): string {
 function filterRestaurants(searchQuery: string, categorySlug: string): Restaurant[] {
   const normalizedQuery = normalizeSearch(searchQuery);
   const queryTerms = normalizedQuery.split(/\s+/).filter(Boolean);
-  const selectedCategory = categories.find((category) => category.slug === categorySlug);
+  const selectedCategory = categoryDefinitions.find((category) => category.slug === categorySlug);
 
   return restaurants.filter((restaurant) => {
     const matchesCategory = selectedCategory
@@ -70,39 +71,49 @@ function BrandMark() {
   );
 }
 
-function SiteHeader() {
+function localeHref(locale: LandingLocale, searchQuery: string, categorySlug: string): string {
+  const params = new URLSearchParams();
+  if (searchQuery) params.set("q", searchQuery);
+  if (categorySlug) params.set("category", categorySlug);
+  if (locale === "en") params.set("locale", "en");
+  const query = params.toString();
+  return `/${query ? `?${query}` : ""}`;
+}
+
+function SiteHeader({ categorySlug, locale, searchQuery }: { categorySlug: string; locale: LandingLocale; searchQuery: string }) {
+  const copy = landingCopy[locale];
   return (
     <header className="site-header">
       <div className="site-header__inner">
-        <a className="brand" href="/" aria-label="FoodGuard — trang chủ">
+        <a className="brand" href={localeHref(locale, "", "")} aria-label={copy.home}>
           <BrandMark />
           <span>FoodGuard</span>
         </a>
 
-        <nav className="site-nav" aria-label="Điều hướng chính">
-          <a href="#nha-hang">Khám phá</a>
-          <a href="#bang-chung">Cách hoạt động</a>
+        <nav className="site-nav" aria-label={copy.mainNavigation}>
+          <a href="#nha-hang">{copy.explore}</a>
+          <a href="#bang-chung">{copy.howItWorks}</a>
         </nav>
 
-        <div className="language-ready" aria-label="Ngôn ngữ mặc định: Tiếng Việt">
-          <span className="language-ready__active">VI</span>
-          <span aria-hidden="true">/</span>
-          <span lang="en" title="English-ready">EN</span>
-        </div>
+        <nav className="language-ready" aria-label={copy.language}>
+          <a aria-current={locale === "vi" ? "page" : undefined} aria-label="Tiếng Việt" href={localeHref("vi", searchQuery, categorySlug)}>VI</a>
+          <a aria-current={locale === "en" ? "page" : undefined} aria-label="English" href={localeHref("en", searchQuery, categorySlug)} lang="en">EN</a>
+        </nav>
       </div>
     </header>
   );
 }
 
-function SiteFooter() {
+function SiteFooter({ locale }: { locale: LandingLocale }) {
+  const copy = landingCopy[locale];
   return (
     <footer className="site-footer">
       <div className="site-footer__inner">
-        <a className="brand brand--footer" href="/" aria-label="FoodGuard — trang chủ">
+        <a className="brand brand--footer" href={localeHref(locale, "", "")} aria-label={copy.home}>
           <BrandMark />
           <span>FoodGuard</span>
         </a>
-        <p>Catalog demo · Bằng chứng công khai · Không lưu khóa riêng.</p>
+        <p>{copy.footer}</p>
         <p>StudioNet · Simulated GEN only</p>
       </div>
     </footer>
@@ -112,55 +123,70 @@ function SiteFooter() {
 interface LandingPageProps {
   categorySlug?: string;
   configuration: FoodGuardConfiguration;
+  locale?: LandingLocale;
   searchQuery?: string;
 }
 
 export function LandingPage({
   categorySlug = "",
   configuration,
+  locale = "vi",
   searchQuery = "",
 }: LandingPageProps) {
+  const copy = landingCopy[locale];
+  const categories: FoodCategory[] = categoryDefinitions.map((category) => ({
+    catalogValue: category.catalogValue,
+    label: category[locale],
+    slug: category.slug,
+  }));
   const selectedCategory = categories.find((category) => category.slug === categorySlug);
   const visibleRestaurants = filterRestaurants(searchQuery, categorySlug);
   const hasFilters = Boolean(searchQuery.trim() || selectedCategory);
 
   return (
-    <div className="page-shell">
-      <a className="skip-link" href="#main-content">Bỏ qua đến nội dung chính</a>
-      <SiteHeader />
+    <div className="page-shell" lang={locale}>
+      <a className="skip-link" href="#main-content">{copy.skip}</a>
+      <SiteHeader categorySlug={categorySlug} locale={locale} searchQuery={searchQuery} />
       <main id="main-content">
         <Hero
           contractReady={configuration.status === "READY"}
+          categorySlug={categorySlug}
+          locale={locale}
+          resultCount={visibleRestaurants.length}
           searchQuery={searchQuery}
         />
 
         <div id="bang-chung" className="section-wrap section-wrap--proof">
-          <ProofStrip />
+          <ProofStrip locale={locale} />
         </div>
 
         <section className="restaurant-section" id="nha-hang" aria-labelledby="restaurants-title">
           <div className="restaurant-section__heading">
             <div>
-              <p className="eyebrow">Catalog demo · Phiên bản 1</p>
-              <h2 id="restaurants-title">Quán Việt đáng để mở thực đơn</h2>
+              <p className="eyebrow">{copy.catalogEyebrow}</p>
+              <h2 id="restaurants-title">{copy.catalogTitle}</h2>
             </div>
             <p aria-live="polite">
               {hasFilters
-                ? `${visibleRestaurants.length} nhà hàng phù hợp với bộ lọc hiện tại.`
-                : "Sáu hồ sơ minh họa, mỗi món có dữ liệu đủ để tạo manifest ở bước đặt hàng."}
+                ? locale === "en"
+                  ? `${visibleRestaurants.length} restaurant${visibleRestaurants.length === 1 ? "" : "s"} match the current filters.`
+                  : `${visibleRestaurants.length} nhà hàng phù hợp với bộ lọc hiện tại.`
+                : copy.defaultResults}
             </p>
           </div>
 
           <CategoryChips
             activeSlug={selectedCategory?.slug}
             categories={categories}
+            locale={locale}
             searchQuery={searchQuery}
           />
 
-          <div className="restaurant-grid" aria-label="Kết quả nhà hàng">
+          <div className="restaurant-grid" aria-label={copy.results}>
             {visibleRestaurants.map((restaurant, index) => (
               <RestaurantCard
                 eager={hasFilters && index === 0}
+                locale={locale}
                 restaurant={restaurant}
                 key={restaurant.restaurant_id}
               />
@@ -168,31 +194,28 @@ export function LandingPage({
           </div>
           {visibleRestaurants.length === 0 && (
             <div className="empty-results" role="status">
-              <h3>Chưa tìm thấy món phù hợp</h3>
-              <p>Thử từ khóa ngắn hơn hoặc quay lại danh mục “Tất cả”.</p>
+              <h3>{copy.emptyTitle}</h3>
+              <p>{copy.emptyBody}</p>
             </div>
           )}
         </section>
 
         <section className="closing-note" aria-labelledby="closing-title">
-          <p className="eyebrow eyebrow--light">Rõ giới hạn trước khi bắt đầu</p>
+          <p className="eyebrow eyebrow--light">{copy.closingEyebrow}</p>
           <div className="closing-note__body">
-            <h2 id="closing-title">Khám phá món trước. Tin bằng chứng sau khi kiểm tra.</h2>
-            <p>
-              FoodGuard không thay nhà hàng, courier hay validator bằng một nhãn “đã xác minh”.
-              Nó minh họa cách giữ nguyên cam kết, theo dõi bằng chứng và chỉ hiển thị kết quả
-              sau khi contract đọc lại trạng thái.
-            </p>
+            <h2 id="closing-title">{copy.closingTitle}</h2>
+            <p>{copy.closingBody}</p>
           </div>
         </section>
       </main>
-      <SiteFooter />
+      <SiteFooter locale={locale} />
     </div>
   );
 }
 
 type PageSearchParams = Promise<{
   category?: string | string[];
+  locale?: string | string[];
   q?: string | string[];
 }>;
 
@@ -206,6 +229,7 @@ export default async function HomePage({ searchParams }: { searchParams: PageSea
     <LandingPage
       categorySlug={firstSearchValue(params.category)}
       configuration={getFoodGuardConfiguration()}
+      locale={firstSearchValue(params.locale) === "en" ? "en" : "vi"}
       searchQuery={firstSearchValue(params.q)}
     />
   );

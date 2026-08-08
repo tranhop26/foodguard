@@ -11,7 +11,7 @@ const UNDEPLOYED = getFoodGuardConfiguration("");
 const READY = getFoodGuardConfiguration("0x2222222222222222222222222222222222222222");
 
 function renderLanding(
-  options: { categorySlug?: string; searchQuery?: string } = {},
+  options: { categorySlug?: string; locale?: "vi" | "en"; searchQuery?: string } = {},
 ) {
   return render(<LandingPage configuration={UNDEPLOYED} {...options} />);
 }
@@ -62,6 +62,7 @@ describe("FoodGuard proof marketplace landing", () => {
     expect(
       screen.getByRole("button", { name: /tạo đơn qua hợp đồng/i }),
     ).toBeDisabled();
+    expect(screen.getByText("DEPLOYMENT_REQUIRED")).toBeVisible();
     expect(screen.getByText(/chưa triển khai contract trên StudioNet/i)).toBeVisible();
   });
 
@@ -83,6 +84,7 @@ describe("FoodGuard proof marketplace landing", () => {
     expect(screen.getByRole("heading", { name: "Phở Sớm" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "Trạm Nước Lèo" })).toBeVisible();
     expect(screen.getByText(/2 nhà hàng phù hợp/i)).toBeVisible();
+    expect(screen.getByRole("link", { name: /khám phá 2 nhà hàng/i })).toBeVisible();
     expect(
       within(screen.getAllByRole("article")[0]).getByRole("img"),
     ).not.toHaveAttribute("loading", "lazy");
@@ -93,6 +95,7 @@ describe("FoodGuard proof marketplace landing", () => {
 
     expect(screen.getAllByRole("article")).toHaveLength(1);
     expect(screen.getByRole("heading", { name: "Bếp Lá" })).toBeVisible();
+    expect(screen.getByRole("link", { name: /khám phá 1 nhà hàng/i })).toBeVisible();
     expect(screen.getByRole("link", { name: "Món chay" })).toHaveAttribute(
       "aria-current",
       "page",
@@ -113,5 +116,34 @@ describe("FoodGuard proof marketplace landing", () => {
       screen.queryByRole("button", { name: /tạo đơn qua hợp đồng/i }),
     ).not.toBeInTheDocument();
     expect(screen.queryByText(/chưa triển khai contract trên StudioNet/i)).not.toBeInTheDocument();
+    expect(screen.queryByText("DEPLOYMENT_REQUIRED")).not.toBeInTheDocument();
+  });
+
+  it("provides a real English content path while preserving active discovery filters", () => {
+    renderLanding({ categorySlug: "mon-nuoc", locale: "en", searchQuery: "pho" });
+
+    expect(
+      screen.getByRole("heading", { name: /good food.*evidence/i, level: 1 }),
+    ).toBeVisible();
+    expect(screen.getByText("StudioNet · Simulated GEN")).toBeVisible();
+    expect(screen.getByRole("searchbox", { name: /search dishes or restaurants/i })).toHaveValue(
+      "pho",
+    );
+    expect(screen.getByRole("link", { name: /explore 2 restaurants/i })).toBeVisible();
+    expect(screen.getByText(/2 restaurants match the current filters/i)).toBeVisible();
+    expect(screen.getByText(/public JSON.*SHA-256/i)).toBeVisible();
+    expect(screen.getByText(/not real money/i)).toBeVisible();
+
+    const languageNavigation = screen.getByRole("navigation", { name: /language/i });
+    expect(within(languageNavigation).getByRole("link", { name: "English" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    const vietnameseHref = within(languageNavigation)
+      .getByRole("link", { name: "Tiếng Việt" })
+      .getAttribute("href");
+    expect(vietnameseHref).toContain("q=pho");
+    expect(vietnameseHref).toContain("category=mon-nuoc");
+    expect(vietnameseHref).not.toContain("locale=");
   });
 });

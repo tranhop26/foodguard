@@ -1,7 +1,11 @@
 import Image from "next/image";
+import { landingCopy, type LandingLocale } from "../../lib/landing-copy";
 
 interface HeroProps {
   contractReady: boolean;
+  categorySlug?: string;
+  locale: LandingLocale;
+  resultCount: number;
   searchQuery?: string;
 }
 
@@ -14,13 +18,17 @@ function SearchIcon() {
   );
 }
 
-export function Hero({ contractReady, searchQuery = "" }: HeroProps) {
+export function Hero({ categorySlug = "", contractReady, locale, resultCount, searchQuery = "" }: HeroProps) {
+  const copy = landingCopy[locale];
+  const resultLabel = locale === "en"
+    ? `Explore ${resultCount} restaurant${resultCount === 1 ? "" : "s"}`
+    : `Khám phá ${resultCount} nhà hàng`;
   return (
     <section className="hero" aria-labelledby="hero-title">
       <div className="hero__media">
         <Image
           src="/images/foodguard/hero-marketplace.webp"
-          alt="Bàn món Việt với phở, bánh xèo và cuốn tươi"
+          alt={copy.heroAlt}
           fill
           priority
           sizes="(max-width: 767px) 100vw, (max-width: 1439px) 94vw, 1320px"
@@ -34,16 +42,13 @@ export function Hero({ contractReady, searchQuery = "" }: HeroProps) {
           <span>StudioNet · Simulated GEN</span>
         </div>
 
-        <p className="eyebrow">Marketplace có lớp kiểm chứng</p>
-        <h1 id="hero-title">Món ngon đến cửa, bằng chứng đi cùng.</h1>
-        <p className="hero__lede">
-          Chọn món Việt từ catalog demo, xem trước cam kết món ăn và hiểu cách
-          bằng chứng công khai có thể đi cùng từng đơn.
-        </p>
+        <p className="eyebrow">{copy.heroEyebrow}</p>
+        <h1 id="hero-title">{copy.heroTitle}</h1>
+        <p className="hero__lede">{copy.heroLede}</p>
 
         <form className="hero-search" role="search" action="/#nha-hang">
           <label className="sr-only" htmlFor="marketplace-search">
-            Tìm món ăn hoặc nhà hàng
+            {copy.searchLabel}
           </label>
           <span className="hero-search__icon"><SearchIcon /></span>
           <input
@@ -51,33 +56,34 @@ export function Hero({ contractReady, searchQuery = "" }: HeroProps) {
             name="q"
             type="search"
             defaultValue={searchQuery}
-            placeholder="Tìm phở, cơm nhà, món chay…"
+            placeholder={copy.searchPlaceholder}
           />
-          <button type="submit">Tìm món</button>
+          {locale === "en" && <input type="hidden" name="locale" value="en" />}
+          {categorySlug && <input type="hidden" name="category" value={categorySlug} />}
+          <button type="submit">{copy.searchButton}</button>
         </form>
 
         <div className="hero__actions">
           <a className="button button--primary" href="#nha-hang">
-            Khám phá 6 nhà hàng
+            {resultLabel}
             <span aria-hidden="true">↓</span>
           </a>
           {contractReady ? (
             <a className="button button--quiet" href="/create">
-              Tạo đơn qua hợp đồng
+              {copy.createOrder}
             </a>
           ) : (
             <button className="button button--quiet" type="button" disabled>
-              Tạo đơn qua hợp đồng
+              {copy.createOrder}
             </button>
           )}
         </div>
 
         {!contractReady && (
-          <p className="deployment-note" role="status">
-            <span aria-hidden="true">!</span>
-            Chưa triển khai contract trên StudioNet — khám phá vẫn sẵn sàng,
-            thao tác hợp đồng đang khóa.
-          </p>
+          <div className="deployment-note" role="status">
+            <strong>DEPLOYMENT_REQUIRED</strong>
+            <span>{copy.deployment}</span>
+          </div>
         )}
       </div>
     </section>
