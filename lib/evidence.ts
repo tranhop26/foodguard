@@ -53,7 +53,11 @@ function valueIn<const T extends readonly string[]>(options: T, value: unknown):
   return typeof value === "string" && (options as readonly string[]).includes(value);
 }
 
-function assertCorrectionStatement(value: unknown, path = "statement"): asserts value is CorrectionStatement {
+function assertCorrectionStatement(
+  value: unknown,
+  path = "statement",
+  manifestItems?: readonly OrderItem[],
+): asserts value is CorrectionStatement {
   if (!isPlainObject(value) || typeof value.effective_action !== "string" || !correctionActions.has(value.effective_action as CorrectionEffectiveAction)) {
     throw new TypeError(`${path} must use a supported effective_action`);
   }
@@ -61,8 +65,12 @@ function assertCorrectionStatement(value: unknown, path = "statement"): asserts 
     if (!hasExactKeys(value, ["effective_action", "item_observations"]) || !Array.isArray(value.item_observations) || value.item_observations.length === 0) {
       throw new TypeError(`${path} PACKED facts are malformed`);
     }
+    if (manifestItems && value.item_observations.length !== manifestItems.length) {
+      throw new TypeError(`${path} PACKED observations must match every manifest item`);
+    }
     const itemIds = new Set<string>();
     for (const [itemIndex, item] of value.item_observations.entries()) {
+      const manifestItem = manifestItems?.[itemIndex];
       if (
         !isPlainObject(item) ||
         !hasExactKeys(item, ["condition_statuses", "item_id", "item_status", "quantity_status", "substitution_index"]) ||
@@ -70,8 +78,14 @@ function assertCorrectionStatement(value: unknown, path = "statement"): asserts 
         !valueIn(PACKED_ITEM_STATUS_OPTIONS, item.item_status) ||
         !valueIn(QUANTITY_STATUS_OPTIONS, item.quantity_status) ||
         !Number.isSafeInteger(item.substitution_index) ||
-        (item.item_status === "PERMITTED_SUBSTITUTION" ? (item.substitution_index as number) < 0 : item.substitution_index !== -1) ||
-        !Array.isArray(item.condition_statuses)
+        (item.item_status === "PERMITTED_SUBSTITUTION"
+          ? (item.substitution_index as number) < 0 || (manifestItem !== undefined && (item.substitution_index as number) >= manifestItem.permitted_substitutions.length)
+          : item.substitution_index !== -1) ||
+        !Array.isArray(item.condition_statuses) ||
+        (manifestItem !== undefined && (
+          item.item_id !== manifestItem.item_id ||
+          item.condition_statuses.length !== manifestItem.conditions.length
+        ))
       ) throw new TypeError(`${path}.item_observations[${itemIndex}] is malformed`);
       itemIds.add(item.item_id);
       for (const [conditionIndex, condition] of item.condition_statuses.entries()) {
@@ -121,7 +135,11 @@ function correctionSlots(document: EvidenceDocument): Array<[CorrectionEffective
   return [[document.action as CorrectionEffectiveAction, document.action === "CUSTOMER_CLAIM" ? document.item_id ?? "" : ""]];
 }
 
-function validateBatchCorrection(value: Record<string, unknown>, targets?: readonly EvidenceDocument[]): void {
+function validateBatchCorrection(
+  value: Record<string, unknown>,
+  targets?: readonly EvidenceDocument[],
+  manifestItems?: readonly OrderItem[],
+): void {
   assertExactEvidenceFields(value, ["statements", "supersedes_evidence_indices"]);
   if (
     value.item_id !== undefined ||
@@ -135,10 +153,7 @@ function validateBatchCorrection(value: Record<string, unknown>, targets?: reado
     if (!Number.isSafeInteger(target) || (target as number) <= previous) throw new TypeError("correction targets must be strictly increasing safe integers");
     previous = target as number;
   }
-  statements.forEach((statement, index) => assertCorrectionStatement(statement, `statements[${index}]`));
-  if (!targets && directTargets.length > 1 && directTargets.length !== statements.length) {
-    throw new TypeError("correction target slots and statements must have equal length");
-  }
+  statements.forEach((statement, index) => assertCorrectionStatement(statement, `statements[${index}]`, manifestItems));
   const expectedSlots = targets
     ? targets.flatMap(correctionSlots)
     : directTargets.map((_target, index) => {
@@ -216,7 +231,11 @@ function assertExactEvidenceFields(
   }
 }
 
-function validateActionSchema(value: Record<string, unknown>, action: EvidenceAction): void {
+function validateActionSchema(
+  value: Record<string, unknown>,
+  action: EvidenceAction,
+  manifestItems?: readonly OrderItem[],
+): void {
   if (action === "ORDER_MANIFEST") {
     assertExactEvidenceFields(value, ["items"]);
     if (!Array.isArray(value.items) || value.items.length === 0) throw new TypeError("items must be a non-empty array");
@@ -256,7 +275,7 @@ function validateActionSchema(value: Record<string, unknown>, action: EvidenceAc
     return;
   }
   if (action === "CURE" || action === "APPEAL") {
-    validateBatchCorrection(value);
+    validateBatchCorrection(value, undefined, manifestItems);
     return;
   }
   assertExactEvidenceFields(value, []);
@@ -270,7 +289,7 @@ function parseTimestamp(value: string, field: string): number {
   return timestamp;
 }
 
-function validateEvidenceShape(value: unknown): EvidenceDocument {
+function validateEvidenceShape(value: unknown, manifestItems?: readonly OrderItem[]): EvidenceDocument {
   if (!isPlainObject(value)) throw new TypeError("evidence must be a plain object");
   assertJsonValue(value, "evidence");
   if (value.schema_version !== "foodguard-evidence/1") {
@@ -279,7 +298,7 @@ function validateEvidenceShape(value: unknown): EvidenceDocument {
   if (typeof value.action !== "string" || !evidenceActions.has(value.action as EvidenceAction)) {
     throw new TypeError("action must be a FoodGuard evidence action");
   }
-  validateActionSchema(value, value.action as EvidenceAction);
+  validateActionSchema(value, value.action as EvidenceAction, manifestItems);
   for (const field of requiredStringFields) {
     if (typeof value[field] !== "string" || value[field].trim().length === 0) {
       throw new TypeError(`${field} must be a non-empty string`);
@@ -334,42 +353,45 @@ export function validateEvidenceDocument<T extends EvidenceDocument>(
   value: T,
   now?: Date,
   correctionTargets?: readonly EvidenceDocument[],
+  manifestItems?: readonly OrderItem[],
 ): T;
 export function validateEvidenceDocument(
   value: unknown,
   now?: Date,
   correctionTargets?: readonly EvidenceDocument[],
+  manifestItems?: readonly OrderItem[],
 ): EvidenceDocument;
 export function validateEvidenceDocument(
   value: unknown,
   now = new Date(),
   correctionTargets?: readonly EvidenceDocument[],
+  manifestItems?: readonly OrderItem[],
 ): EvidenceDocument {
   const evidence = validateEvidenceShape(value);
   if (evidence.action === "CURE" || evidence.action === "APPEAL") {
-    validateBatchCorrection(evidence as unknown as Record<string, unknown>, correctionTargets);
+    validateBatchCorrection(evidence as unknown as Record<string, unknown>, correctionTargets, manifestItems);
   }
   const observedAt = parseTimestamp(evidence.observed_at, "observed_at");
   const submittedAt = parseTimestamp(evidence.submitted_at, "submitted_at");
   const expiresAt = parseTimestamp(evidence.expires_at, "expires_at");
   if (observedAt > submittedAt || submittedAt > expiresAt) throw new TypeError("evidence timestamps must be ordered");
-  if (expiresAt < now.getTime()) throw new TypeError("evidence has expired");
+  if (expiresAt <= now.getTime()) throw new TypeError("evidence has expired");
   if (evidence.sha256.toLowerCase() !== sha256Hex(canonicalize(digestPreimage(evidence)))) {
     throw new TypeError("sha256 does not bind the canonical evidence preimage");
   }
   return evidence;
 }
 
-export function canonicalizeEvidence(value: EvidenceDocument): string {
-  return canonicalize(digestPreimage(validateEvidenceShape(value)));
+export function canonicalizeEvidence(value: EvidenceDocument, manifestItems?: readonly OrderItem[]): string {
+  return canonicalize(digestPreimage(validateEvidenceShape(value, manifestItems)));
 }
 
-export function canonicalizeEvidenceEnvelope(value: EvidenceDocument): string {
-  return canonicalize(validateEvidenceShape(value) as JsonValue);
+export function canonicalizeEvidenceEnvelope(value: EvidenceDocument, manifestItems?: readonly OrderItem[]): string {
+  return canonicalize(validateEvidenceShape(value, manifestItems) as JsonValue);
 }
 
-export async function hashEvidence(value: EvidenceDocument): Promise<HexDigest> {
-  const bytes = new TextEncoder().encode(canonicalizeEvidence(value));
+export async function hashEvidence(value: EvidenceDocument, manifestItems?: readonly OrderItem[]): Promise<HexDigest> {
+  const bytes = new TextEncoder().encode(canonicalizeEvidence(value, manifestItems));
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return `0x${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }

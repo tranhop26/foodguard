@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import type { CorrectionStatement, EvidenceDocument, HexDigest } from "../../lib/domain";
+import type { CorrectionStatement, EvidenceDocument, HexDigest, OrderItem } from "../../lib/domain";
 import {
   canonicalizeEvidence,
   canonicalizeEvidenceEnvelope,
@@ -156,7 +156,6 @@ describe("batch correction evidence", () => {
         item_id: `item-${index}`,
       })),
     }],
-    ["unequal flattened statement count", { statements: correctionStatements.slice(0, 2) }],
     ["duplicate targets", { supersedes_evidence_indices: [3, 3, 5] }],
     ["unsorted targets", { supersedes_evidence_indices: [4, 3, 5] }],
     ["floating-point targets", { supersedes_evidence_indices: [3, 4.5, 5] }],
@@ -174,6 +173,26 @@ describe("batch correction evidence", () => {
     const invalidDocument = { ...canonicalFixture, ...mutation };
     expect(() => canonicalizeEvidenceEnvelope(invalidDocument as EvidenceDocument)).toThrow(TypeError);
     expect(() => validateEvidenceDocument(invalidDocument, new Date("2030-01-01T00:00:00.000Z"))).toThrow(TypeError);
+  });
+
+  it("rejects an unequal authoritative flattened statement count", async () => {
+    const preimage = {
+      ...canonicalFixture,
+      statements: correctionStatements.slice(0, 2),
+      sha256: `0x${"0".repeat(64)}` as HexDigest,
+    } satisfies EvidenceDocument;
+    const document = { ...preimage, sha256: await hashEvidence(preimage) };
+    const targets = correctionStatements.map((statement) => ({
+      ...validEvidence,
+      action: "CUSTOMER_CLAIM" as const,
+      item_id: statement.item_id,
+    }));
+
+    expect(() => validateEvidenceDocument(
+      document,
+      new Date("2030-01-01T00:00:00.000Z"),
+      targets,
+    )).toThrow(TypeError);
   });
 
   it("revalidates a replacement batch with the same ordered semantic slots", async () => {
@@ -200,6 +219,117 @@ describe("batch correction evidence", () => {
       ["CUSTOMER_CLAIM", "item-2"],
       ["CUSTOMER_CLAIM", "item-3"],
     ]);
+  });
+
+  const packedManifest = [
+    {
+      conditions: ["sealed", "warm"],
+      item_id: "item-1",
+      name: "Pho",
+      permitted_substitutions: ["Bun bo"],
+      price_wei: "400",
+      quantity: 1,
+    },
+    {
+      conditions: [],
+      item_id: "item-2",
+      name: "Tea",
+      permitted_substitutions: [],
+      price_wei: "100",
+      quantity: 1,
+    },
+  ] satisfies OrderItem[];
+  const packedStatement = {
+    effective_action: "PACKED",
+    item_observations: [
+      {
+        condition_statuses: [
+          { condition_index: 0, status: "MET" },
+          { condition_index: 1, status: "UNKNOWN" },
+        ],
+        item_id: "item-1",
+        item_status: "PERMITTED_SUBSTITUTION",
+        quantity_status: "EXACT",
+        substitution_index: 0,
+      },
+      {
+        condition_statuses: [],
+        item_id: "item-2",
+        item_status: "UNKNOWN",
+        quantity_status: "UNKNOWN",
+        substitution_index: -1,
+      },
+    ],
+  } satisfies CorrectionStatement;
+  const packedTarget = { ...validEvidence, action: "PACKED" as const };
+
+  async function packedBatch(statement: CorrectionStatement): Promise<EvidenceDocument> {
+    const preimage = {
+      ...canonicalFixture,
+      statements: [statement],
+      supersedes_evidence_indices: [3],
+      sha256: `0x${"0".repeat(64)}` as HexDigest,
+    } satisfies EvidenceDocument;
+    return { ...preimage, sha256: await hashEvidence(preimage) };
+  }
+
+  it("binds PACKED correction observations to the real manifest order and bounds", async () => {
+    const document = await packedBatch(packedStatement);
+    expect(validateEvidenceDocument(
+      document,
+      new Date("2030-01-01T00:00:00.000Z"),
+      [packedTarget],
+      packedManifest,
+    )).toEqual(document);
+  });
+
+  it.each([
+    ["reordered manifest observations", {
+      ...packedStatement,
+      item_observations: [...packedStatement.item_observations].reverse(),
+    }],
+    ["missing manifest observation", {
+      ...packedStatement,
+      item_observations: packedStatement.item_observations.slice(0, 1),
+    }],
+    ["substitution index beyond the permitted set", {
+      ...packedStatement,
+      item_observations: [
+        { ...packedStatement.item_observations[0], substitution_index: 1 },
+        packedStatement.item_observations[1],
+      ],
+    }],
+    ["wrong condition count", {
+      ...packedStatement,
+      item_observations: [
+        { ...packedStatement.item_observations[0], condition_statuses: packedStatement.item_observations[0].condition_statuses.slice(0, 1) },
+        packedStatement.item_observations[1],
+      ],
+    }],
+  ])("rejects PACKED correction facts with %s", async (_name, statement) => {
+    const document = await packedBatch(statement as CorrectionStatement);
+    expect(() => validateEvidenceDocument(
+      document,
+      new Date("2030-01-01T00:00:00.000Z"),
+      [packedTarget],
+      packedManifest,
+    )).toThrow(TypeError);
+  });
+
+  it("rejects a non-positional PACKED condition index before hashing", async () => {
+    await expect(packedBatch({
+      ...packedStatement,
+      item_observations: [
+        {
+          ...packedStatement.item_observations[0],
+          condition_statuses: [
+            packedStatement.item_observations[0].condition_statuses[0],
+            { condition_index: 2, status: "UNKNOWN" as const },
+          ],
+        },
+        packedStatement.item_observations[1],
+      ],
+    })).rejects.toThrow(TypeError);
   });
 });
 
@@ -263,6 +393,13 @@ describe("FoodGuard evidence", () => {
         new Date("2026-08-08T00:01:00.000Z"),
       ),
     ).toThrow();
+  });
+
+  it("rejects evidence at the exact expiry boundary", () => {
+    expect(() => validateEvidenceDocument(
+      validEvidence,
+      new Date(validEvidence.expires_at),
+    )).toThrow(TypeError);
   });
 });
 

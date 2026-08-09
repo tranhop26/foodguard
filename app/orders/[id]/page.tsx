@@ -245,14 +245,14 @@ async function evidenceRecord(value: unknown, order: OrderDetailView, evidenceIn
   let envelope: unknown;
   try { envelope = JSON.parse(value.envelope_json as string); } catch { throw new TypeError("Evidence envelope readback is malformed"); }
   if (!plainObject(envelope) || canonicalJson(envelope) !== value.envelope_json) throw new TypeError("Evidence envelope readback is not canonical");
+  const items = authoritativeManifest(order.manifest_json);
   let canonicalEnvelope: string;
-  try { canonicalEnvelope = canonicalizeEvidenceEnvelope(envelope as EvidenceDocument); } catch { throw new TypeError("Evidence envelope readback is malformed"); }
+  try { canonicalEnvelope = canonicalizeEvidenceEnvelope(envelope as EvidenceDocument, items); } catch { throw new TypeError("Evidence envelope readback is malformed"); }
   if (canonicalEnvelope !== value.envelope_json) throw new TypeError("Evidence envelope readback is not canonical");
   const metadataFields = required.filter((field) => field !== "envelope_json");
   if (metadataFields.some((field) => envelope[field] !== value[field])) throw new TypeError("Evidence record does not match its envelope");
   const itemId = typeof value.item_id === "string" ? value.item_id : "";
   if ((envelope.item_id ?? "") !== itemId) throw new TypeError("Evidence item binding is malformed");
-  const items = authoritativeManifest(order.manifest_json);
   if (itemId && !items.some((item) => item.item_id === itemId)) throw new TypeError("Evidence item binding is malformed");
   if (value.action === "PACKED") {
     const observations = envelope.item_observations;
@@ -308,20 +308,58 @@ async function evidenceRecord(value: unknown, order: OrderDetailView, evidenceIn
 }
 
 export function deriveActiveEvidenceRecords(evidence: readonly EvidenceRecordView[]): EvidenceRecordView[] {
-  const active = new Set(evidence.map((_record, index) => index));
-  for (const record of evidence) {
-    if (record.action !== "CURE" && record.action !== "APPEAL") continue;
+  const active = new Set<number>();
+  const semanticSlots = (record: EvidenceRecordView): Array<[string, string]> => {
+    if (record.action === "CURE" || record.action === "APPEAL") {
+      if (record.effective_action !== "BATCH_CORRECTION" || !Array.isArray(record.statements) || record.statements.length === 0) {
+        throw new TypeError("Batch correction active-set readback is malformed");
+      }
+      return record.statements.map((statement) => {
+        const itemId = statement.effective_action === "CUSTOMER_CLAIM" ? statement.item_id : "";
+        if (!["PACKED", "PICKED_UP", "DELIVERED", "CUSTOMER_CLAIM"].includes(statement.effective_action) || (statement.effective_action === "CUSTOMER_CLAIM" && !itemId)) {
+          throw new TypeError("Batch correction active-set readback is malformed");
+        }
+        return [statement.effective_action, itemId];
+      });
+    }
+    if (
+      !["PACKED", "PICKED_UP", "DELIVERED", "CUSTOMER_CLAIM"].includes(record.action) ||
+      record.effective_action !== record.action ||
+      (record.action === "CUSTOMER_CLAIM" && !record.item_id)
+    ) throw new TypeError("Batch correction active-set readback is malformed");
+    return [[record.action, record.action === "CUSTOMER_CLAIM" ? record.item_id ?? "" : ""]];
+  };
+
+  evidence.forEach((record, correctionIndex) => {
+    if (record.action !== "CURE" && record.action !== "APPEAL") {
+      active.add(correctionIndex);
+      return;
+    }
     const targets = record.supersedes_evidence_indices;
-    if (!Array.isArray(targets) || targets.length === 0) throw new TypeError("Batch correction active-set readback is malformed");
+    if (!Array.isArray(targets) || targets.length === 0 || !Array.isArray(record.statements)) {
+      throw new TypeError("Batch correction active-set readback is malformed");
+    }
     let previous = -1;
+    const expectedSlots: Array<[string, string]> = [];
     for (const target of targets) {
-      if (!Number.isSafeInteger(target) || target <= previous || target >= evidence.length || !active.has(target)) {
+      if (!Number.isSafeInteger(target) || target <= previous || target >= correctionIndex || !active.has(target)) {
+        throw new TypeError("Batch correction active-set readback is malformed");
+      }
+      const targetRecord = evidence[target];
+      if (targetRecord.actor_wallet.toLowerCase() !== record.actor_wallet.toLowerCase()) {
         throw new TypeError("Batch correction active-set readback is malformed");
       }
       previous = target;
-      active.delete(target);
+      expectedSlots.push(...semanticSlots(targetRecord));
     }
-  }
+    const actualSlots = semanticSlots(record);
+    if (
+      actualSlots.length !== expectedSlots.length ||
+      actualSlots.some(([action, itemId], index) => action !== expectedSlots[index][0] || itemId !== expectedSlots[index][1])
+    ) throw new TypeError("Batch correction active-set readback is malformed");
+    targets.forEach((target) => active.delete(target));
+    active.add(correctionIndex);
+  });
   return [...active].sort((left, right) => left - right).map((index) => ({ ...evidence[index], evidence_index: index }));
 }
 
@@ -621,6 +659,7 @@ export async function readAuthoritativeOrder(orderId: string): Promise<OrderDeta
         .then((record) => evidenceRecord(record, order, index)),
     ),
   );
+  deriveActiveEvidenceRecords(evidence);
   const round = unsignedRaw(
     await readFoodGuard<unknown>("get_round", [normalizedOrderId]),
     "resolution_round",

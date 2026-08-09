@@ -43,8 +43,10 @@ import {
   FOODGUARD_CHAIN,
   type FoodGuardDeploymentProofConfiguration,
 } from "../../lib/genlayer/config";
+import type { TxStage } from "../../lib/genlayer/transactions";
 import {
   OrderDetailWorkspace,
+  deriveActiveEvidenceRecords,
   readAuthoritativeOrder,
   transactAndRead,
   type OrderDetailWorkspaceConfiguration,
@@ -188,6 +190,103 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
   delete (window as typeof window & { ethereum?: unknown }).ethereum;
+});
+
+function historyClaim(itemId: string, actor = CUSTOMER): EvidenceRecordView {
+  return {
+    action: "CUSTOMER_CLAIM",
+    actor_wallet: actor,
+    chain_id: "61999",
+    contract_address: "0x4444444444444444444444444444444444444444",
+    effective_action: "CUSTOMER_CLAIM",
+    expires_at: "2030-01-02T00:00:00.000Z",
+    issuer_id: "foodguard-web",
+    item_id: itemId,
+    nonce: `claim-${itemId}`,
+    observed_at: "2030-01-01T00:00:00.000Z",
+    order_id: "fg-mixed",
+    schema_version: "foodguard-evidence/1",
+    sha256: `0x${"11".repeat(32)}`,
+    source_url: `https://evidence.foodguard.vn/${itemId}.json`,
+    subject: `order:fg-mixed/item:${itemId}`,
+    submitted_at: "2030-01-01T00:00:00.000Z",
+  };
+}
+
+function historyCorrection(
+  action: "CURE" | "APPEAL",
+  targets: number[],
+  itemIds: string[],
+  actor = CUSTOMER,
+): EvidenceRecordView {
+  return {
+    action,
+    actor_wallet: actor,
+    chain_id: "61999",
+    contract_address: "0x4444444444444444444444444444444444444444",
+    effective_action: "BATCH_CORRECTION",
+    expires_at: "2030-01-02T00:00:00.000Z",
+    issuer_id: "foodguard-web",
+    nonce: `${action.toLowerCase()}-${targets.join("-")}`,
+    observed_at: "2030-01-01T00:00:00.000Z",
+    order_id: "fg-mixed",
+    schema_version: "foodguard-evidence/1",
+    sha256: `0x${(action === "CURE" ? "22" : "33").repeat(32)}`,
+    source_url: `https://evidence.foodguard.vn/${action.toLowerCase()}-${targets.join("-")}.json`,
+    statements: itemIds.map((itemId) => ({
+      claim_category: "ABSENT_AT_RECEIPT" as const,
+      criterion_index: 0,
+      criterion_kind: "ITEM" as const,
+      effective_action: "CUSTOMER_CLAIM" as const,
+      item_id: itemId,
+    })),
+    subject: "order:fg-mixed",
+    submitted_at: "2030-01-01T00:00:00.000Z",
+    supersedes_evidence_indices: targets,
+  };
+}
+
+describe("authoritative batch history reduction", () => {
+  it("lets a later batch replace an earlier batch while preserving its ordered slots", () => {
+    const history = [
+      historyClaim("item-1"),
+      historyClaim("item-2"),
+      historyCorrection("CURE", [0, 1], ["item-1", "item-2"]),
+      historyCorrection("APPEAL", [2], ["item-1", "item-2"]),
+    ];
+
+    expect(deriveActiveEvidenceRecords(history)).toEqual([{ ...history[3], evidence_index: 3 }]);
+  });
+
+  it("rejects a correction that targets another participant's active evidence", () => {
+    expect(() => deriveActiveEvidenceRecords([
+      historyClaim("item-1", CUSTOMER),
+      historyCorrection("CURE", [0], ["item-1"], RESTAURANT),
+    ])).toThrow(/active-set readback/i);
+  });
+
+  it.each([
+    ["itself", [historyCorrection("CURE", [0], ["item-1"]) ]],
+    ["a future index", [historyCorrection("CURE", [1], ["item-1"]), historyClaim("item-1")]],
+  ])("rejects a correction that targets %s", (_name, history) => {
+    expect(() => deriveActiveEvidenceRecords(history)).toThrow(/active-set readback/i);
+  });
+
+  it("rejects statements that reorder the target semantic slots", () => {
+    expect(() => deriveActiveEvidenceRecords([
+      historyClaim("item-1"),
+      historyCorrection("CURE", [0], ["item-2"]),
+    ])).toThrow(/active-set readback/i);
+  });
+
+  it("rejects a later replacement when the prior batch was never valid", () => {
+    expect(() => deriveActiveEvidenceRecords([
+      historyClaim("item-1"),
+      historyClaim("item-2"),
+      historyCorrection("CURE", [0, 1], ["item-2", "item-1"]),
+      historyCorrection("APPEAL", [2], ["item-2", "item-1"]),
+    ])).toThrow(/active-set readback/i);
+  });
 });
 
 describe("authoritative order outcome presentation", () => {
@@ -730,6 +829,74 @@ describe("permissionless consensus", () => {
 });
 
 describe("order detail readback orchestration", () => {
+  it("shows completion only after finalized execution and fresh active batch readback", async () => {
+    (window as typeof window & { ethereum?: unknown }).ethereum = {
+      request: vi.fn(({ method }: { method: string }) => {
+        if (method === "eth_requestAccounts" || method === "eth_accounts") return Promise.resolve([CUSTOMER]);
+        if (method === "eth_chainId") return Promise.resolve("0xf22f");
+        throw new Error(`unexpected wallet method ${method}`);
+      }),
+    };
+    const initialOrder: OrderDetailView = { ...UNRESOLVED_ORDER, evidence: [historyClaim("item-1")] };
+    const transact = vi.fn(async (method: string, args: string[], _address: string | undefined, onStage: (stage: TxStage) => void) => {
+      expect(method).toBe("submit_cure_evidence");
+      onStage("FINALIZED");
+      onStage("EXECUTION_SUCCESS");
+      onStage("READBACK_CONFIRMED");
+      const submitted = JSON.parse(args[1]) as EvidenceDocument;
+      return {
+        order: {
+          ...initialOrder,
+          evidence: [
+            historyClaim("item-1"),
+            {
+              ...submitted,
+              effective_action: "BATCH_CORRECTION" as const,
+              envelope_json: args[1],
+            },
+          ],
+        },
+        transactionHash: `0x${"44".repeat(32)}` as `0x${string}`,
+      };
+    });
+    renderLocalized(
+      <OrderDetailWorkspace
+        configuration={{
+          contractAddress: "0x4444444444444444444444444444444444444444",
+          chainId: "61999",
+          message: null,
+          readsEnabled: true,
+          status: "READY",
+          writesEnabled: true,
+        }}
+        orderId="fg-mixed"
+        readChainTime={vi.fn().mockResolvedValue(1_893_456_000n)}
+        readOrder={vi.fn().mockResolvedValue(initialOrder)}
+        transact={transact}
+      />,
+      "en",
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: /connect wallet/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /add cure evidence/i }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /select evidence #0/i }));
+    fireEvent.change(screen.getByRole("textbox", { name: /public HTTPS source URL/i }), { target: { value: "https://evidence.foodguard.vn/cure-success.json" } });
+    fireEvent.change(screen.getByRole("combobox", { name: /claim category 1/i }), { target: { value: "ABSENT_AT_RECEIPT" } });
+    fireEvent.change(screen.getByRole("combobox", { name: /criterion kind 1/i }), { target: { value: "ITEM" } });
+    fireEvent.change(screen.getByRole("spinbutton", { name: /criterion index 1/i }), { target: { value: "0" } });
+    const publicDocument = await screen.findByTestId("evidence-public-json");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, text: () => Promise.resolve(publicDocument.textContent) }));
+    fireEvent.click(screen.getByRole("button", { name: /verify public source/i }));
+    await screen.findByText("Public source matches the canonical document");
+    fireEvent.click(screen.getByRole("button", { name: /submit cure evidence/i }));
+
+    await waitFor(() => expect(transact).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.queryByRole("heading", { name: /public evidence envelope/i })).not.toBeInTheDocument());
+    expect(screen.getByText("Finality recorded")).toBeVisible();
+    expect(screen.getByText("Execution success")).toBeVisible();
+    expect(screen.getByText("Authoritative readback confirmed")).toBeVisible();
+  });
+
   it("confirms readback only after the complete authoritative enrichment succeeds", async () => {
     const stages: string[] = [];
     genlayerMocks.writeFoodGuard.mockResolvedValue("0x" + "cd".repeat(32));
@@ -1368,6 +1535,7 @@ describe("order detail readback orchestration", () => {
             actor_wallet: CUSTOMER,
             chain_id: "61999",
             contract_address: "0x4444444444444444444444444444444444444444",
+            effective_action: "CUSTOMER_CLAIM",
             expires_at: "2030-01-01T00:00:00.000Z",
             issuer_id: "foodguard-web",
             item_id: "item-1",
