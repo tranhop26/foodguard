@@ -1,13 +1,14 @@
 "use client";
 
-import type {
-  CorrectionEffectiveAction,
-  CorrectionStatement,
-  DeliveryOutcome,
-  EvidenceDocument,
-  ItemOutcome,
-  OrderItem,
-  OrderState,
+import {
+  formatSimulatedGenWei,
+  type CorrectionEffectiveAction,
+  type CorrectionStatement,
+  type DeliveryOutcome,
+  type EvidenceDocument,
+  type ItemOutcome,
+  type OrderItem,
+  type OrderState,
 } from "../../lib/domain";
 import { useLocale } from "../../lib/i18n";
 
@@ -198,6 +199,16 @@ function itemValueWei(item: OrderItem): string {
   return (BigInt(item.price_wei) * BigInt(item.quantity)).toString();
 }
 
+function SimulatedGenValue({ value }: { value: bigint | string }) {
+  const exactWei = String(value);
+  return (
+    <>
+      <span>{formatSimulatedGenWei(value)}</span>
+      <code className="sr-only">{exactWei} wei</code>
+    </>
+  );
+}
+
 function itemAllocation(outcome: ItemOutcome, copy: ReturnType<typeof useLocale>["copy"]): string {
   if (outcome === "MATCHED") return copy.detail.restaurantAllocation;
   if (outcome === "UNRESOLVED") return copy.detail.escrowLocked;
@@ -213,15 +224,25 @@ function deliveryAllocation(outcome: DeliveryOutcome, copy: ReturnType<typeof us
 function mutualItemAllocation(
   allocation: MutualSettlementView["item_allocations"][number],
   copy: ReturnType<typeof useLocale>["copy"],
-): string {
-  return `${copy.roles.CUSTOMER}: ${allocation.customer_wei} wei / ${copy.roles.RESTAURANT}: ${allocation.restaurant_wei} wei`;
+) {
+  return (
+    <>
+      {copy.roles.CUSTOMER}: <SimulatedGenValue value={allocation.customer_wei} /> /{" "}
+      {copy.roles.RESTAURANT}: <SimulatedGenValue value={allocation.restaurant_wei} />
+    </>
+  );
 }
 
 function mutualDeliveryAllocation(
   allocation: MutualSettlementView["delivery_allocation"],
   copy: ReturnType<typeof useLocale>["copy"],
-): string {
-  return `${copy.roles.CUSTOMER}: ${allocation.customer_wei} wei / ${copy.roles.COURIER}: ${allocation.courier_wei} wei`;
+) {
+  return (
+    <>
+      {copy.roles.CUSTOMER}: <SimulatedGenValue value={allocation.customer_wei} /> /{" "}
+      {copy.roles.COURIER}: <SimulatedGenValue value={allocation.courier_wei} />
+    </>
+  );
 }
 
 function validMutualSettlement(
@@ -326,13 +347,14 @@ export function ItemOutcomeTable({ order }: { order: OrderDetailView }) {
           <tbody>
             {items.map((item, index) => {
               const result = resolution?.items[index];
+              const valueWei = itemValueWei(item);
               return (
                 <tr key={item.item_id}>
                   <th scope="row">
                     {item.name}
                     <code>{item.item_id}</code>
                   </th>
-                  <td><code>{itemValueWei(item)} wei</code></td>
+                  <td><SimulatedGenValue value={valueWei} /></td>
                   <td>
                     {result ? (
                       <><span>{copy.outcomes[result.outcome]}</span><code>{result.outcome}</code></>
@@ -356,7 +378,7 @@ export function ItemOutcomeTable({ order }: { order: OrderDetailView }) {
             })}
             <tr>
               <th scope="row">{copy.detail.deliveryFee}</th>
-              <td><code>{String(order.delivery_fee)} wei</code></td>
+              <td><SimulatedGenValue value={String(order.delivery_fee)} /></td>
               <td>
                 {resolution ? (
                   <><span>{copy.detail.deliveryOutcomes[resolution.delivery_outcome]}</span><code>{resolution.delivery_outcome}</code></>

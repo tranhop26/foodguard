@@ -23,6 +23,20 @@ export type ItemOutcome =
 
 export type DeliveryOutcome = "DELIVERED" | "DELIVERY_FAILED" | "UNRESOLVED";
 
+const WEI_PER_GEN = 1_000_000_000_000_000_000n;
+
+export function formatSimulatedGenWei(value: bigint | string): string {
+  const wei = typeof value === "bigint" ? value : BigInt(value);
+  if (wei < 0n) throw new RangeError("Simulated GEN value cannot be negative");
+
+  const whole = wei / WEI_PER_GEN;
+  const fractional = (wei % WEI_PER_GEN)
+    .toString()
+    .padStart(18, "0")
+    .replace(/0+$/, "");
+  return `${whole}${fractional ? `.${fractional}` : ""} simulated GEN`;
+}
+
 export type EvidenceAction =
   | "ORDER_MANIFEST"
   | "PACKED"

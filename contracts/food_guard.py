@@ -2529,6 +2529,33 @@ class FoodGuard(gl.Contract):
             "CANCELLED_REFUNDED",
         )
 
+    @gl.public.write
+    def cancel_before_packed(self, order_id: str) -> None:
+        if order_id not in self.orders:
+            raise gl.vm.UserError("[EXPECTED] order not found")
+        order = self.orders[order_id]
+        if order.state == "CANCELLED_REFUNDED":
+            return
+        if order.state not in ("FUNDED", "PARTIALLY_ACCEPTED", "ACCEPTED"):
+            raise gl.vm.UserError("[EXPECTED] participant cancellation closed")
+        if gl.message.sender_address not in (
+            order.customer,
+            order.restaurant,
+            order.courier,
+        ):
+            raise gl.vm.UserError("[EXPECTED] order participant required")
+        if order.refund_emitted:
+            raise gl.vm.UserError("[EXPECTED] accounting conservation violated")
+        self._allocate_once(
+            order_id,
+            order,
+            "participant-cancellation-before-packed",
+            int(order.total_value),
+            0,
+            0,
+            "CANCELLED_REFUNDED",
+        )
+
     @gl.public.view
     def get_order(self, order_id: str) -> Order:
         return self.orders[order_id]

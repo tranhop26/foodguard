@@ -1,17 +1,23 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isAddress, zeroAddress } from "viem";
 
 import type { EvidenceDocument, HexDigest, OrderItem } from "../../lib/domain";
 import { canonicalizeEvidence, hashEvidence } from "../../lib/evidence";
-import { readFoodGuard, writeFoodGuard } from "../../lib/genlayer/client";
+import { readFoodGuard } from "../../lib/genlayer/client";
 import {
   getFoodGuardConfiguration,
   getFoodGuardPublicAppOriginConfiguration,
   type FoodGuardPublicAppOriginConfiguration,
 } from "../../lib/genlayer/config";
-import { trackTransaction, type TxStage } from "../../lib/genlayer/transactions";
+import {
+  checkFoodGuardOperationState,
+  executeFoodGuardOperation,
+  type FoodGuardReadbackRecovery,
+} from "../../lib/genlayer/operations";
+import { OutcomeUnknownError } from "../../lib/genlayer/rpcResilience";
+import type { TxStage } from "../../lib/genlayer/transactions";
 import { useLocale } from "../../lib/i18n";
 import { RoleConsole, type FoodGuardOrderView } from "../order/RoleConsole";
 import { WalletButton, type WalletSnapshot } from "../wallet/WalletButton";
@@ -162,6 +168,72 @@ function sameAddress(left: string | null, right: string): boolean {
   return Boolean(left && left.toLowerCase() === right.toLowerCase());
 }
 
+function sameUnsignedInteger(value: unknown, expected: bigint): boolean {
+  try {
+    if (typeof value === "bigint") return value === expected;
+    if (
+      typeof value === "number" &&
+      Number.isSafeInteger(value) &&
+      value >= 0
+    ) {
+      return BigInt(value) === expected;
+    }
+    return (
+      typeof value === "string" &&
+      /^(0|[1-9][0-9]*)$/.test(value) &&
+      BigInt(value) === expected
+    );
+  } catch {
+    return false;
+  }
+}
+
+function matchesFrozenCommitment(
+  order: FoodGuardOrderView,
+  commitment: FrozenCommitment,
+): boolean {
+  let deadlines: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(commitment.deadlinesJson);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return false;
+    }
+    deadlines = parsed as Record<string, unknown>;
+  } catch {
+    return false;
+  }
+
+  return (
+    order.order_id === commitment.orderId &&
+    sameAddress(order.customer, commitment.actors[0]) &&
+    sameAddress(order.restaurant, commitment.actors[1]) &&
+    sameAddress(order.courier, commitment.actors[2]) &&
+    order.manifest_json === commitment.canonicalManifest &&
+    sameUnsignedInteger(order.delivery_fee, commitment.amounts.deliveryFee) &&
+    sameUnsignedInteger(order.total_value, commitment.amounts.total) &&
+    sameUnsignedInteger(
+      order.acceptance_deadline,
+      BigInt(deadlines.acceptance_deadline as number),
+    ) &&
+    sameUnsignedInteger(
+      order.packing_deadline,
+      BigInt(deadlines.packing_deadline as number),
+    ) &&
+    sameUnsignedInteger(
+      order.delivery_deadline,
+      BigInt(deadlines.delivery_deadline as number),
+    ) &&
+    sameUnsignedInteger(
+      order.review_deadline,
+      BigInt(deadlines.review_deadline as number),
+    ) &&
+    sameUnsignedInteger(
+      order.appeal_deadline,
+      BigInt(deadlines.appeal_deadline as number),
+    )
+  );
+}
+
 export function OrderBuilder({
   configuration = configuredContract(),
   deliveryFeeWei: initialDeliveryFee = "50000000000000000",
@@ -185,6 +257,8 @@ export function OrderBuilder({
   const [creationPauseUnavailable, setCreationPauseUnavailable] = useState(false);
   const [authoritativeOrder, setAuthoritativeOrder] = useState<FoodGuardOrderView | null>(null);
   const [frozenCommitment, setFrozenCommitment] = useState<FrozenCommitment | null>(null);
+  const [recovery, setRecovery] = useState<FoodGuardReadbackRecovery<FoodGuardOrderView> | null>(null);
+  const lifecycleProofRef = useRef({ execution: false, finality: false });
 
   const items = useMemo(() => [canonicalItem(item)], [item]);
   const canonicalManifest = useMemo(() => canonicalOrderManifest(items), [items]);
@@ -317,7 +391,9 @@ export function OrderBuilder({
     deadlineBaseMs !== null &&
     Boolean(orderId.trim()) &&
     !authoritativeOrder &&
-    !pending;
+    !pending &&
+    recovery === null &&
+    stage !== "OUTCOME_UNKNOWN";
 
   function setActor(index: number, value: string) {
     setActors((current) => {
@@ -343,10 +419,24 @@ export function OrderBuilder({
     setPending(true);
     setError(null);
     setAuthoritativeOrder(null);
+    setRecovery(null);
+    lifecycleProofRef.current = { execution: false, finality: false };
+    const operationReadback = () => readFoodGuard<FoodGuardOrderView>(
+      "get_order",
+      [commitment.orderId],
+    );
+    const operationMatches = (candidate: FoodGuardOrderView) =>
+      matchesFrozenCommitment(candidate, commitment);
+    const observeStage = (nextStage: TxStage) => {
+      if (nextStage === "FINALIZED") lifecycleProofRef.current.finality = true;
+      if (nextStage === "EXECUTION_SUCCESS") lifecycleProofRef.current.execution = true;
+      setStage(nextStage);
+    };
+    let retainCommitment = false;
     try {
-      const hash = await writeFoodGuard(
-        "create_order",
-        [
+      const readback = await executeFoodGuardOperation<FoodGuardOrderView>({
+        method: "create_order",
+        args: [
           commitment.orderId,
           commitment.actors[1],
           commitment.actors[2],
@@ -354,17 +444,46 @@ export function OrderBuilder({
           commitment.amounts.deliveryFee,
           commitment.deadlinesJson,
         ],
-        commitment.amounts.total,
-        setStage,
-        commitment.actors[0],
-      );
-      const readback = await trackTransaction<FoodGuardOrderView>(hash, setStage);
+        value: commitment.amounts.total,
+        expectedAccount: commitment.actors[0],
+        onStage: observeStage,
+        readback: operationReadback,
+        matches: operationMatches,
+      });
       setAuthoritativeOrder(readback);
     } catch (caught) {
+      if (caught instanceof OutcomeUnknownError) {
+        retainCommitment = true;
+        setRecovery({
+          confirmationStage:
+            lifecycleProofRef.current.finality && lifecycleProofRef.current.execution
+              ? "READBACK_CONFIRMED"
+              : "STATE_READBACK_CONFIRMED",
+          matches: operationMatches,
+          onStage: observeStage,
+          readback: operationReadback,
+        });
+      }
       setError(caught instanceof Error ? caught.message : "FoodGuard write failed");
     } finally {
       setPending(false);
+      if (!retainCommitment) setFrozenCommitment(null);
+    }
+  }
+
+  async function checkContractState() {
+    if (!recovery || pending) return;
+    setPending(true);
+    setError(null);
+    try {
+      const readback = await checkFoodGuardOperationState(recovery);
+      setAuthoritativeOrder(readback);
+      setRecovery(null);
       setFrozenCommitment(null);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "FoodGuard readback failed");
+    } finally {
+      setPending(false);
     }
   }
 
@@ -383,7 +502,7 @@ export function OrderBuilder({
                 <input
                   aria-label={label}
                   autoComplete="off"
-                  disabled={pending}
+                  disabled={pending || recovery !== null}
                   onChange={(event) => setActor(index, event.target.value)}
                   spellCheck={false}
                   type="text"
@@ -405,7 +524,7 @@ export function OrderBuilder({
             <span>{copy.order.orderId}</span>
             <input
               autoComplete="off"
-              disabled={pending}
+              disabled={pending || recovery !== null}
               onChange={(event) => setOrderId(event.target.value)}
               type="text"
               value={visibleOrderId}
@@ -415,7 +534,7 @@ export function OrderBuilder({
             <span>{copy.order.deliveryFee}</span>
             <input
               inputMode="numeric"
-              disabled={pending}
+              disabled={pending || recovery !== null}
               onChange={(event) => setDeliveryFeeWei(event.target.value.trim())}
               type="text"
               value={visibleDeliveryFeeWei}
@@ -481,6 +600,16 @@ export function OrderBuilder({
         >
           {copy.order.create}
         </button>
+        {stage === "OUTCOME_UNKNOWN" && recovery && (
+          <button
+            className="button button--quiet"
+            disabled={pending}
+            onClick={() => void checkContractState()}
+            type="button"
+          >
+            {copy.console.checkContractState}
+          </button>
+        )}
         {pending && <p className="form-notice" role="status">{copy.order.writing}</p>}
         {stage && (
           <p className={`transaction-stage${stage === "CONSENSUS_FAILED" || stage === "EXECUTION_ERROR" ? " transaction-stage--failure" : ""}`}>

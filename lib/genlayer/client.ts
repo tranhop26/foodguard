@@ -19,6 +19,7 @@ import {
   type FoodGuardReviewedDeploymentProof,
 } from "./config";
 import type { TxStageHandler } from "./transactions";
+import { singleFlight } from "./rpcResilience";
 
 interface Eip1193WalletProvider {
   request(args: { method: string; params?: unknown }): Promise<unknown>;
@@ -104,6 +105,50 @@ export function getFoodGuardReadClient() {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function canonicalReadArgument(value: CalldataEncodable): unknown {
+  if (value === null || typeof value === "boolean" || typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return ["number", Number.isFinite(value) ? value : String(value)];
+  }
+  if (typeof value === "bigint") return ["bigint", value.toString()];
+  if (value instanceof Uint8Array) {
+    return ["bytes", Array.from(value)];
+  }
+  if (Array.isArray(value)) {
+    return ["array", value.map(canonicalReadArgument)];
+  }
+  if (value instanceof Map) {
+    return [
+      "map",
+      Array.from(value.entries())
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, entry]) => [key, canonicalReadArgument(entry)]),
+    ];
+  }
+  const record = value as Record<string, CalldataEncodable>;
+  return [
+    "object",
+    Object.keys(record)
+      .sort()
+      .map((key) => [key, canonicalReadArgument(record[key])]),
+  ];
+}
+
+function foodGuardReadKey(
+  address: string,
+  method: string,
+  args: CalldataEncodable[],
+): string {
+  return JSON.stringify([
+    FOODGUARD_CHAIN.id,
+    address.toLowerCase(),
+    method,
+    args.map(canonicalReadArgument),
+  ]);
 }
 
 function runtimeVerificationFailed(
@@ -266,12 +311,14 @@ export async function readFoodGuard<T>(
   args: CalldataEncodable[] = [],
 ): Promise<T> {
   const { address } = requireFoodGuardConfiguration();
-  return (await getFoodGuardReadClient().readContract({
-    address,
-    functionName: method,
-    args,
-    transactionHashVariant: TransactionHashVariant.LATEST_FINAL,
-  })) as T;
+  return singleFlight(foodGuardReadKey(address, method, args), async () =>
+    (await getFoodGuardReadClient().readContract({
+      address,
+      functionName: method,
+      args,
+      transactionHashVariant: TransactionHashVariant.LATEST_FINAL,
+    })) as T,
+  );
 }
 
 export async function writeFoodGuard(

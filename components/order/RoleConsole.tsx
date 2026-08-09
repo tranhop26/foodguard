@@ -1,10 +1,16 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { OrderState } from "../../lib/domain";
-import { readFoodGuard, writeFoodGuard } from "../../lib/genlayer/client";
-import { trackTransaction, type TxStage } from "../../lib/genlayer/transactions";
+import { readFoodGuard } from "../../lib/genlayer/client";
+import {
+  checkFoodGuardOperationState,
+  executeFoodGuardOperation,
+  type FoodGuardReadbackRecovery,
+} from "../../lib/genlayer/operations";
+import { OutcomeUnknownError } from "../../lib/genlayer/rpcResilience";
+import type { TxStage } from "../../lib/genlayer/transactions";
 import { useLocale } from "../../lib/i18n";
 import {
   deriveWalletRole,
@@ -13,6 +19,7 @@ import {
   type WalletSnapshot,
 } from "../wallet/WalletButton";
 import { authoritativeNowMs, type AuthoritativeClock } from "./authoritativeClock";
+import { TransactionLifecycle } from "./TransactionLifecycle";
 
 export interface FoodGuardOrderView {
   acceptance_deadline?: bigint | number | string;
@@ -22,6 +29,7 @@ export interface FoodGuardOrderView {
   delivery_deadline?: bigint | number | string;
   order_id: string;
   packing_deadline?: bigint | number | string;
+  refund_emitted?: boolean;
   restaurant: string;
   restaurant_accepted: boolean;
   review_deadline?: bigint | number | string;
@@ -36,6 +44,7 @@ export type RoleActionId =
   | "pickup"
   | "deliver"
   | "claim"
+  | "cancelBeforePacked"
   | "cancel"
   | "cancelFulfillmentTimeout";
 
@@ -48,22 +57,107 @@ export interface RoleAction {
     | "submit_pickup_evidence"
     | "submit_delivery_evidence"
     | "submit_claim_evidence"
+    | "cancel_before_packed"
     | "cancel_unaccepted"
     | "cancel_fulfillment_timeout";
   requiresEvidence: boolean;
 }
 
-interface RoleConsoleProps {
+export interface RoleOperationState {
+  actorAddress: string | null;
+  method: RoleAction["method"] | null;
+  pending: boolean;
+  stage: TxStage | null;
+}
+
+interface RoleConsoleProps<TOrder extends FoodGuardOrderView> {
   address?: string | null;
   clock?: AuthoritativeClock | null;
   evidenceWritesEnabled?: boolean;
-  onAction?(action: RoleAction, order: FoodGuardOrderView): Promise<FoodGuardOrderView>;
-  order: FoodGuardOrderView;
+  onAction?(action: RoleAction, order: TOrder): Promise<TOrder>;
+  onOperationStateChange?(state: RoleOperationState): void;
+  onOrderChange?(order: TOrder): void;
+  operationLocked?: boolean;
+  order: TOrder;
+  readOrder?(orderId: string): Promise<TOrder>;
+  showLifecycle?: boolean;
   writesEnabled?: boolean;
 }
 
 function acceptedState(state: OrderState): boolean {
   return state === "FUNDED" || state === "PARTIALLY_ACCEPTED";
+}
+
+function sameActor(left: string, right: string | undefined): boolean {
+  return Boolean(right && left.toLowerCase() === right.toLowerCase());
+}
+
+export function matchesRoleActionReadback(
+  method: RoleAction["method"],
+  candidate: FoodGuardOrderView,
+  submittedOrder: FoodGuardOrderView,
+  expectedActor: string | undefined,
+): boolean {
+  if (candidate.order_id !== submittedOrder.order_id) return false;
+
+  if (method === "accept_restaurant") {
+    return (
+      sameActor(submittedOrder.restaurant, expectedActor) &&
+      sameActor(candidate.restaurant, expectedActor) &&
+      candidate.restaurant_accepted === true &&
+      candidate.courier_accepted === submittedOrder.courier_accepted &&
+      candidate.state === (
+        submittedOrder.courier_accepted ? "ACCEPTED" : "PARTIALLY_ACCEPTED"
+      )
+    );
+  }
+  if (method === "accept_courier") {
+    return (
+      sameActor(submittedOrder.courier, expectedActor) &&
+      sameActor(candidate.courier, expectedActor) &&
+      candidate.courier_accepted === true &&
+      candidate.restaurant_accepted === submittedOrder.restaurant_accepted &&
+      candidate.state === (
+        submittedOrder.restaurant_accepted ? "ACCEPTED" : "PARTIALLY_ACCEPTED"
+      )
+    );
+  }
+  if (method === "cancel_before_packed") {
+    const submittedActors = [
+      submittedOrder.customer,
+      submittedOrder.restaurant,
+      submittedOrder.courier,
+    ];
+    const actorsUnchanged = (
+      sameActor(candidate.customer, submittedOrder.customer) &&
+      sameActor(candidate.restaurant, submittedOrder.restaurant) &&
+      sameActor(candidate.courier, submittedOrder.courier)
+    );
+    return (
+      Boolean(expectedActor) &&
+      submittedActors.some((actor) => sameActor(actor, expectedActor)) &&
+      actorsUnchanged &&
+      candidate.state === "CANCELLED_REFUNDED" &&
+      candidate.refund_emitted === true &&
+      candidate.restaurant_accepted === false &&
+      candidate.courier_accepted === false
+    );
+  }
+  if (method === "cancel_unaccepted") {
+    return (
+      candidate.state === "CANCELLED_REFUNDED" &&
+      candidate.refund_emitted === true &&
+      candidate.restaurant_accepted === false &&
+      candidate.courier_accepted === false
+    );
+  }
+  if (method === "cancel_fulfillment_timeout") {
+    return (
+      candidate.state === "FULFILLMENT_TIMEOUT_REFUNDED" &&
+      candidate.refund_emitted === true
+    );
+  }
+  return false;
 }
 
 const MAX_U64 = (1n << 64n) - 1n;
@@ -98,23 +192,25 @@ function deadlinePhase(
   return nowSeconds < parsed ? "BEFORE" : "EXPIRED";
 }
 
-function actionFor(
+function actionsFor(
   role: WalletRole,
   order: FoodGuardOrderView,
   nowSeconds: bigint | null,
-): RoleAction | null {
+): RoleAction[] {
+  const actions: RoleAction[] = [];
   const acceptancePhase = deadlinePhase(order.acceptance_deadline, nowSeconds);
   const fulfillmentDeadline = order.state === "ACCEPTED"
     ? order.packing_deadline
     : order.state === "READY_FOR_PICKUP" || order.state === "IN_TRANSIT"
       ? order.delivery_deadline
       : undefined;
-  if (deadlinePhase(fulfillmentDeadline, nowSeconds) === "EXPIRED") {
-    return {
+  const fulfillmentExpired = deadlinePhase(fulfillmentDeadline, nowSeconds) === "EXPIRED";
+  if (fulfillmentExpired) {
+    actions.push({
       id: "cancelFulfillmentTimeout",
       method: "cancel_fulfillment_timeout",
       requiresEvidence: false,
-    };
+    });
   }
   if (role === "RESTAURANT") {
     if (
@@ -122,10 +218,10 @@ function actionFor(
       !order.restaurant_accepted &&
       acceptancePhase === "BEFORE"
     ) {
-      return { id: "acceptRestaurant", method: "accept_restaurant", requiresEvidence: false };
+      actions.push({ id: "acceptRestaurant", method: "accept_restaurant", requiresEvidence: false });
     }
-    if (order.state === "ACCEPTED") {
-      return { id: "pack", method: "submit_packed_evidence", requiresEvidence: true };
+    if (order.state === "ACCEPTED" && !fulfillmentExpired) {
+      actions.push({ id: "pack", method: "submit_packed_evidence", requiresEvidence: true });
     }
   }
   if (role === "COURIER") {
@@ -134,13 +230,13 @@ function actionFor(
       !order.courier_accepted &&
       acceptancePhase === "BEFORE"
     ) {
-      return { id: "acceptCourier", method: "accept_courier", requiresEvidence: false };
+      actions.push({ id: "acceptCourier", method: "accept_courier", requiresEvidence: false });
     }
-    if (order.state === "READY_FOR_PICKUP") {
-      return { id: "pickup", method: "submit_pickup_evidence", requiresEvidence: true };
+    if (order.state === "READY_FOR_PICKUP" && !fulfillmentExpired) {
+      actions.push({ id: "pickup", method: "submit_pickup_evidence", requiresEvidence: true });
     }
-    if (order.state === "IN_TRANSIT") {
-      return { id: "deliver", method: "submit_delivery_evidence", requiresEvidence: true };
+    if (order.state === "IN_TRANSIT" && !fulfillmentExpired) {
+      actions.push({ id: "deliver", method: "submit_delivery_evidence", requiresEvidence: true });
     }
   }
   if (
@@ -148,40 +244,53 @@ function actionFor(
     order.state === "REVIEW_WINDOW" &&
     deadlinePhase(order.review_deadline, nowSeconds) === "BEFORE"
   ) {
-    return { id: "claim", method: "submit_claim_evidence", requiresEvidence: true };
+    actions.push({ id: "claim", method: "submit_claim_evidence", requiresEvidence: true });
   }
+
+  if (
+    role !== "OUTSIDER" &&
+    (order.state === "FUNDED" || order.state === "PARTIALLY_ACCEPTED" || order.state === "ACCEPTED")
+  ) {
+    actions.push({
+      id: "cancelBeforePacked",
+      method: "cancel_before_packed",
+      requiresEvidence: false,
+    });
+  }
+
   if (
     acceptedState(order.state) &&
-    (
-      (
-        acceptancePhase === "BEFORE" &&
-        role === "CUSTOMER" &&
-        !order.restaurant_accepted &&
-        !order.courier_accepted
-      ) ||
-      (
-        acceptancePhase === "EXPIRED" &&
-        !(order.restaurant_accepted && order.courier_accepted)
-      )
-    )
+    acceptancePhase === "EXPIRED" &&
+    !(order.restaurant_accepted && order.courier_accepted)
   ) {
-    return { id: "cancel", method: "cancel_unaccepted", requiresEvidence: false };
+    actions.push({ id: "cancel", method: "cancel_unaccepted", requiresEvidence: false });
   }
-  return null;
+  return actions;
 }
 
-export function RoleConsole({
+export function RoleConsole<TOrder extends FoodGuardOrderView = FoodGuardOrderView>({
   address,
   clock,
   evidenceWritesEnabled = true,
   onAction,
+  onOperationStateChange,
+  onOrderChange,
+  operationLocked = false,
   order,
+  readOrder,
+  showLifecycle = true,
   writesEnabled = true,
-}: RoleConsoleProps) {
+}: RoleConsoleProps<TOrder>) {
   const { copy } = useLocale();
   const [authoritativeOrder, setAuthoritativeOrder] = useState(order);
   const [pending, setPending] = useState(false);
   const [stage, setStage] = useState<TxStage | null>(null);
+  const [stageOperation, setStageOperation] = useState<RoleAction["method"] | null>(null);
+  const stageRef = useRef<TxStage | null>(null);
+  const lifecycleProofRef = useRef({ execution: false, finality: false });
+  const [recovery, setRecovery] = useState<
+    (FoodGuardReadbackRecovery<TOrder> & { method: RoleAction["method"] }) | null
+  >(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [nowSeconds, setNowSeconds] = useState<bigint | null>(null);
@@ -191,7 +300,20 @@ export function RoleConsole({
     authoritativeOrder.courier,
   ] as const;
   const role = address ? deriveWalletRole(address, actors) : null;
-  const action = role ? actionFor(role, authoritativeOrder, nowSeconds) : null;
+  const actions = role ? actionsFor(role, authoritativeOrder, nowSeconds) : [];
+
+  function publishOperationState(
+    method: RoleAction["method"] | null,
+    nextPending: boolean,
+    nextStage: TxStage | null,
+  ) {
+    onOperationStateChange?.({
+      actorAddress: address ?? null,
+      method,
+      pending: nextPending,
+      stage: nextStage,
+    });
+  }
 
   useEffect(() => {
     let active = true;
@@ -232,33 +354,100 @@ export function RoleConsole({
     };
   }, [authoritativeOrder.acceptance_deadline, authoritativeOrder.review_deadline, clock]);
 
-  async function performAction() {
-    if (!action || pending || !writesEnabled || (action.requiresEvidence && !evidenceWritesEnabled)) return;
+  async function performAction(action: RoleAction) {
+    if (
+      !action ||
+      pending ||
+      stage === "OUTCOME_UNKNOWN" ||
+      operationLocked ||
+      !writesEnabled ||
+      (action.requiresEvidence && !evidenceWritesEnabled)
+    ) return;
     setError(null);
     setNotice(null);
+    if (
+      action.id === "cancelBeforePacked" &&
+      !window.confirm(copy.console.cancelBeforePackedConfirmation)
+    ) return;
     if (action.requiresEvidence && !onAction) {
       setNotice(copy.console.evidenceRequired);
       return;
     }
+    stageRef.current = null;
+    lifecycleProofRef.current = { execution: false, finality: false };
+    setRecovery(null);
+    setStage(null);
+    setStageOperation(action.method);
     setPending(true);
+    publishOperationState(action.method, true, null);
+    const submittedAction = action;
+    const submittedOrder = authoritativeOrder;
+    const expectedActor = address ?? undefined;
+    const operationReadback = () => readOrder
+      ? readOrder(submittedOrder.order_id)
+      : readFoodGuard<TOrder>("get_order", [submittedOrder.order_id]);
+    const operationMatches = (candidate: TOrder) => matchesRoleActionReadback(
+      submittedAction.method,
+      candidate,
+      submittedOrder,
+      expectedActor,
+    );
+    const observeStage = (nextStage: TxStage) => {
+      if (nextStage === "FINALIZED") lifecycleProofRef.current.finality = true;
+      if (nextStage === "EXECUTION_SUCCESS") lifecycleProofRef.current.execution = true;
+      stageRef.current = nextStage;
+      setStage(nextStage);
+      publishOperationState(submittedAction.method, true, nextStage);
+    };
     try {
-      const readback = onAction
-        ? await onAction(action, authoritativeOrder)
-        : await (async () => {
-            const hash = await writeFoodGuard(
-              action.method,
-              [authoritativeOrder.order_id],
-              0n,
-              setStage,
-              address ?? undefined,
-            );
-            return trackTransaction<FoodGuardOrderView>(hash, setStage);
-          })();
+      const readback = submittedAction.requiresEvidence
+        ? await onAction!(submittedAction, submittedOrder)
+        : await executeFoodGuardOperation<TOrder>({
+            method: submittedAction.method,
+            args: [submittedOrder.order_id],
+            value: 0n,
+            expectedAccount: expectedActor,
+            onStage: observeStage,
+            readback: operationReadback,
+            matches: operationMatches,
+          });
       setAuthoritativeOrder(readback);
+      if (!submittedAction.requiresEvidence) onOrderChange?.(readback);
     } catch (caught) {
+      if (!submittedAction.requiresEvidence && caught instanceof OutcomeUnknownError) {
+        setRecovery({
+          confirmationStage:
+            lifecycleProofRef.current.finality && lifecycleProofRef.current.execution
+              ? "READBACK_CONFIRMED"
+              : "STATE_READBACK_CONFIRMED",
+          matches: operationMatches,
+          method: submittedAction.method,
+          onStage: observeStage,
+          readback: operationReadback,
+        });
+      }
       setError(caught instanceof Error ? caught.message : "FoodGuard write failed");
     } finally {
       setPending(false);
+      publishOperationState(submittedAction.method, false, stageRef.current);
+    }
+  }
+
+  async function checkContractState() {
+    if (!recovery || pending) return;
+    setPending(true);
+    setError(null);
+    publishOperationState(recovery.method, true, stageRef.current);
+    try {
+      const readback = await checkFoodGuardOperationState(recovery);
+      setAuthoritativeOrder(readback);
+      onOrderChange?.(readback);
+      setRecovery(null);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "FoodGuard readback failed");
+    } finally {
+      setPending(false);
+      publishOperationState(recovery.method, false, stageRef.current);
     }
   }
 
@@ -284,25 +473,38 @@ export function RoleConsole({
       </dl>
 
       {!address && <p className="form-notice">{copy.console.connect}</p>}
-      {role === "OUTSIDER" && !action && <p className="form-notice">{copy.console.readOnly}</p>}
-      {role && role !== "OUTSIDER" && !action && (
+      {role === "OUTSIDER" && actions.length === 0 && <p className="form-notice">{copy.console.readOnly}</p>}
+      {role && role !== "OUTSIDER" && actions.length === 0 && (
         <p className="form-notice">{copy.console.noAction}</p>
       )}
-      {action && (
+      {actions.map((action) => (
         <button
+          key={action.id}
           className="button button--primary"
-          disabled={pending || !writesEnabled || (action.requiresEvidence && !evidenceWritesEnabled)}
-          onClick={performAction}
+          disabled={pending || stage === "OUTCOME_UNKNOWN" || operationLocked || !writesEnabled || (action.requiresEvidence && !evidenceWritesEnabled)}
+          onClick={() => void performAction(action)}
           type="button"
         >
           {copy.console.actions[action.id]}
         </button>
+      ))}
+      {stage === "OUTCOME_UNKNOWN" && recovery && (
+        <button
+          className="button button--quiet"
+          disabled={pending}
+          onClick={() => void checkContractState()}
+          type="button"
+        >
+          {copy.console.checkContractState}
+        </button>
       )}
       {pending && <p className="form-notice" role="status">{copy.console.pending}</p>}
-      {stage && (
-        <p className={`transaction-stage${stage === "CONSENSUS_FAILED" || stage === "EXECUTION_ERROR" ? " transaction-stage--failure" : ""}`}>
-          <code>{stage}</code>
-        </p>
+      {showLifecycle && (
+        <TransactionLifecycle
+          actorAddress={address}
+          operation={stageOperation}
+          stage={stage}
+        />
       )}
       {notice && <p className="form-notice" role="status">{notice}</p>}
       {error && <p className="form-notice form-notice--error" role="alert">{error}</p>}

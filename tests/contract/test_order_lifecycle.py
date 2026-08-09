@@ -497,6 +497,7 @@ def test_intentionally_frozen_public_abi_has_no_privileged_escape_hatch(food_gua
     assert set(schema["methods"]) == {
         "accept_courier",
         "accept_restaurant",
+        "cancel_before_packed",
         "cancel_fulfillment_timeout",
         "cancel_unaccepted",
         "create_order",
