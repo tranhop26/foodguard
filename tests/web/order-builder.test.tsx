@@ -138,11 +138,26 @@ beforeEach(() => {
   mocks.readFoodGuard.mockImplementation((method: string) => Promise.resolve(
     method === "get_creation_paused" ? false : READY_FOR_PICKUP_ORDER,
   ));
-  mocks.trackTransaction.mockResolvedValue({
-    ...READY_FOR_PICKUP_ORDER,
-    state: "FUNDED",
-    restaurant_accepted: false,
-    courier_accepted: false,
+  mocks.trackTransaction.mockImplementation(async () => {
+    const [, args, value] = mocks.writeFoodGuard.mock.calls[0];
+    const deadlines = JSON.parse(args[5] as string) as Record<string, number>;
+    return {
+      acceptance_deadline: deadlines.acceptance_deadline,
+      appeal_deadline: deadlines.appeal_deadline,
+      courier: args[2] as string,
+      courier_accepted: false,
+      customer: CUSTOMER,
+      delivery_deadline: deadlines.delivery_deadline,
+      delivery_fee: String(args[4]),
+      manifest_json: args[3] as string,
+      order_id: args[0] as string,
+      packing_deadline: deadlines.packing_deadline,
+      restaurant: args[1] as string,
+      restaurant_accepted: false,
+      review_deadline: deadlines.review_deadline,
+      state: "FUNDED" as const,
+      total_value: String(value),
+    };
   });
 });
 
@@ -396,6 +411,81 @@ describe("FoodGuard order builder", () => {
     expect(mocks.trackTransaction).toHaveBeenCalledWith(HASH, expect.any(Function));
     expect(await screen.findByText("FUNDED")).toBeVisible();
     expect(screen.getByRole("button", { name: /tạo và ký quỹ/i })).toBeDisabled();
+  });
+
+  it("accepts ambiguous create-order recovery only after every frozen field matches", async () => {
+    mocks.writeFoodGuard.mockRejectedValue(
+      new Error("wallet request failed", {
+        cause: { error: new TypeError("Failed to fetch") },
+      }),
+    );
+    let reconciliationRead = 0;
+    mocks.readFoodGuard.mockImplementation((method: string) => {
+      if (method === "get_creation_paused") return Promise.resolve(false);
+      if (method !== "get_order") throw new Error(`Unexpected method: ${method}`);
+
+      const [, args, value] = mocks.writeFoodGuard.mock.calls[0];
+      const deadlines = JSON.parse(args[5] as string) as Record<string, number>;
+      const exact = {
+        acceptance_deadline: deadlines.acceptance_deadline,
+        appeal_deadline: deadlines.appeal_deadline,
+        courier: args[2] as string,
+        courier_accepted: false,
+        customer: CUSTOMER,
+        delivery_deadline: deadlines.delivery_deadline,
+        delivery_fee: String(args[4]),
+        manifest_json: args[3] as string,
+        order_id: args[0] as string,
+        packing_deadline: deadlines.packing_deadline,
+        restaurant: args[1] as string,
+        restaurant_accepted: false,
+        review_deadline: deadlines.review_deadline,
+        state: "FUNDED" as const,
+        total_value: String(value),
+      };
+      const mismatches = [
+        { ...exact, order_id: "fg-other" },
+        { ...exact, customer: OUTSIDER },
+        { ...exact, restaurant: OUTSIDER },
+        { ...exact, courier: OUTSIDER },
+        { ...exact, manifest_json: `${exact.manifest_json} ` },
+        { ...exact, delivery_fee: "51" },
+        { ...exact, total_value: "1251" },
+        { ...exact, acceptance_deadline: exact.acceptance_deadline + 1 },
+        { ...exact, packing_deadline: exact.packing_deadline + 1 },
+        { ...exact, delivery_deadline: exact.delivery_deadline + 1 },
+        { ...exact, review_deadline: exact.review_deadline + 1 },
+        { ...exact, appeal_deadline: exact.appeal_deadline + 1 },
+      ];
+      return Promise.resolve(mismatches[reconciliationRead++] ?? exact);
+    });
+    renderBuilder({ deliveryFeeWei: "50" });
+    fireEvent.click(screen.getAllByRole("button")[0]);
+    await screen.findByText(CUSTOMER);
+    const createButton = screen.getAllByRole("button").at(-1)!;
+    await waitFor(() => expect(createButton).toBeEnabled());
+
+    vi.useFakeTimers();
+    fireEvent.click(createButton);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(reconciliationRead).toBe(1);
+    expect(screen.queryByTestId("raw-order-state")).not.toBeInTheDocument();
+
+    const retryDelays = [2_000, 4_000, ...Array(10).fill(8_000)] as number[];
+    for (const [index, delay] of retryDelays.entries()) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(delay);
+      });
+      expect(reconciliationRead).toBe(index + 2);
+      if (index + 1 < retryDelays.length) {
+        expect(screen.queryByTestId("raw-order-state")).not.toBeInTheDocument();
+      }
+    }
+
+    expect(screen.getByTestId("raw-order-state")).toHaveTextContent("FUNDED");
+    expect(mocks.writeFoodGuard).toHaveBeenCalledTimes(1);
   });
 
   it("freezes every submitted commitment while wallet confirmation and readback are pending", async () => {
@@ -770,8 +860,64 @@ describe("FoodGuard role console", () => {
     expect(screen.getByTestId("raw-order-state")).toHaveTextContent("READY_FOR_PICKUP");
     resolveReadback?.({ ...READY_FOR_PICKUP_ORDER, state: "IN_TRANSIT" });
 
-    expect(await screen.findByTestId("raw-order-state")).toHaveTextContent("IN_TRANSIT");
+    await waitFor(() => {
+      expect(screen.getByTestId("raw-order-state")).toHaveTextContent("IN_TRANSIT");
+    });
     expect(screen.getByRole("button", { name: /xác nhận giao hàng/i })).toBeEnabled();
+  });
+  it("reconciles restaurant acceptance only for the expected stored actor and state", async () => {
+    vi.useFakeTimers();
+    const now = BigInt(Math.floor(Date.now() / 1_000));
+    const order: FoodGuardOrderView = {
+      ...READY_FOR_PICKUP_ORDER,
+      acceptance_deadline: now + 60n,
+      courier_accepted: false,
+      restaurant_accepted: false,
+      state: "FUNDED",
+    };
+    const wrongActor = {
+      ...order,
+      restaurant: OUTSIDER,
+      restaurant_accepted: true,
+      state: "PARTIALLY_ACCEPTED" as const,
+    };
+    const accepted = {
+      ...order,
+      restaurant_accepted: true,
+      state: "PARTIALLY_ACCEPTED" as const,
+    };
+    mocks.writeFoodGuard.mockRejectedValue(
+      new Error("wallet request failed", {
+        cause: { details: new TypeError("Failed to fetch") },
+      }),
+    );
+    mocks.readFoodGuard
+      .mockResolvedValueOnce(wrongActor)
+      .mockResolvedValueOnce(accepted);
+
+    render(
+      <LocaleProvider>
+        <RoleConsole
+          address={RESTAURANT}
+          clock={testClock(now)}
+          order={order}
+        />
+      </LocaleProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(mocks.readFoodGuard).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("raw-order-state")).toHaveTextContent("FUNDED");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(mocks.readFoodGuard).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("raw-order-state")).toHaveTextContent("PARTIALLY_ACCEPTED");
+    expect(mocks.writeFoodGuard).toHaveBeenCalledTimes(1);
   });
 });
 

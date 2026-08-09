@@ -40,9 +40,11 @@ import {
   trackTransaction,
   type TxStage,
 } from "../../lib/genlayer/transactions";
+import { executeFoodGuardOperation } from "../../lib/genlayer/operations";
 import {
   AmbiguousWalletOutcomeError,
   classifyRpcFailure,
+  OutcomeUnknownError,
   singleFlight,
   StudioNetRateLimitError,
   withStudioNetBackoff,
@@ -540,6 +542,145 @@ describe("FoodGuard StudioNet client", () => {
     expect(sdk.writeContract).toHaveBeenCalledTimes(1);
     expect(sdk.getTransaction).not.toHaveBeenCalled();
     expect(sdk.readContract).not.toHaveBeenCalled();
+  });
+
+  it("reconciles a broadcast-then-transport-error without resubmitting", async () => {
+    const stages: TxStage[] = [];
+    const order = {
+      courier: "0x3333333333333333333333333333333333333333",
+      courier_accepted: false,
+      customer: "0x1111111111111111111111111111111111111111",
+      order_id: "fg-1",
+      restaurant: ADDRESS,
+      restaurant_accepted: true,
+      state: "PARTIALLY_ACCEPTED",
+    };
+    const readback = vi.fn().mockResolvedValue(order);
+    sdk.writeContract.mockRejectedValue(
+      new Error("wallet request failed", {
+        cause: { error: new TypeError("Failed to fetch") },
+      }),
+    );
+
+    await expect(executeFoodGuardOperation<typeof order>({
+      method: "accept_restaurant",
+      args: ["fg-1"],
+      value: 0n,
+      expectedAccount: ADDRESS,
+      onStage: (stage) => stages.push(stage),
+      readback,
+      matches: (candidate) => candidate.restaurant_accepted === true,
+    })).resolves.toEqual(order);
+
+    expect(sdk.writeContract).toHaveBeenCalledTimes(1);
+    expect(readback).toHaveBeenCalledTimes(1);
+    expect(stages).toEqual([
+      "WALLET_CONFIRMATION",
+      "RECONCILING",
+      "READBACK_CONFIRMED",
+    ]);
+  });
+
+  it("does not reconcile a definitive wallet rejection", async () => {
+    const stages: TxStage[] = [];
+    const rejection = { code: 4001, message: "User rejected the request" };
+    const readback = vi.fn();
+    sdk.writeContract.mockRejectedValue(rejection);
+
+    await expect(executeFoodGuardOperation({
+      method: "accept_restaurant",
+      args: ["fg-1"],
+      value: 0n,
+      expectedAccount: ADDRESS,
+      onStage: (stage) => stages.push(stage),
+      readback,
+      matches: () => true,
+    })).rejects.toBe(rejection);
+
+    expect(sdk.writeContract).toHaveBeenCalledTimes(1);
+    expect(readback).not.toHaveBeenCalled();
+    expect(stages).toEqual(["WALLET_CONFIRMATION"]);
+  });
+
+  it("reports an unknown outcome after bounded nonmatching readback without resubmitting", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2030-01-01T00:00:00.000Z"));
+    const stages: TxStage[] = [];
+    const unchangedOrder = {
+      courier: "0x3333333333333333333333333333333333333333",
+      courier_accepted: false,
+      customer: "0x1111111111111111111111111111111111111111",
+      order_id: "fg-1",
+      restaurant: ADDRESS,
+      restaurant_accepted: false,
+      state: "FUNDED",
+    };
+    const readback = vi.fn().mockResolvedValue(unchangedOrder);
+    sdk.writeContract.mockRejectedValue(
+      new Error("wallet request failed", {
+        cause: { details: new TypeError("Failed to fetch") },
+      }),
+    );
+
+    const outcome = executeFoodGuardOperation<typeof unchangedOrder>({
+      method: "accept_restaurant",
+      args: ["fg-1"],
+      value: 0n,
+      expectedAccount: ADDRESS,
+      onStage: (stage) => stages.push(stage),
+      readback,
+      matches: (candidate) => candidate.restaurant_accepted === true,
+    }).then(
+      (value) => ({ kind: "resolved", value }) as const,
+      (error: unknown) => ({ kind: "rejected", error }) as const,
+    );
+
+    await vi.advanceTimersByTimeAsync(120_000);
+    await expect(outcome).resolves.toMatchObject({
+      kind: "rejected",
+      error: expect.any(OutcomeUnknownError),
+    });
+    expect(sdk.writeContract).toHaveBeenCalledTimes(1);
+    expect(readback.mock.calls.length).toBeGreaterThan(1);
+    expect(stages).toEqual([
+      "WALLET_CONFIRMATION",
+      "RECONCILING",
+      "OUTCOME_UNKNOWN",
+    ]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("bounds a reconciliation read that never settles", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2030-01-01T00:00:00.000Z"));
+    const stages: TxStage[] = [];
+    const readback = vi.fn(() => new Promise<{ restaurant_accepted: boolean }>(() => undefined));
+    const settled = vi.fn();
+    sdk.writeContract.mockRejectedValue(new TypeError("Failed to fetch"));
+
+    void executeFoodGuardOperation({
+      method: "accept_restaurant",
+      args: ["fg-1"],
+      value: 0n,
+      expectedAccount: ADDRESS,
+      onStage: (stage) => stages.push(stage),
+      readback,
+      matches: (candidate) => candidate.restaurant_accepted === true,
+    }).then(settled, settled);
+
+    await vi.advanceTimersByTimeAsync(119_999);
+    expect(settled).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(settled).toHaveBeenCalledWith(expect.any(OutcomeUnknownError));
+    expect(sdk.writeContract).toHaveBeenCalledTimes(1);
+    expect(readback).toHaveBeenCalledTimes(1);
+    expect(stages).toEqual([
+      "WALLET_CONFIRMATION",
+      "RECONCILING",
+      "OUTCOME_UNKNOWN",
+    ]);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("blocks writes when the connected wallet is not on StudioNet", async () => {

@@ -5,13 +5,14 @@ import { isAddress, zeroAddress } from "viem";
 
 import type { EvidenceDocument, HexDigest, OrderItem } from "../../lib/domain";
 import { canonicalizeEvidence, hashEvidence } from "../../lib/evidence";
-import { readFoodGuard, writeFoodGuard } from "../../lib/genlayer/client";
+import { readFoodGuard } from "../../lib/genlayer/client";
 import {
   getFoodGuardConfiguration,
   getFoodGuardPublicAppOriginConfiguration,
   type FoodGuardPublicAppOriginConfiguration,
 } from "../../lib/genlayer/config";
-import { trackTransaction, type TxStage } from "../../lib/genlayer/transactions";
+import { executeFoodGuardOperation } from "../../lib/genlayer/operations";
+import type { TxStage } from "../../lib/genlayer/transactions";
 import { useLocale } from "../../lib/i18n";
 import { RoleConsole, type FoodGuardOrderView } from "../order/RoleConsole";
 import { WalletButton, type WalletSnapshot } from "../wallet/WalletButton";
@@ -160,6 +161,72 @@ function canonicalDeadlines(createdAtMs: number): string {
 
 function sameAddress(left: string | null, right: string): boolean {
   return Boolean(left && left.toLowerCase() === right.toLowerCase());
+}
+
+function sameUnsignedInteger(value: unknown, expected: bigint): boolean {
+  try {
+    if (typeof value === "bigint") return value === expected;
+    if (
+      typeof value === "number" &&
+      Number.isSafeInteger(value) &&
+      value >= 0
+    ) {
+      return BigInt(value) === expected;
+    }
+    return (
+      typeof value === "string" &&
+      /^(0|[1-9][0-9]*)$/.test(value) &&
+      BigInt(value) === expected
+    );
+  } catch {
+    return false;
+  }
+}
+
+function matchesFrozenCommitment(
+  order: FoodGuardOrderView,
+  commitment: FrozenCommitment,
+): boolean {
+  let deadlines: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(commitment.deadlinesJson);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return false;
+    }
+    deadlines = parsed as Record<string, unknown>;
+  } catch {
+    return false;
+  }
+
+  return (
+    order.order_id === commitment.orderId &&
+    sameAddress(order.customer, commitment.actors[0]) &&
+    sameAddress(order.restaurant, commitment.actors[1]) &&
+    sameAddress(order.courier, commitment.actors[2]) &&
+    order.manifest_json === commitment.canonicalManifest &&
+    sameUnsignedInteger(order.delivery_fee, commitment.amounts.deliveryFee) &&
+    sameUnsignedInteger(order.total_value, commitment.amounts.total) &&
+    sameUnsignedInteger(
+      order.acceptance_deadline,
+      BigInt(deadlines.acceptance_deadline as number),
+    ) &&
+    sameUnsignedInteger(
+      order.packing_deadline,
+      BigInt(deadlines.packing_deadline as number),
+    ) &&
+    sameUnsignedInteger(
+      order.delivery_deadline,
+      BigInt(deadlines.delivery_deadline as number),
+    ) &&
+    sameUnsignedInteger(
+      order.review_deadline,
+      BigInt(deadlines.review_deadline as number),
+    ) &&
+    sameUnsignedInteger(
+      order.appeal_deadline,
+      BigInt(deadlines.appeal_deadline as number),
+    )
+  );
 }
 
 export function OrderBuilder({
@@ -344,9 +411,9 @@ export function OrderBuilder({
     setError(null);
     setAuthoritativeOrder(null);
     try {
-      const hash = await writeFoodGuard(
-        "create_order",
-        [
+      const readback = await executeFoodGuardOperation<FoodGuardOrderView>({
+        method: "create_order",
+        args: [
           commitment.orderId,
           commitment.actors[1],
           commitment.actors[2],
@@ -354,11 +421,15 @@ export function OrderBuilder({
           commitment.amounts.deliveryFee,
           commitment.deadlinesJson,
         ],
-        commitment.amounts.total,
-        setStage,
-        commitment.actors[0],
-      );
-      const readback = await trackTransaction<FoodGuardOrderView>(hash, setStage);
+        value: commitment.amounts.total,
+        expectedAccount: commitment.actors[0],
+        onStage: setStage,
+        readback: () => readFoodGuard<FoodGuardOrderView>(
+          "get_order",
+          [commitment.orderId],
+        ),
+        matches: (candidate) => matchesFrozenCommitment(candidate, commitment),
+      });
       setAuthoritativeOrder(readback);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "FoodGuard write failed");

@@ -3,8 +3,9 @@
 import { useCallback, useEffect, useState } from "react";
 
 import type { OrderState } from "../../lib/domain";
-import { readFoodGuard, writeFoodGuard } from "../../lib/genlayer/client";
-import { trackTransaction, type TxStage } from "../../lib/genlayer/transactions";
+import { readFoodGuard } from "../../lib/genlayer/client";
+import { executeFoodGuardOperation } from "../../lib/genlayer/operations";
+import type { TxStage } from "../../lib/genlayer/transactions";
 import { useLocale } from "../../lib/i18n";
 import {
   deriveWalletRole,
@@ -22,6 +23,7 @@ export interface FoodGuardOrderView {
   delivery_deadline?: bigint | number | string;
   order_id: string;
   packing_deadline?: bigint | number | string;
+  refund_emitted?: boolean;
   restaurant: string;
   restaurant_accepted: boolean;
   review_deadline?: bigint | number | string;
@@ -48,6 +50,7 @@ export interface RoleAction {
     | "submit_pickup_evidence"
     | "submit_delivery_evidence"
     | "submit_claim_evidence"
+    | "cancel_before_packed"
     | "cancel_unaccepted"
     | "cancel_fulfillment_timeout";
   requiresEvidence: boolean;
@@ -64,6 +67,76 @@ interface RoleConsoleProps {
 
 function acceptedState(state: OrderState): boolean {
   return state === "FUNDED" || state === "PARTIALLY_ACCEPTED";
+}
+
+function sameActor(left: string, right: string | undefined): boolean {
+  return Boolean(right && left.toLowerCase() === right.toLowerCase());
+}
+
+export function matchesRoleActionReadback(
+  method: RoleAction["method"],
+  candidate: FoodGuardOrderView,
+  submittedOrder: FoodGuardOrderView,
+  expectedActor: string | undefined,
+): boolean {
+  if (candidate.order_id !== submittedOrder.order_id) return false;
+
+  if (method === "accept_restaurant") {
+    return (
+      sameActor(submittedOrder.restaurant, expectedActor) &&
+      sameActor(candidate.restaurant, expectedActor) &&
+      candidate.restaurant_accepted === true &&
+      candidate.state === (
+        candidate.courier_accepted ? "ACCEPTED" : "PARTIALLY_ACCEPTED"
+      )
+    );
+  }
+  if (method === "accept_courier") {
+    return (
+      sameActor(submittedOrder.courier, expectedActor) &&
+      sameActor(candidate.courier, expectedActor) &&
+      candidate.courier_accepted === true &&
+      candidate.state === (
+        candidate.restaurant_accepted ? "ACCEPTED" : "PARTIALLY_ACCEPTED"
+      )
+    );
+  }
+  if (method === "cancel_before_packed") {
+    const submittedActors = [
+      submittedOrder.customer,
+      submittedOrder.restaurant,
+      submittedOrder.courier,
+    ];
+    const actorsUnchanged = (
+      sameActor(candidate.customer, submittedOrder.customer) &&
+      sameActor(candidate.restaurant, submittedOrder.restaurant) &&
+      sameActor(candidate.courier, submittedOrder.courier)
+    );
+    return (
+      Boolean(expectedActor) &&
+      submittedActors.some((actor) => sameActor(actor, expectedActor)) &&
+      actorsUnchanged &&
+      candidate.state === "CANCELLED_REFUNDED" &&
+      candidate.refund_emitted === true &&
+      candidate.restaurant_accepted === false &&
+      candidate.courier_accepted === false
+    );
+  }
+  if (method === "cancel_unaccepted") {
+    return (
+      candidate.state === "CANCELLED_REFUNDED" &&
+      candidate.refund_emitted === true &&
+      candidate.restaurant_accepted === false &&
+      candidate.courier_accepted === false
+    );
+  }
+  if (method === "cancel_fulfillment_timeout") {
+    return (
+      candidate.state === "FULFILLMENT_TIMEOUT_REFUNDED" &&
+      candidate.refund_emitted === true
+    );
+  }
+  return false;
 }
 
 const MAX_U64 = (1n << 64n) - 1n;
@@ -241,19 +314,29 @@ export function RoleConsole({
       return;
     }
     setPending(true);
+    const submittedAction = action;
+    const submittedOrder = authoritativeOrder;
+    const expectedActor = address ?? undefined;
     try {
       const readback = onAction
-        ? await onAction(action, authoritativeOrder)
-        : await (async () => {
-            const hash = await writeFoodGuard(
-              action.method,
-              [authoritativeOrder.order_id],
-              0n,
-              setStage,
-              address ?? undefined,
-            );
-            return trackTransaction<FoodGuardOrderView>(hash, setStage);
-          })();
+        ? await onAction(submittedAction, submittedOrder)
+        : await executeFoodGuardOperation<FoodGuardOrderView>({
+            method: submittedAction.method,
+            args: [submittedOrder.order_id],
+            value: 0n,
+            expectedAccount: expectedActor,
+            onStage: setStage,
+            readback: () => readFoodGuard<FoodGuardOrderView>(
+              "get_order",
+              [submittedOrder.order_id],
+            ),
+            matches: (candidate) => matchesRoleActionReadback(
+              submittedAction.method,
+              candidate,
+              submittedOrder,
+              expectedActor,
+            ),
+          });
       setAuthoritativeOrder(readback);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "FoodGuard write failed");

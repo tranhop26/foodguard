@@ -35,6 +35,10 @@ import {
   type OrderDetailView,
 } from "../../components/order/ItemOutcomeTable";
 import { OrderTimeline } from "../../components/order/OrderTimeline";
+import {
+  matchesRoleActionReadback,
+  type FoodGuardOrderView,
+} from "../../components/order/RoleConsole";
 import { TransactionLifecycle } from "../../components/order/TransactionLifecycle";
 import { LocaleProvider, type Locale } from "../../lib/i18n";
 import type { EvidenceDocument, OrderItem, OrderState } from "../../lib/domain";
@@ -129,6 +133,123 @@ const EXPIRED_APPEAL_ORDER: OrderDetailView = {
   ...MIXED_OUTCOME_ORDER,
   appeal_deadline: "1700000000",
 };
+
+describe("authoritative role-action reconciliation", () => {
+  const submittedOrder: FoodGuardOrderView = {
+    acceptance_deadline: "1893456000",
+    courier: COURIER,
+    courier_accepted: false,
+    customer: CUSTOMER,
+    delivery_deadline: "1893459600",
+    order_id: "fg-role-reconcile",
+    packing_deadline: "1893457800",
+    refund_emitted: false,
+    restaurant: RESTAURANT,
+    restaurant_accepted: true,
+    review_deadline: "1893461400",
+    state: "PARTIALLY_ACCEPTED",
+  };
+
+  it("binds courier acceptance to the expected courier, flag, and resulting state", () => {
+    const accepted: FoodGuardOrderView = {
+      ...submittedOrder,
+      courier_accepted: true,
+      state: "ACCEPTED",
+    };
+
+    expect(matchesRoleActionReadback(
+      "accept_courier",
+      accepted,
+      submittedOrder,
+      COURIER,
+    )).toBe(true);
+    expect(matchesRoleActionReadback(
+      "accept_courier",
+      { ...accepted, courier: CUSTOMER },
+      submittedOrder,
+      COURIER,
+    )).toBe(false);
+    expect(matchesRoleActionReadback(
+      "accept_courier",
+      { ...accepted, courier_accepted: false },
+      submittedOrder,
+      COURIER,
+    )).toBe(false);
+    expect(matchesRoleActionReadback(
+      "accept_courier",
+      { ...accepted, state: "PARTIALLY_ACCEPTED" },
+      submittedOrder,
+      COURIER,
+    )).toBe(false);
+  });
+
+  it("binds participant cancellation to its actor and every terminal effect", () => {
+    const cancelled: FoodGuardOrderView = {
+      ...submittedOrder,
+      courier_accepted: false,
+      refund_emitted: true,
+      restaurant_accepted: false,
+      state: "CANCELLED_REFUNDED",
+    };
+    const mismatches: FoodGuardOrderView[] = [
+      { ...cancelled, order_id: "fg-other" },
+      { ...cancelled, restaurant: CUSTOMER },
+      { ...cancelled, state: "ACCEPTED" },
+      { ...cancelled, refund_emitted: false },
+      { ...cancelled, restaurant_accepted: true },
+      { ...cancelled, courier_accepted: true },
+    ];
+
+    expect(matchesRoleActionReadback(
+      "cancel_before_packed",
+      cancelled,
+      submittedOrder,
+      RESTAURANT,
+    )).toBe(true);
+    expect(matchesRoleActionReadback(
+      "cancel_before_packed",
+      cancelled,
+      submittedOrder,
+      "0x4444444444444444444444444444444444444444",
+    )).toBe(false);
+    for (const mismatch of mismatches) {
+      expect(matchesRoleActionReadback(
+        "cancel_before_packed",
+        mismatch,
+        submittedOrder,
+        RESTAURANT,
+      )).toBe(false);
+    }
+  });
+
+  it("retains exact terminal predicates for existing refund actions", () => {
+    const unacceptedRefund: FoodGuardOrderView = {
+      ...submittedOrder,
+      courier_accepted: false,
+      refund_emitted: true,
+      restaurant_accepted: false,
+      state: "CANCELLED_REFUNDED",
+    };
+    const fulfillmentRefund: FoodGuardOrderView = {
+      ...submittedOrder,
+      refund_emitted: true,
+      state: "FULFILLMENT_TIMEOUT_REFUNDED",
+    };
+
+    expect(matchesRoleActionReadback(
+      "cancel_unaccepted",
+      unacceptedRefund,
+      submittedOrder,
+      CUSTOMER,
+    )).toBe(true);
+    expect(matchesRoleActionReadback(
+      "cancel_fulfillment_timeout",
+      fulfillmentRefund,
+      submittedOrder,
+      undefined,
+    )).toBe(true);
+  });
+});
 
 function renderLocalized(node: React.ReactNode, locale: Locale) {
   return render(
