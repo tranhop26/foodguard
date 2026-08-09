@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { OrderState } from "../../lib/domain";
 import { readFoodGuard } from "../../lib/genlayer/client";
@@ -58,14 +58,24 @@ export interface RoleAction {
   requiresEvidence: boolean;
 }
 
+export interface RoleOperationState {
+  actorAddress: string | null;
+  method: RoleAction["method"] | null;
+  pending: boolean;
+  stage: TxStage | null;
+}
+
 interface RoleConsoleProps<TOrder extends FoodGuardOrderView> {
   address?: string | null;
   clock?: AuthoritativeClock | null;
   evidenceWritesEnabled?: boolean;
   onAction?(action: RoleAction, order: TOrder): Promise<TOrder>;
+  onOperationStateChange?(state: RoleOperationState): void;
   onOrderChange?(order: TOrder): void;
+  operationLocked?: boolean;
   order: TOrder;
   readOrder?(orderId: string): Promise<TOrder>;
+  showLifecycle?: boolean;
   writesEnabled?: boolean;
 }
 
@@ -258,9 +268,12 @@ export function RoleConsole<TOrder extends FoodGuardOrderView = FoodGuardOrderVi
   clock,
   evidenceWritesEnabled = true,
   onAction,
+  onOperationStateChange,
   onOrderChange,
+  operationLocked = false,
   order,
   readOrder,
+  showLifecycle = true,
   writesEnabled = true,
 }: RoleConsoleProps<TOrder>) {
   const { copy } = useLocale();
@@ -268,6 +281,7 @@ export function RoleConsole<TOrder extends FoodGuardOrderView = FoodGuardOrderVi
   const [pending, setPending] = useState(false);
   const [stage, setStage] = useState<TxStage | null>(null);
   const [stageOperation, setStageOperation] = useState<RoleAction["method"] | null>(null);
+  const stageRef = useRef<TxStage | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [nowSeconds, setNowSeconds] = useState<bigint | null>(null);
@@ -278,6 +292,19 @@ export function RoleConsole<TOrder extends FoodGuardOrderView = FoodGuardOrderVi
   ] as const;
   const role = address ? deriveWalletRole(address, actors) : null;
   const actions = role ? actionsFor(role, authoritativeOrder, nowSeconds) : [];
+
+  function publishOperationState(
+    method: RoleAction["method"] | null,
+    nextPending: boolean,
+    nextStage: TxStage | null,
+  ) {
+    onOperationStateChange?.({
+      actorAddress: address ?? null,
+      method,
+      pending: nextPending,
+      stage: nextStage,
+    });
+  }
 
   useEffect(() => {
     let active = true;
@@ -323,6 +350,7 @@ export function RoleConsole<TOrder extends FoodGuardOrderView = FoodGuardOrderVi
       !action ||
       pending ||
       stage === "OUTCOME_UNKNOWN" ||
+      operationLocked ||
       !writesEnabled ||
       (action.requiresEvidence && !evidenceWritesEnabled)
     ) return;
@@ -336,9 +364,11 @@ export function RoleConsole<TOrder extends FoodGuardOrderView = FoodGuardOrderVi
       setNotice(copy.console.evidenceRequired);
       return;
     }
+    stageRef.current = null;
     setStage(null);
     setStageOperation(action.method);
     setPending(true);
+    publishOperationState(action.method, true, null);
     const submittedAction = action;
     const submittedOrder = authoritativeOrder;
     const expectedActor = address ?? undefined;
@@ -350,7 +380,11 @@ export function RoleConsole<TOrder extends FoodGuardOrderView = FoodGuardOrderVi
             args: [submittedOrder.order_id],
             value: 0n,
             expectedAccount: expectedActor,
-            onStage: setStage,
+            onStage: (nextStage) => {
+              stageRef.current = nextStage;
+              setStage(nextStage);
+              publishOperationState(submittedAction.method, true, nextStage);
+            },
             readback: () => readOrder
               ? readOrder(submittedOrder.order_id)
               : readFoodGuard<TOrder>("get_order", [submittedOrder.order_id]),
@@ -367,6 +401,7 @@ export function RoleConsole<TOrder extends FoodGuardOrderView = FoodGuardOrderVi
       setError(caught instanceof Error ? caught.message : "FoodGuard write failed");
     } finally {
       setPending(false);
+      publishOperationState(submittedAction.method, false, stageRef.current);
     }
   }
 
@@ -400,7 +435,7 @@ export function RoleConsole<TOrder extends FoodGuardOrderView = FoodGuardOrderVi
         <button
           key={action.id}
           className="button button--primary"
-          disabled={pending || stage === "OUTCOME_UNKNOWN" || !writesEnabled || (action.requiresEvidence && !evidenceWritesEnabled)}
+          disabled={pending || stage === "OUTCOME_UNKNOWN" || operationLocked || !writesEnabled || (action.requiresEvidence && !evidenceWritesEnabled)}
           onClick={() => void performAction(action)}
           type="button"
         >
@@ -408,11 +443,13 @@ export function RoleConsole<TOrder extends FoodGuardOrderView = FoodGuardOrderVi
         </button>
       ))}
       {pending && <p className="form-notice" role="status">{copy.console.pending}</p>}
-      <TransactionLifecycle
-        actorAddress={address}
-        operation={stageOperation}
-        stage={stage}
-      />
+      {showLifecycle && (
+        <TransactionLifecycle
+          actorAddress={address}
+          operation={stageOperation}
+          stage={stage}
+        />
+      )}
       {notice && <p className="form-notice" role="status">{notice}</p>}
       {error && <p className="form-notice form-notice--error" role="alert">{error}</p>}
     </section>

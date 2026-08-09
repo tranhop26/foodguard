@@ -24,10 +24,22 @@ import {
   sampleAuthoritativeClock,
   type AuthoritativeClock,
 } from "../../../components/order/authoritativeClock";
-import { RoleConsole, type RoleAction } from "../../../components/order/RoleConsole";
+import {
+  RoleConsole,
+  type RoleAction,
+  type RoleOperationState,
+} from "../../../components/order/RoleConsole";
 import { TransactionLifecycle } from "../../../components/order/TransactionLifecycle";
 import { WalletButton, type WalletSnapshot } from "../../../components/wallet/WalletButton";
-import type { DeliveryOutcome, EvidenceAction, EvidenceDocument, ItemOutcome, OrderItem, OrderState } from "../../../lib/domain";
+import {
+  formatSimulatedGenWei,
+  type DeliveryOutcome,
+  type EvidenceAction,
+  type EvidenceDocument,
+  type ItemOutcome,
+  type OrderItem,
+  type OrderState,
+} from "../../../lib/domain";
 import { canonicalizeEvidenceEnvelope, validateCorrectionStatement, validateHistoricalEvidenceDocument } from "../../../lib/evidence";
 import { getFoodGuardReadClient, readFoodGuard, writeFoodGuard } from "../../../lib/genlayer/client";
 import {
@@ -918,9 +930,21 @@ export function OrderDetailWorkspace({
   const [activeEvidence, setActiveEvidence] = useState<ActiveEvidenceRequest | null>(null);
   const [transactionActorAddress, setTransactionActorAddress] = useState<string | null>(null);
   const [transactionMethod, setTransactionMethod] = useState<string | null>(null);
+  const [roleOperation, setRoleOperation] = useState<RoleOperationState | null>(null);
+  const [operationOwner, setOperationOwner] = useState<"parent" | "role" | null>(null);
   const [confirmedCorrectionTargetCount, setConfirmedCorrectionTargetCount] = useState<number | null>(null);
   const [clock, setClock] = useState<AuthoritativeClock | null>(null);
   const [clockError, setClockError] = useState<string | null>(null);
+  const operationLocked = (
+    pending ||
+    stage === "OUTCOME_UNKNOWN" ||
+    roleOperation?.pending === true ||
+    roleOperation?.stage === "OUTCOME_UNKNOWN"
+  );
+  const handleRoleOperationStateChange = useCallback((next: RoleOperationState) => {
+    setRoleOperation(next);
+    if (next.pending || next.stage !== null) setOperationOwner("role");
+  }, []);
   const load = useCallback(async () => {
     if (!configuration.readsEnabled) return;
     setPending(true);
@@ -994,10 +1018,11 @@ export function OrderDetailWorkspace({
     expectedAddress?: string,
     validateReadback?: (nextOrder: OrderDetailView) => void,
   ) {
-    if (!configuration.writesEnabled || pending || !order) return order;
+    if (!configuration.writesEnabled || operationLocked || !order) return order;
     setPending(true);
     setError(null);
     setStage(null);
+    setOperationOwner("parent");
     setTransactionMethod(method);
     setTransactionActorAddress(expectedAddress ?? null);
     try {
@@ -1053,7 +1078,13 @@ export function OrderDetailWorkspace({
             <dl className="order-facts">
               <div><dt>Order ID</dt><dd><code>{order.order_id}</code></dd></div>
               <div><dt>{copy.console.state}</dt><dd><code data-testid="raw-detail-state">{order.state}</code></dd></div>
-              <div><dt>{copy.detail.totalReserved}</dt><dd><code>{String(order.total_value)} wei</code> <span>Simulated GEN</span></dd></div>
+              <div>
+                <dt>{copy.detail.totalReserved}</dt>
+                <dd>
+                  <span>{formatSimulatedGenWei(String(order.total_value))}</span>
+                  <code className="sr-only">{String(order.total_value)} wei</code>
+                </dd>
+              </div>
             </dl>
             <a className="button button--quiet" href={proofHref}>{copy.detail.openProof}</a>
           </header>
@@ -1090,14 +1121,17 @@ export function OrderDetailWorkspace({
             clock={clock}
             evidenceWritesEnabled={evidenceWritesEnabled}
             onAction={roleAction}
+            onOperationStateChange={handleRoleOperationStateChange}
             onOrderChange={setOrder}
+            operationLocked={operationLocked}
             order={order}
             readOrder={readOrder}
+            showLifecycle={false}
             writesEnabled={configuration.writesEnabled && wallet?.status === "READY"}
           />
           <ConsensusPanel
             clock={clock}
-            disabled={pending || !configuration.writesEnabled}
+            disabled={operationLocked || !configuration.writesEnabled}
             onResolve={() => { void runWrite("request_resolution", [order.order_id]).catch(() => undefined); }}
             onSettle={() => { void runWrite("execute_settlement", [order.order_id]).catch(() => undefined); }}
             order={order}
@@ -1106,7 +1140,7 @@ export function OrderDetailWorkspace({
           <AppealPanel
             address={wallet?.address}
             clock={clock}
-            disabled={pending || !evidenceWritesEnabled || wallet?.status !== "READY"}
+            disabled={operationLocked || !evidenceWritesEnabled || wallet?.status !== "READY"}
             onAppeal={() => setActiveEvidence({ action: "APPEAL", method: "appeal" })}
             onCure={() => setActiveEvidence({ action: "CURE", method: "submit_cure_evidence" })}
             order={order}
@@ -1119,7 +1153,7 @@ export function OrderDetailWorkspace({
                 contractAddress: configuration.contractAddress,
                 writesEnabled: configuration.writesEnabled && wallet?.status === "READY",
               }}
-              disabled={pending || !configuration.writesEnabled}
+              disabled={operationLocked || !configuration.writesEnabled}
               nowSeconds={chainNowMs === null ? null : chainNowMs / 1_000n}
               onPropose={async (allocationJson) => {
                 await runWrite(
@@ -1147,7 +1181,7 @@ export function OrderDetailWorkspace({
               clock={clock}
               contractAddress={configuration.contractAddress}
               correctableEvidence={deriveActiveEvidenceRecords(order.evidence ?? [], authoritativeManifest(order.manifest_json))}
-              disabled={pending || !evidenceWritesEnabled || wallet.status !== "READY"}
+              disabled={operationLocked || !evidenceWritesEnabled || wallet.status !== "READY"}
               now={new Date(Number(chainNowMs))}
               onSubmit={async (envelopeJson) => {
                 const submitted = JSON.parse(envelopeJson) as EvidenceDocument;
@@ -1181,9 +1215,9 @@ export function OrderDetailWorkspace({
             />
           )}
           <TransactionLifecycle
-            actorAddress={transactionActorAddress}
-            operation={transactionMethod}
-            stage={stage}
+            actorAddress={operationOwner === "role" ? roleOperation?.actorAddress : transactionActorAddress}
+            operation={operationOwner === "role" ? roleOperation?.method : transactionMethod}
+            stage={operationOwner === "role" ? roleOperation?.stage ?? null : stage}
           />
           {confirmedCorrectionTargetCount !== null && (
             <p className="form-notice form-notice--success">

@@ -108,6 +108,54 @@ const BASE_ORDER = {
   total_value: "950",
 } satisfies Omit<OrderDetailView, "resolution">;
 
+const READY_DETAIL_CONFIGURATION = {
+  contractAddress: "0x4444444444444444444444444444444444444444",
+  chainId: "61999",
+  message: null,
+  readsEnabled: true,
+  status: "READY",
+  writesEnabled: true,
+} satisfies OrderDetailWorkspaceConfiguration;
+
+function walletProvider(address: string) {
+  return {
+    request: vi.fn(({ method }: { method: string }) => {
+      if (method === "eth_requestAccounts" || method === "eth_accounts") {
+        return Promise.resolve([address]);
+      }
+      if (method === "eth_chainId") return Promise.resolve("0xf22f");
+      throw new Error(`unexpected wallet method ${method}`);
+    }),
+  };
+}
+
+async function openVerifiedPackedDrawer() {
+  fireEvent.click(await screen.findByRole("button", { name: /connect wallet/i }));
+  fireEvent.click(await screen.findByRole("button", { name: /confirm packed/i }));
+  fireEvent.change(await screen.findByRole("textbox", { name: /public HTTPS source URL/i }), {
+    target: { value: "https://evidence.foodguard.vn/shared-operation-lock.json" },
+  });
+  screen.getAllByRole("combobox", { name: /item status/i }).forEach((select) => {
+    fireEvent.change(select, { target: { value: "AS_ORDERED" } });
+  });
+  screen.getAllByRole("combobox", { name: /quantity status/i }).forEach((select) => {
+    fireEvent.change(select, { target: { value: "EXACT" } });
+  });
+  screen.getAllByRole("spinbutton", { name: /substitution index/i }).forEach((input) => {
+    fireEvent.change(input, { target: { value: "-1" } });
+  });
+  screen.getAllByRole("combobox", { name: /condition status/i }).forEach((select) => {
+    fireEvent.change(select, { target: { value: "MET" } });
+  });
+  const publicDocument = await screen.findByTestId("evidence-public-json");
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+    ok: true,
+    text: () => Promise.resolve(publicDocument.textContent),
+  }));
+  fireEvent.click(screen.getByRole("button", { name: /verify public source/i }));
+  await screen.findByText("Public source matches the canonical document");
+}
+
 const MIXED_OUTCOME_ORDER: OrderDetailView = {
   ...BASE_ORDER,
   resolution: {
@@ -501,6 +549,114 @@ describe("participant cancellation actions", () => {
 });
 
 describe("production role-action integration", () => {
+  it("locks cancellation through parent evidence pending and OUTCOME_UNKNOWN", async () => {
+    (window as typeof window & { ethereum?: unknown }).ethereum = walletProvider(RESTAURANT);
+    const acceptedOrder: OrderDetailView = { ...BASE_ORDER, resolution: null, state: "ACCEPTED" };
+    let failWrite: (() => void) | undefined;
+    const transact = vi.fn((_method, _args, _address, onStage: (stage: TxStage) => void) => {
+      onStage("SUBMITTED");
+      return new Promise<never>((_resolve, reject) => {
+        failWrite = () => {
+          onStage("OUTCOME_UNKNOWN");
+          reject(new Error("evidence outcome unknown"));
+        };
+      });
+    });
+    renderLocalized(
+      <OrderDetailWorkspace
+        configuration={READY_DETAIL_CONFIGURATION}
+        orderId="fg-mixed"
+        readChainTime={vi.fn().mockResolvedValue(1_893_456_000n)}
+        readOrder={vi.fn().mockResolvedValue(acceptedOrder)}
+        transact={transact}
+      />,
+      "en",
+    );
+
+    await openVerifiedPackedDrawer();
+    const submit = screen.getByRole("button", { name: /submit packed evidence/i });
+    fireEvent.click(submit);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Cancel before packing" })).toBeDisabled();
+      expect(submit).toBeDisabled();
+    });
+    await act(async () => { failWrite?.(); });
+    expect(await screen.findByText("OUTCOME_UNKNOWN")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Cancel before packing" })).toBeDisabled();
+    expect(submit).toBeDisabled();
+    expect(screen.getAllByRole("heading", { name: /transaction lifecycle/i })).toHaveLength(1);
+  });
+
+  it("locks evidence controls through local cancellation pending and OUTCOME_UNKNOWN", async () => {
+    (window as typeof window & { ethereum?: unknown }).ethereum = walletProvider(RESTAURANT);
+    const acceptedOrder: OrderDetailView = { ...BASE_ORDER, resolution: null, state: "ACCEPTED" };
+    const readOrder = vi.fn()
+      .mockResolvedValueOnce(acceptedOrder)
+      .mockImplementation(() => new Promise<OrderDetailView>(() => undefined));
+    genlayerMocks.writeFoodGuard.mockRejectedValue(
+      new Error("wallet request failed", {
+        cause: { details: new TypeError("Failed to fetch") },
+      }),
+    );
+    renderLocalized(
+      <OrderDetailWorkspace
+        configuration={READY_DETAIL_CONFIGURATION}
+        orderId="fg-mixed"
+        readChainTime={vi.fn().mockResolvedValue(1_893_456_000n)}
+        readOrder={readOrder}
+      />,
+      "en",
+    );
+
+    await openVerifiedPackedDrawer();
+    const submit = screen.getByRole("button", { name: /submit packed evidence/i });
+    expect(submit).toBeEnabled();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const cancel = screen.getByRole("button", { name: "Cancel before packing" });
+    const openPackedEvidence = screen.getByRole("button", { name: "Confirm packed" });
+    expect(cancel).toBeEnabled();
+    fireEvent.click(cancel);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+    expect(cancel).toBeDisabled();
+    expect(openPackedEvidence).toBeDisabled();
+    expect(screen.getByRole("button", { name: /submit packed evidence/i })).toBeDisabled();
+    expect(screen.getAllByRole("heading", { name: /transaction lifecycle/i })).toHaveLength(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_000); });
+    expect(screen.getByText("OUTCOME_UNKNOWN")).toBeVisible();
+    expect(screen.getByRole("button", { name: /submit packed evidence/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Cancel before packing" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Confirm packed" })).toBeDisabled();
+    expect(screen.getAllByRole("heading", { name: /transaction lifecycle/i })).toHaveLength(1);
+  });
+
+  it("formats the main reserved total visibly as simulated GEN with exact wei audit text", async () => {
+    const order = {
+      ...BASE_ORDER,
+      delivery_fee: "50000000000000000",
+      subtotal: "370000000000000000",
+      total_value: "420000000000000000",
+    };
+    renderLocalized(
+      <OrderDetailWorkspace
+        configuration={READY_DETAIL_CONFIGURATION}
+        orderId="fg-mixed"
+        readChainTime={vi.fn().mockResolvedValue(1_893_456_000n)}
+        readOrder={vi.fn().mockResolvedValue(order)}
+      />,
+      "en",
+    );
+
+    expect(await screen.findByText("0.42 simulated GEN", {
+      selector: ".order-detail-heading span",
+    })).toBeVisible();
+    expect(screen.getByText("420000000000000000 wei", {
+      selector: ".order-detail-heading code.sr-only",
+    })).toBeInTheDocument();
+  });
+
   it("reconciles a non-evidence role action and synchronizes the parent order", async () => {
     (window as typeof window & { ethereum?: unknown }).ethereum = {
       request: vi.fn(({ method }: { method: string }) => {
