@@ -131,11 +131,19 @@ function batchBaseEvidence(
 const batchInitialEvidence = [
   batchBaseEvidence("PACKED", RESTAURANT, "e2e-batch-packed", {
     item_observations: batchManifest.items.map((item) => ({
+      condition_statuses: item.conditions.map((_condition, conditionIndex) => ({
+        condition_index: conditionIndex,
+        status: "MET",
+      })),
       item_id: item.item_id,
-      observation: "PACKED_AS_ORDERED",
+      item_status: "AS_ORDERED",
+      quantity_status: "EXACT",
+      substitution_index: -1,
     })),
   }),
-  batchBaseEvidence("PICKED_UP", COURIER, "e2e-batch-pickup"),
+  batchBaseEvidence("PICKED_UP", COURIER, "e2e-batch-pickup", {
+    pickup_observation: "PICKUP_CONFIRMED",
+  }),
   batchBaseEvidence("DELIVERED", COURIER, "e2e-batch-delivered", {
     delivery_observation: "HANDOFF_CONFIRMED",
   }),
@@ -145,6 +153,8 @@ const batchInitialEvidence = [
     `e2e-batch-claim-${index + 1}`,
     {
       claim_category: index === 0 ? "ABSENT_AT_RECEIPT" : index === 1 ? "NOT_AS_ORDERED" : "HANDOFF_NOT_RECEIVED",
+      criterion_index: index === 2 ? -1 : 0,
+      criterion_kind: index === 0 ? "ITEM" : index === 1 ? "QUANTITY" : "DELIVERY",
       item_id: item.item_id,
     },
   )),

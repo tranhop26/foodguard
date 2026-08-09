@@ -89,18 +89,26 @@ def _three_claim_order(food_guard, vm, customer, restaurant, courier, outsider):
         claim = json.loads(evidence_json(
             vm, customer, "CUSTOMER_CLAIM", order_id="fg-batch-1",
             item_id=f"item-{index}", nonce=f"batch-claim-{index}",
-            expires_at=f"2026-08-08T00:4{index + 1}:00.000Z",
+            expires_at=f"2026-08-08T00:3{index + 1}:00.000Z",
         ))
         claim["source_url"] = f"https://evidence.foodguard.app/batches/claim-{index}.json"
         food_guard.submit_claim_evidence("fg-batch-1", _digest(claim))
     old_hashes = [food_guard.get_evidence("fg-batch-1", index).sha256 for index in [3, 4, 5]]
     vm.warp("2026-08-08T00:40:00Z")
     _mock_sources(vm, _sources(food_guard, "fg-batch-1"))
-    _mock_resolution(vm, UNRESOLVED_RESULT | {"items": [
-        {"item_index": i, "outcome": "UNRESOLVED", "facts": ["Insufficient."]} for i in range(3)
-    ]})
+    prompts = []
+
+    def reject_unexpected_prompt(data):
+        prompts.append(data["prompt"])
+        raise AssertionError("expired claim evidence must fail before model resolution")
+
+    vm._live_llm_handler = reject_unexpected_prompt
     vm.sender = outsider
-    food_guard.request_resolution("fg-batch-1")
+    resolution = json.loads(food_guard.request_resolution("fg-batch-1"))
+    assert food_guard.get_order("fg-batch-1").state == "EVIDENCE_CURE"
+    assert resolution["delivery_outcome"] == "UNRESOLVED"
+    assert [item["outcome"] for item in resolution["items"]] == ["UNRESOLVED"] * 3
+    assert prompts == []
     vm.clear_mocks()
     return items, old_hashes
 

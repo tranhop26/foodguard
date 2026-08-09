@@ -28,7 +28,7 @@ import { RoleConsole, type RoleAction } from "../../../components/order/RoleCons
 import { TransactionLifecycle } from "../../../components/order/TransactionLifecycle";
 import { WalletButton, type WalletSnapshot } from "../../../components/wallet/WalletButton";
 import type { DeliveryOutcome, EvidenceAction, EvidenceDocument, ItemOutcome, OrderItem, OrderState } from "../../../lib/domain";
-import { canonicalizeEvidenceEnvelope, hashEvidence } from "../../../lib/evidence";
+import { canonicalizeEvidenceEnvelope, hashEvidence, validateCorrectionStatement } from "../../../lib/evidence";
 import { getFoodGuardReadClient, readFoodGuard, writeFoodGuard } from "../../../lib/genlayer/client";
 import {
   FOODGUARD_CHAIN,
@@ -307,7 +307,10 @@ async function evidenceRecord(value: unknown, order: OrderDetailView, evidenceIn
   return { ...(value as unknown as EvidenceRecordView), ...correction, evidence_index: evidenceIndex };
 }
 
-export function deriveActiveEvidenceRecords(evidence: readonly EvidenceRecordView[]): EvidenceRecordView[] {
+export function deriveActiveEvidenceRecords(
+  evidence: readonly EvidenceRecordView[],
+  manifestItems?: readonly OrderItem[],
+): EvidenceRecordView[] {
   const active = new Set<number>();
   const semanticSlots = (record: EvidenceRecordView): Array<[string, string]> => {
     if (record.action === "CURE" || record.action === "APPEAL") {
@@ -315,6 +318,11 @@ export function deriveActiveEvidenceRecords(evidence: readonly EvidenceRecordVie
         throw new TypeError("Batch correction active-set readback is malformed");
       }
       return record.statements.map((statement) => {
+        try {
+          validateCorrectionStatement(statement, manifestItems);
+        } catch {
+          throw new TypeError("Batch correction active-set readback is malformed");
+        }
         const itemId = statement.effective_action === "CUSTOMER_CLAIM" ? statement.item_id : "";
         if (!["PACKED", "PICKED_UP", "DELIVERED", "CUSTOMER_CLAIM"].includes(statement.effective_action) || (statement.effective_action === "CUSTOMER_CLAIM" && !itemId)) {
           throw new TypeError("Batch correction active-set readback is malformed");
@@ -327,11 +335,31 @@ export function deriveActiveEvidenceRecords(evidence: readonly EvidenceRecordVie
       record.effective_action !== record.action ||
       (record.action === "CUSTOMER_CLAIM" && !record.item_id)
     ) throw new TypeError("Batch correction active-set readback is malformed");
-    return [[record.action, record.action === "CUSTOMER_CLAIM" ? record.item_id ?? "" : ""]];
+    const facts = record as unknown as Record<string, unknown>;
+    const statement = record.action === "PACKED"
+      ? { effective_action: "PACKED", item_observations: facts.item_observations }
+      : record.action === "PICKED_UP"
+        ? { effective_action: "PICKED_UP", pickup_observation: facts.pickup_observation }
+        : record.action === "DELIVERED"
+          ? { delivery_observation: facts.delivery_observation, effective_action: "DELIVERED" }
+          : {
+              claim_category: facts.claim_category,
+              criterion_index: facts.criterion_index,
+              criterion_kind: facts.criterion_kind,
+              effective_action: "CUSTOMER_CLAIM",
+              item_id: record.item_id,
+            };
+    try {
+      const validated = validateCorrectionStatement(statement, manifestItems);
+      return [[validated.effective_action, validated.effective_action === "CUSTOMER_CLAIM" ? validated.item_id : ""]];
+    } catch {
+      throw new TypeError("Batch correction active-set readback is malformed");
+    }
   };
 
   evidence.forEach((record, correctionIndex) => {
     if (record.action !== "CURE" && record.action !== "APPEAL") {
+      semanticSlots(record);
       active.add(correctionIndex);
       return;
     }
@@ -659,7 +687,7 @@ export async function readAuthoritativeOrder(orderId: string): Promise<OrderDeta
         .then((record) => evidenceRecord(record, order, index)),
     ),
   );
-  deriveActiveEvidenceRecords(evidence);
+  deriveActiveEvidenceRecords(evidence, authoritativeManifest(order.manifest_json));
   const round = unsignedRaw(
     await readFoodGuard<unknown>("get_round", [normalizedOrderId]),
     "resolution_round",
@@ -1002,7 +1030,7 @@ export function OrderDetailWorkspace({
             <p className="form-notice">
               Active evidence indices: {" "}
               <code data-testid="active-evidence-indices">
-                {deriveActiveEvidenceRecords(order.evidence ?? []).map((record) => record.evidence_index).join(", ")}
+                {deriveActiveEvidenceRecords(order.evidence ?? [], authoritativeManifest(order.manifest_json)).map((record) => record.evidence_index).join(", ")}
               </code>
             </p>
             {order.evidence?.length ? (
@@ -1082,7 +1110,7 @@ export function OrderDetailWorkspace({
               chainId={configuration.chainId}
               clock={clock}
               contractAddress={configuration.contractAddress}
-              correctableEvidence={deriveActiveEvidenceRecords(order.evidence ?? [])}
+              correctableEvidence={deriveActiveEvidenceRecords(order.evidence ?? [], authoritativeManifest(order.manifest_json))}
               disabled={pending || !evidenceWritesEnabled || wallet.status !== "READY"}
               now={new Date(Number(chainNowMs))}
               onSubmit={async (envelopeJson) => {
@@ -1093,7 +1121,10 @@ export function OrderDetailWorkspace({
                   wallet.address ?? undefined,
                   activeEvidence.action === "CURE" || activeEvidence.action === "APPEAL"
                     ? (nextOrder) => {
-                        const activeRecords = deriveActiveEvidenceRecords(nextOrder.evidence ?? []);
+                        const activeRecords = deriveActiveEvidenceRecords(
+                          nextOrder.evidence ?? [],
+                          authoritativeManifest(nextOrder.manifest_json),
+                        );
                         const confirmed = activeRecords.some((record) => (
                           record.action === activeEvidence.action &&
                           record.actor_wallet.toLowerCase() === wallet.address?.toLowerCase() &&

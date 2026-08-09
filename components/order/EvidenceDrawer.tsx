@@ -9,6 +9,7 @@ import type {
   EvidenceDocument,
   JsonValue,
   OrderItem,
+  PackedItemObservation,
 } from "../../lib/domain";
 import {
   CLAIM_CATEGORY_OPTIONS,
@@ -21,6 +22,7 @@ import {
   PACKED_ITEM_STATUS_OPTIONS,
   PICKUP_OBSERVATION_OPTIONS,
   QUANTITY_STATUS_OPTIONS,
+  validateCorrectionStatement,
 } from "../../lib/evidence";
 import { useLocale } from "../../lib/i18n";
 import type { EvidenceRecordView, OrderDetailView } from "./ItemOutcomeTable";
@@ -166,34 +168,60 @@ function actionFacts(
   action: WritableEvidenceAction,
   items: OrderItem[],
   itemId: string | undefined,
-  packedObservations: Record<string, string>,
+  packedFacts: Record<string, string>,
+  pickupObservation: string,
   deliveryObservation: string,
   claimCategory: string,
-): Record<string, JsonValue> | null {
-  if (action === "PACKED") {
-    if (items.some((item) => ![
-      "PACKED_AS_ORDERED", "NOT_PACKED", "PACKED_DIFFERENT",
-    ].includes(packedObservations[item.item_id] ?? ""))) return null;
-    return {
-      item_observations: items.map((item) => ({
+  claimCriterionKind: string,
+  claimCriterionIndex: string,
+): Record<string, JsonValue | PackedItemObservation[]> | null {
+  try {
+    if (action === "PACKED") {
+      if (items.some((item) => !/^-?(0|[1-9][0-9]*)$/.test(packedFacts[`substitution_index:${item.item_id}`] ?? ""))) return null;
+      const itemObservations = items.map((item) => ({
+        condition_statuses: item.conditions.map((_condition, conditionIndex) => ({
+          condition_index: conditionIndex,
+          status: packedFacts[`condition:${item.item_id}:${conditionIndex}`],
+        })),
         item_id: item.item_id,
-        observation: packedObservations[item.item_id],
-      })),
-    };
+        item_status: packedFacts[`item_status:${item.item_id}`],
+        quantity_status: packedFacts[`quantity_status:${item.item_id}`],
+        substitution_index: Number(packedFacts[`substitution_index:${item.item_id}`]),
+      }));
+      const statement = validateCorrectionStatement({ effective_action: "PACKED", item_observations: itemObservations }, items);
+      if (statement.effective_action !== "PACKED") return null;
+      return { item_observations: statement.item_observations };
+    }
+    if (action === "PICKED_UP") {
+      const statement = validateCorrectionStatement({ effective_action: "PICKED_UP", pickup_observation: pickupObservation }, items);
+      if (statement.effective_action !== "PICKED_UP") return null;
+      return { pickup_observation: statement.pickup_observation };
+    }
+    if (action === "DELIVERED") {
+      const statement = validateCorrectionStatement({ delivery_observation: deliveryObservation, effective_action: "DELIVERED" }, items);
+      if (statement.effective_action !== "DELIVERED") return null;
+      return { delivery_observation: statement.delivery_observation };
+    }
+    if (action === "CUSTOMER_CLAIM") {
+      if (!itemId || !/^-?(0|[1-9][0-9]*)$/.test(claimCriterionIndex)) return null;
+      const statement = validateCorrectionStatement({
+        claim_category: claimCategory,
+        criterion_index: Number(claimCriterionIndex),
+        criterion_kind: claimCriterionKind,
+        effective_action: "CUSTOMER_CLAIM",
+        item_id: itemId,
+      }, items);
+      if (statement.effective_action !== "CUSTOMER_CLAIM") return null;
+      return {
+        claim_category: statement.claim_category,
+        criterion_index: statement.criterion_index,
+        criterion_kind: statement.criterion_kind,
+      };
+    }
+  } catch {
+    return null;
   }
-  if (action === "DELIVERED") {
-    return ["HANDOFF_CONFIRMED", "HANDOFF_FAILED"].includes(deliveryObservation)
-      ? { delivery_observation: deliveryObservation }
-      : null;
-  }
-  if (action === "CUSTOMER_CLAIM") {
-    if (!itemId || !items.some((item) => item.item_id === itemId)) return null;
-    if (![
-      "ABSENT_AT_RECEIPT", "NOT_AS_ORDERED", "HANDOFF_NOT_RECEIVED",
-    ].includes(claimCategory)) return null;
-    return { claim_category: claimCategory };
-  }
-  return {};
+  return null;
 }
 
 export function EvidenceDrawer({
@@ -216,10 +244,13 @@ export function EvidenceDrawer({
   const [currentTimeMs, setCurrentTimeMs] = useState(() => Number(authoritativeNowMs(clock) ?? 0n));
   const [nonce, setNonce] = useState(() => providedNonce ?? createNonce());
   const [url, setUrl] = useState(sourceUrl);
-  const [packedObservations, setPackedObservations] = useState<Record<string, string>>({});
+  const [packedFacts, setPackedFacts] = useState<Record<string, string>>({});
+  const [pickupObservation, setPickupObservation] = useState("");
   const [deliveryObservation, setDeliveryObservation] = useState("");
   const [selectedItemId, setSelectedItemId] = useState(itemId ?? "");
   const [claimCategory, setClaimCategory] = useState("");
+  const [claimCriterionKind, setClaimCriterionKind] = useState("");
+  const [claimCriterionIndex, setClaimCriterionIndex] = useState("");
   const [selectedTargets, setSelectedTargets] = useState<number[]>([]);
   const [correctionFacts, setCorrectionFacts] = useState<Record<string, string>>({});
   const [envelopeJson, setEnvelopeJson] = useState<string | null>(null);
@@ -362,9 +393,12 @@ export function EvidenceDrawer({
           action,
           items,
           effectiveItemId,
-          packedObservations,
+          packedFacts,
+          pickupObservation,
           deliveryObservation,
           claimCategory,
+          claimCriterionKind,
+          claimCriterionIndex,
         );
     if (!facts) return () => { active = false; };
     const submittedAt = capturedNow.toISOString();
@@ -387,18 +421,18 @@ export function EvidenceDrawer({
       submitted_at: submittedAt,
     } satisfies EvidenceDocument;
 
-    void hashEvidence(evidence).then((sha256) => {
+    void hashEvidence(evidence, items).then((sha256) => {
       if (!active) return;
       const complete = { ...evidence, sha256 } satisfies EvidenceDocument;
-      setPublicDocument(canonicalizeEvidence(complete));
-      setEnvelopeJson(canonicalizeEvidenceEnvelope(complete));
+      setPublicDocument(canonicalizeEvidence(complete, items));
+      setEnvelopeJson(canonicalizeEvidenceEnvelope(complete, items));
       setDigest(sha256);
     }).catch((caught: unknown) => {
       if (!active) return;
       setError(caught instanceof Error ? caught.message : copy.detail.evidenceBuildFailed);
     });
     return () => { active = false; };
-  }, [action, address, capturedNow, chainId, claimCategory, contractAddress, copy.detail.evidenceBuildFailed, correctionFacts, correctionSlots, deliveryObservation, effectiveItemId, expiryMs, isCorrection, items, nonce, order.order_id, packedObservations, selectedRecords, sourceReady, url]);
+  }, [action, address, capturedNow, chainId, claimCategory, claimCriterionIndex, claimCriterionKind, contractAddress, copy.detail.evidenceBuildFailed, correctionFacts, correctionSlots, deliveryObservation, effectiveItemId, expiryMs, isCorrection, items, nonce, order.order_id, packedFacts, pickupObservation, selectedRecords, sourceReady, url]);
 
   async function submitEvidence() {
     if (!envelopeJson || !onSubmit || disabled || pending || !sourceVerified || expiryMs === null) return;
@@ -462,6 +496,10 @@ export function EvidenceDrawer({
 
   function setCorrectionFact(slot: CorrectionSlot, field: string, value: string) {
     setCorrectionFacts((current) => ({ ...current, [`${slot.key}:${field}`]: value }));
+  }
+
+  function setPackedFact(field: string, value: string) {
+    setPackedFacts((current) => ({ ...current, [field]: value }));
   }
 
   return (
@@ -571,31 +609,57 @@ export function EvidenceDrawer({
         <fieldset className="evidence-facts" disabled={pending}>
           <legend>{copy.detail.typedEvidenceFacts}</legend>
           {items.map((item) => (
-            <label key={item.item_id}>
+            <fieldset className="evidence-facts" key={item.item_id}>
+              <label>
               <span>{copy.detail.packedObservation} — {item.name} ({item.item_id})</span>
               <select
-                onChange={(event) => setPackedObservations((current) => ({
-                  ...current,
-                  [item.item_id]: event.target.value,
-                }))}
-                value={packedObservations[item.item_id] ?? ""}
+                aria-label={`${copy.detail.itemStatus} ${item.name} (${item.item_id})`}
+                onChange={(event) => setPackedFact(`item_status:${item.item_id}`, event.target.value)}
+                value={packedFacts[`item_status:${item.item_id}`] ?? ""}
               >
                 <option value="">{copy.detail.selectTypedFact}</option>
-                <option value="PACKED_AS_ORDERED">PACKED_AS_ORDERED</option>
-                <option value="NOT_PACKED">NOT_PACKED</option>
-                <option value="PACKED_DIFFERENT">PACKED_DIFFERENT</option>
+                {PACKED_ITEM_STATUS_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}
               </select>
-            </label>
+              </label>
+              <label>
+                <span>{copy.detail.quantityStatus}</span>
+                <select aria-label={`${copy.detail.quantityStatus} ${item.name} (${item.item_id})`} onChange={(event) => setPackedFact(`quantity_status:${item.item_id}`, event.target.value)} value={packedFacts[`quantity_status:${item.item_id}`] ?? ""}>
+                  <option value="">{copy.detail.selectTypedFact}</option>
+                  {QUANTITY_STATUS_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}
+                </select>
+              </label>
+              <label>
+                <span>{copy.detail.substitutionIndex}</span>
+                <input aria-label={`${copy.detail.substitutionIndex} ${item.name} (${item.item_id})`} onChange={(event) => setPackedFact(`substitution_index:${item.item_id}`, event.target.value)} type="number" value={packedFacts[`substitution_index:${item.item_id}`] ?? ""} />
+              </label>
+              {item.conditions.map((condition, conditionIndex) => (
+                <label key={`${item.item_id}:${conditionIndex}`}>
+                  <span>{copy.detail.conditionStatus} #{conditionIndex} â€” {condition}</span>
+                  <select aria-label={`${copy.detail.conditionStatus} ${item.name} #${conditionIndex}`} onChange={(event) => setPackedFact(`condition:${item.item_id}:${conditionIndex}`, event.target.value)} value={packedFacts[`condition:${item.item_id}:${conditionIndex}`] ?? ""}>
+                    <option value="">{copy.detail.selectTypedFact}</option>
+                    {CONDITION_STATUS_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}
+                  </select>
+                </label>
+              ))}
+            </fieldset>
           ))}
         </fieldset>
+      )}
+      {action === "PICKED_UP" && (
+        <label>
+          <span>{copy.detail.pickupObservation}</span>
+          <select disabled={pending} onChange={(event) => setPickupObservation(event.target.value)} value={pickupObservation}>
+            <option value="">{copy.detail.selectTypedFact}</option>
+            {PICKUP_OBSERVATION_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}
+          </select>
+        </label>
       )}
       {action === "DELIVERED" && (
         <label>
           <span>{copy.detail.deliveryObservation}</span>
           <select disabled={pending} onChange={(event) => setDeliveryObservation(event.target.value)} value={deliveryObservation}>
             <option value="">{copy.detail.selectTypedFact}</option>
-            <option value="HANDOFF_CONFIRMED">HANDOFF_CONFIRMED</option>
-            <option value="HANDOFF_FAILED">HANDOFF_FAILED</option>
+            {DELIVERY_OBSERVATION_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}
           </select>
         </label>
       )}
@@ -613,10 +677,19 @@ export function EvidenceDrawer({
             <span>{copy.detail.claimCategory}</span>
             <select onChange={(event) => setClaimCategory(event.target.value)} value={claimCategory}>
               <option value="">{copy.detail.selectTypedFact}</option>
-              <option value="ABSENT_AT_RECEIPT">ABSENT_AT_RECEIPT</option>
-              <option value="NOT_AS_ORDERED">NOT_AS_ORDERED</option>
-              <option value="HANDOFF_NOT_RECEIVED">HANDOFF_NOT_RECEIVED</option>
+              {CLAIM_CATEGORY_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}
             </select>
+          </label>
+          <label>
+            <span>{copy.detail.criterionKind}</span>
+            <select onChange={(event) => setClaimCriterionKind(event.target.value)} value={claimCriterionKind}>
+              <option value="">{copy.detail.selectTypedFact}</option>
+              {CLAIM_CRITERION_KIND_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}
+            </select>
+          </label>
+          <label>
+            <span>{copy.detail.criterionIndex}</span>
+            <input onChange={(event) => setClaimCriterionIndex(event.target.value)} type="number" value={claimCriterionIndex} />
           </label>
         </fieldset>
       )}

@@ -30,9 +30,6 @@ const baseEvidenceFields = new Set([
   "nonce", "observed_at", "order_id", "schema_version", "sha256", "source_url", "subject",
   "submitted_at",
 ]);
-const packedObservationCodes = new Set(["PACKED_AS_ORDERED", "NOT_PACKED", "PACKED_DIFFERENT"]);
-const deliveryObservationCodes = new Set(["HANDOFF_CONFIRMED", "HANDOFF_FAILED"]);
-const claimCategoryCodes = new Set(["ABSENT_AT_RECEIPT", "NOT_AS_ORDERED", "HANDOFF_NOT_RECEIVED"]);
 const MAX_ACTIVE_EVIDENCE = 103;
 
 export const PACKED_ITEM_STATUS_OPTIONS = ["AS_ORDERED", "PERMITTED_SUBSTITUTION", "ABSENT", "DIFFERENT", "UNKNOWN"] as const;
@@ -51,6 +48,24 @@ function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): 
 
 function valueIn<const T extends readonly string[]>(options: T, value: unknown): value is T[number] {
   return typeof value === "string" && (options as readonly string[]).includes(value);
+}
+
+function validClaimCriterion(
+  itemId: string,
+  kind: typeof CLAIM_CRITERION_KIND_OPTIONS[number],
+  index: number,
+  manifestItems?: readonly OrderItem[],
+): boolean {
+  const manifestItem = manifestItems?.find((item) => item.item_id === itemId);
+  if (manifestItems && !manifestItem) return false;
+  if (kind === "DELIVERY") return index === -1;
+  if ((kind === "ITEM" || kind === "QUANTITY") && index !== 0) return false;
+  if (index < 0) return false;
+  if (!manifestItems) return true;
+  if (!manifestItem) return false;
+  if (kind === "SUBSTITUTION") return index < manifestItem.permitted_substitutions.length;
+  if (kind === "CONDITION") return index < manifestItem.conditions.length;
+  return index === 0;
 }
 
 function assertCorrectionStatement(
@@ -117,15 +132,28 @@ function assertCorrectionStatement(
     !valueIn(CLAIM_CATEGORY_OPTIONS, value.claim_category) ||
     !valueIn(CLAIM_CRITERION_KIND_OPTIONS, value.criterion_kind) ||
     !Number.isSafeInteger(value.criterion_index) ||
-    (value.criterion_kind === "DELIVERY" ? value.criterion_index !== -1 : (value.criterion_index as number) < 0)
+    !validClaimCriterion(
+      value.item_id,
+      value.criterion_kind,
+      value.criterion_index as number,
+      manifestItems,
+    )
   ) throw new TypeError(`${path} CUSTOMER_CLAIM facts are malformed`);
 }
 
-function correctionSlots(document: EvidenceDocument): Array<[CorrectionEffectiveAction, string]> {
+export function validateCorrectionStatement(
+  value: unknown,
+  manifestItems?: readonly OrderItem[],
+): CorrectionStatement {
+  assertCorrectionStatement(value, "statement", manifestItems);
+  return value;
+}
+
+function correctionSlots(document: EvidenceDocument, manifestItems?: readonly OrderItem[]): Array<[CorrectionEffectiveAction, string]> {
   if (document.action === "CURE" || document.action === "APPEAL") {
     if (!Array.isArray(document.statements)) throw new TypeError("target batch statements are missing");
     return document.statements.map((statement, index) => {
-      assertCorrectionStatement(statement, `target.statements[${index}]`);
+      assertCorrectionStatement(statement, `target.statements[${index}]`, manifestItems);
       return [statement.effective_action, statement.effective_action === "CUSTOMER_CLAIM" ? statement.item_id : ""];
     });
   }
@@ -155,7 +183,7 @@ function validateBatchCorrection(
   }
   statements.forEach((statement, index) => assertCorrectionStatement(statement, `statements[${index}]`, manifestItems));
   const expectedSlots = targets
-    ? targets.flatMap(correctionSlots)
+    ? targets.flatMap((target) => correctionSlots(target, manifestItems))
     : directTargets.map((_target, index) => {
         const statement = statements[index] as CorrectionStatement | undefined;
         return statement ? [statement.effective_action, statement.effective_action === "CUSTOMER_CLAIM" ? statement.item_id : ""] : null;
@@ -244,34 +272,37 @@ function validateActionSchema(
   }
   if (action === "PACKED") {
     assertExactEvidenceFields(value, ["item_observations"]);
-    if (!Array.isArray(value.item_observations) || value.item_observations.length === 0) {
-      throw new TypeError("PACKED evidence requires item_observations");
-    }
-    const ids = new Set<string>();
-    for (const observation of value.item_observations) {
-      if (
-        !isPlainObject(observation) ||
-        Object.keys(observation).sort().join(",") !== "item_id,observation" ||
-        typeof observation.item_id !== "string" || !observation.item_id || ids.has(observation.item_id) ||
-        typeof observation.observation !== "string" || !packedObservationCodes.has(observation.observation)
-      ) throw new TypeError("PACKED evidence item_observations are malformed");
-      ids.add(observation.item_id);
-    }
+    assertCorrectionStatement({
+      effective_action: "PACKED",
+      item_observations: value.item_observations,
+    }, "PACKED evidence", manifestItems);
+    return;
+  }
+  if (action === "PICKED_UP") {
+    assertExactEvidenceFields(value, ["pickup_observation"]);
+    assertCorrectionStatement({
+      effective_action: "PICKED_UP",
+      pickup_observation: value.pickup_observation,
+    }, "PICKED_UP evidence", manifestItems);
     return;
   }
   if (action === "DELIVERED") {
     assertExactEvidenceFields(value, ["delivery_observation"]);
-    if (typeof value.delivery_observation !== "string" || !deliveryObservationCodes.has(value.delivery_observation)) {
-      throw new TypeError("DELIVERED evidence delivery_observation is malformed");
-    }
+    assertCorrectionStatement({
+      delivery_observation: value.delivery_observation,
+      effective_action: "DELIVERED",
+    }, "DELIVERED evidence", manifestItems);
     return;
   }
   if (action === "CUSTOMER_CLAIM") {
-    assertExactEvidenceFields(value, ["claim_category", "item_id"]);
-    if (
-      typeof value.item_id !== "string" || !value.item_id ||
-      typeof value.claim_category !== "string" || !claimCategoryCodes.has(value.claim_category)
-    ) throw new TypeError("CUSTOMER_CLAIM evidence typed facts are malformed");
+    assertExactEvidenceFields(value, ["claim_category", "criterion_index", "criterion_kind", "item_id"]);
+    assertCorrectionStatement({
+      claim_category: value.claim_category,
+      criterion_index: value.criterion_index,
+      criterion_kind: value.criterion_kind,
+      effective_action: "CUSTOMER_CLAIM",
+      item_id: value.item_id,
+    }, "CUSTOMER_CLAIM evidence", manifestItems);
     return;
   }
   if (action === "CURE" || action === "APPEAL") {
@@ -367,7 +398,7 @@ export function validateEvidenceDocument(
   correctionTargets?: readonly EvidenceDocument[],
   manifestItems?: readonly OrderItem[],
 ): EvidenceDocument {
-  const evidence = validateEvidenceShape(value);
+  const evidence = validateEvidenceShape(value, manifestItems);
   if (evidence.action === "CURE" || evidence.action === "APPEAL") {
     validateBatchCorrection(evidence as unknown as Record<string, unknown>, correctionTargets, manifestItems);
   }

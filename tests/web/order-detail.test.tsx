@@ -37,7 +37,7 @@ import {
 import { OrderTimeline } from "../../components/order/OrderTimeline";
 import { TransactionLifecycle } from "../../components/order/TransactionLifecycle";
 import { LocaleProvider, type Locale } from "../../lib/i18n";
-import type { EvidenceDocument, OrderState } from "../../lib/domain";
+import type { EvidenceDocument, OrderItem, OrderState } from "../../lib/domain";
 import { canonicalizeEvidenceEnvelope, hashEvidence } from "../../lib/evidence";
 import {
   FOODGUARD_CHAIN,
@@ -151,8 +151,20 @@ async function storedPackedEvidence() {
     expires_at: "2030-01-02T02:00:00.000Z",
     issuer_id: "foodguard-web",
     item_observations: [
-      { item_id: "item-1", observation: "PACKED_AS_ORDERED" },
-      { item_id: "item-2", observation: "PACKED_AS_ORDERED" },
+      {
+        condition_statuses: [{ condition_index: 0, status: "MET" }],
+        item_id: "item-1",
+        item_status: "AS_ORDERED",
+        quantity_status: "EXACT",
+        substitution_index: -1,
+      },
+      {
+        condition_statuses: [],
+        item_id: "item-2",
+        item_status: "AS_ORDERED",
+        quantity_status: "EXACT",
+        substitution_index: -1,
+      },
     ],
     nonce: "packed-readback",
     observed_at: "2030-01-01T00:00:00.000Z",
@@ -181,6 +193,58 @@ function canonicalTestJson(value: unknown): string {
   return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalTestJson(record[key])}`).join(",")}}`;
 }
 
+async function storedContractEvidence(
+  action: "PACKED" | "PICKED_UP" | "DELIVERED" | "CUSTOMER_CLAIM",
+) {
+  const items = JSON.parse(BASE_ORDER.manifest_json).items as Array<{
+    conditions: string[];
+    item_id: string;
+    permitted_substitutions: string[];
+  }>;
+  const itemId = action === "CUSTOMER_CLAIM" ? "item-1" : "";
+  const facts = action === "PACKED"
+    ? {
+        item_observations: items.map((item) => ({
+          condition_statuses: item.conditions.map((_condition, conditionIndex) => ({ condition_index: conditionIndex, status: "MET" })),
+          item_id: item.item_id,
+          item_status: "AS_ORDERED",
+          quantity_status: "EXACT",
+          substitution_index: -1,
+        })),
+      }
+    : action === "PICKED_UP"
+      ? { pickup_observation: "UNKNOWN" }
+      : action === "DELIVERED"
+        ? { delivery_observation: "UNKNOWN" }
+        : { claim_category: "NOT_AS_ORDERED", criterion_index: 0, criterion_kind: "CONDITION" };
+  const actor = action === "PACKED" ? RESTAURANT : action === "CUSTOMER_CLAIM" ? CUSTOMER : COURIER;
+  const preimage = {
+    action,
+    actor_wallet: actor,
+    chain_id: "61999",
+    contract_address: "0x4444444444444444444444444444444444444444",
+    expires_at: "2030-01-02T02:00:00.000Z",
+    ...facts,
+    issuer_id: "foodguard-web",
+    ...(itemId ? { item_id: itemId } : {}),
+    nonce: `contract-readback-${action.toLowerCase()}`,
+    observed_at: "2030-01-01T00:00:00.000Z",
+    order_id: "fg-mixed",
+    schema_version: "foodguard-evidence/1",
+    source_url: `https://evidence.foodguard.vn/contract-readback-${action.toLowerCase()}.json`,
+    subject: itemId ? `order:fg-mixed/item:${itemId}` : "order:fg-mixed",
+    submitted_at: "2030-01-01T00:00:00.000Z",
+  };
+  const sha256 = await sha256Text(canonicalTestJson(preimage));
+  const document = { ...preimage, sha256 } as EvidenceDocument;
+  return {
+    ...document,
+    effective_action: action,
+    envelope_json: canonicalTestJson(document),
+    item_id: itemId,
+  };
+}
+
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
@@ -197,7 +261,10 @@ function historyClaim(itemId: string, actor = CUSTOMER): EvidenceRecordView {
     action: "CUSTOMER_CLAIM",
     actor_wallet: actor,
     chain_id: "61999",
+    claim_category: "ABSENT_AT_RECEIPT",
     contract_address: "0x4444444444444444444444444444444444444444",
+    criterion_index: 0,
+    criterion_kind: "ITEM",
     effective_action: "CUSTOMER_CLAIM",
     expires_at: "2030-01-02T00:00:00.000Z",
     issuer_id: "foodguard-web",
@@ -210,7 +277,7 @@ function historyClaim(itemId: string, actor = CUSTOMER): EvidenceRecordView {
     source_url: `https://evidence.foodguard.vn/${itemId}.json`,
     subject: `order:fg-mixed/item:${itemId}`,
     submitted_at: "2030-01-01T00:00:00.000Z",
-  };
+  } as EvidenceRecordView;
 }
 
 function historyCorrection(
@@ -286,6 +353,49 @@ describe("authoritative batch history reduction", () => {
       historyCorrection("CURE", [0, 1], ["item-2", "item-1"]),
       historyCorrection("APPEAL", [2], ["item-2", "item-1"]),
     ])).toThrow(/active-set readback/i);
+  });
+
+  it.each([
+    ["missing manifest item", "item-missing", "ITEM", 0],
+    ["out-of-range ITEM index", "item-1", "ITEM", 1],
+    ["out-of-range SUBSTITUTION index", "item-1", "SUBSTITUTION", 0],
+    ["out-of-range CONDITION index 999", "item-1", "CONDITION", 999],
+    ["out-of-range QUANTITY index", "item-1", "QUANTITY", 1],
+    ["out-of-range DELIVERY index", "item-1", "DELIVERY", 0],
+  ] as const)("rejects active history with %s", (_name, itemId, criterionKind, criterionIndex) => {
+    const correction = historyCorrection("CURE", [0], [itemId]);
+    correction.statements = [{
+      claim_category: "NOT_AS_ORDERED",
+      criterion_index: criterionIndex,
+      criterion_kind: criterionKind,
+      effective_action: "CUSTOMER_CLAIM",
+      item_id: itemId,
+    }];
+    const manifestItems = JSON.parse(BASE_ORDER.manifest_json).items as OrderItem[];
+
+    expect(() => (deriveActiveEvidenceRecords as unknown as (
+      records: readonly EvidenceRecordView[],
+      manifest: readonly OrderItem[],
+    ) => EvidenceRecordView[])([historyClaim(itemId), correction], manifestItems)).toThrow(/active-set readback/i);
+  });
+
+  it.each([
+    ["missing manifest item", "item-missing", "ITEM", 0],
+    ["out-of-range ITEM index", "item-1", "ITEM", 1],
+    ["out-of-range SUBSTITUTION index", "item-1", "SUBSTITUTION", 0],
+    ["out-of-range CONDITION index 999", "item-1", "CONDITION", 999],
+    ["out-of-range QUANTITY index", "item-1", "QUANTITY", 1],
+    ["out-of-range DELIVERY index", "item-1", "DELIVERY", 0],
+  ] as const)("rejects base active history with %s", (_name, itemId, criterionKind, criterionIndex) => {
+    const claim = {
+      ...historyClaim(itemId),
+      claim_category: "NOT_AS_ORDERED",
+      criterion_index: criterionIndex,
+      criterion_kind: criterionKind,
+    } as EvidenceRecordView;
+    const manifestItems = JSON.parse(BASE_ORDER.manifest_json).items as OrderItem[];
+
+    expect(() => deriveActiveEvidenceRecords([claim], manifestItems)).toThrow(/active-set readback/i);
   });
 });
 
@@ -526,7 +636,10 @@ describe("evidence envelope preview", () => {
       action: "CUSTOMER_CLAIM" as const,
       actor_wallet: CUSTOMER,
       chain_id: "61999",
+      claim_category: "ABSENT_AT_RECEIPT" as const,
       contract_address: "0x4444444444444444444444444444444444444444",
+      criterion_index: 0,
+      criterion_kind: "ITEM" as const,
       effective_action: "CUSTOMER_CLAIM" as const,
       evidence_index: offset + 3,
       expires_at: "2030-01-01T00:00:00.000Z",
@@ -623,11 +736,20 @@ describe("evidence envelope preview", () => {
 
     expect(screen.queryByTestId("evidence-envelope-json")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /submit packed evidence/i })).toBeDisabled();
-    const observations = screen.getAllByRole("combobox", { name: /packed observation/i });
-    expect(observations).toHaveLength(2);
-    observations.forEach((select) => {
-      fireEvent.change(select, { target: { value: "PACKED_AS_ORDERED" } });
-    });
+    const itemStatuses = screen.getAllByRole("combobox", { name: /item status/i });
+    const quantityStatuses = screen.getAllByRole("combobox", { name: /quantity status/i });
+    const substitutionIndices = screen.getAllByRole("spinbutton", { name: /substitution index/i });
+    const conditionStatuses = screen.getAllByRole("combobox", { name: /condition status/i });
+    expect(itemStatuses).toHaveLength(2);
+    expect(quantityStatuses).toHaveLength(2);
+    expect(substitutionIndices).toHaveLength(2);
+    expect(conditionStatuses).toHaveLength(1);
+    [...itemStatuses, ...quantityStatuses, ...conditionStatuses].forEach((control) => expect(control).toHaveValue(""));
+    substitutionIndices.forEach((control) => expect(control).toHaveValue(null));
+    itemStatuses.forEach((select) => fireEvent.change(select, { target: { value: "AS_ORDERED" } }));
+    quantityStatuses.forEach((select) => fireEvent.change(select, { target: { value: "EXACT" } }));
+    substitutionIndices.forEach((input) => fireEvent.change(input, { target: { value: "-1" } }));
+    fireEvent.change(conditionStatuses[0], { target: { value: "MET" } });
 
     const preview = await screen.findByTestId("evidence-envelope-json");
     const envelope = JSON.parse(preview.textContent ?? "") as Record<string, unknown>;
@@ -647,10 +769,22 @@ describe("evidence envelope preview", () => {
       submitted_at: "2030-01-01T00:00:00.000Z",
     });
     expect(envelope.item_observations).toEqual([
-      { item_id: "item-1", observation: "PACKED_AS_ORDERED" },
-      { item_id: "item-2", observation: "PACKED_AS_ORDERED" },
+      {
+        condition_statuses: [{ condition_index: 0, status: "MET" }],
+        item_id: "item-1",
+        item_status: "AS_ORDERED",
+        quantity_status: "EXACT",
+        substitution_index: -1,
+      },
+      {
+        condition_statuses: [],
+        item_id: "item-2",
+        item_status: "AS_ORDERED",
+        quantity_status: "EXACT",
+        substitution_index: -1,
+      },
     ]);
-    expect(envelope.sha256).toBe("0x7130ad5882363da0920865264aaba599eb0e66ec35ba7e94192980e9077539da");
+    expect(envelope.sha256).toMatch(/^0x[0-9a-f]{64}$/);
     expect(preview.textContent).toMatch(/^\{"action":"PACKED","actor_wallet":/);
     expect(envelope).not.toHaveProperty("outcome");
     expect(envelope).not.toHaveProperty("verdict");
@@ -675,6 +809,116 @@ describe("evidence envelope preview", () => {
     expect(await screen.findByText("Public source matches the canonical document")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: /submit packed evidence/i }));
     await waitFor(() => expect(submit).toHaveBeenCalledWith(preview.textContent));
+  });
+
+  it("requires an explicit contract pickup observation before building PICKED_UP", async () => {
+    renderLocalized(
+      <EvidenceDrawer
+        action="PICKED_UP"
+        address={COURIER}
+        chainId="61999"
+        clock={testClock(1_893_456_000n)}
+        contractAddress="0x4444444444444444444444444444444444444444"
+        nonce="nonce-pickup-1"
+        now={new Date("2030-01-01T00:00:00.000Z")}
+        onSubmit={vi.fn()}
+        order={BASE_ORDER}
+        sourceUrl="https://evidence.foodguard.vn/pickup.json"
+      />,
+      "en",
+    );
+
+    const observation = screen.getByRole("combobox", { name: /pickup observation/i });
+    expect(observation).toHaveValue("");
+    expect(screen.queryByTestId("evidence-envelope-json")).not.toBeInTheDocument();
+    fireEvent.change(observation, { target: { value: "UNKNOWN" } });
+
+    const envelope = JSON.parse((await screen.findByTestId("evidence-envelope-json")).textContent ?? "") as Record<string, unknown>;
+    expect(envelope).toMatchObject({ action: "PICKED_UP", pickup_observation: "UNKNOWN" });
+  });
+
+  it("invalidates permitted PACKED substitutions when their explicit index is cleared", async () => {
+    const order = {
+      ...BASE_ORDER,
+      manifest_json: JSON.stringify({
+        items: [{
+          conditions: ["sealed"],
+          item_id: "item-1",
+          name: "Pho",
+          permitted_substitutions: ["Rice noodles"],
+          price_wei: "400",
+          quantity: 2,
+        }],
+      }),
+    };
+    renderLocalized(
+      <EvidenceDrawer
+        action="PACKED"
+        address={RESTAURANT}
+        chainId="61999"
+        clock={testClock(1_893_456_000n)}
+        contractAddress="0x4444444444444444444444444444444444444444"
+        nonce="nonce-packed-substitution"
+        now={new Date("2030-01-01T00:00:00.000Z")}
+        onSubmit={vi.fn()}
+        order={order}
+        sourceUrl="https://evidence.foodguard.vn/packed-substitution.json"
+      />,
+      "en",
+    );
+
+    fireEvent.change(screen.getByRole("combobox", { name: /item status/i }), { target: { value: "PERMITTED_SUBSTITUTION" } });
+    fireEvent.change(screen.getByRole("combobox", { name: /quantity status/i }), { target: { value: "EXACT" } });
+    fireEvent.change(screen.getByRole("combobox", { name: /condition status/i }), { target: { value: "MET" } });
+
+    const substitutionIndex = screen.getByRole("spinbutton", { name: /substitution index/i });
+    expect(substitutionIndex).toHaveValue(null);
+    expect(screen.queryByTestId("evidence-envelope-json")).not.toBeInTheDocument();
+    fireEvent.change(substitutionIndex, { target: { value: "0" } });
+    expect(await screen.findByTestId("evidence-envelope-json")).toHaveTextContent('"substitution_index":0');
+    fireEvent.change(substitutionIndex, { target: { value: "" } });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    expect(screen.queryByTestId("evidence-envelope-json")).not.toBeInTheDocument();
+  });
+
+  it("requires category, criterion kind, and a manifest-bounded index for a base customer claim", async () => {
+    renderLocalized(
+      <EvidenceDrawer
+        action="CUSTOMER_CLAIM"
+        address={CUSTOMER}
+        chainId="61999"
+        clock={testClock(1_893_456_000n)}
+        contractAddress="0x4444444444444444444444444444444444444444"
+        itemId="item-1"
+        nonce="nonce-claim-1"
+        now={new Date("2030-01-01T00:00:00.000Z")}
+        onSubmit={vi.fn()}
+        order={BASE_ORDER}
+        sourceUrl="https://evidence.foodguard.vn/claim.json"
+      />,
+      "en",
+    );
+
+    const category = screen.getByRole("combobox", { name: /^claim category$/i });
+    const kind = screen.getByRole("combobox", { name: /^criterion kind$/i });
+    const index = screen.getByRole("spinbutton", { name: /^criterion index$/i });
+    expect(category).toHaveValue("");
+    expect(kind).toHaveValue("");
+    expect(index).toHaveValue(null);
+    fireEvent.change(category, { target: { value: "NOT_AS_ORDERED" } });
+    fireEvent.change(kind, { target: { value: "CONDITION" } });
+    fireEvent.change(index, { target: { value: "999" } });
+    expect(screen.queryByTestId("evidence-envelope-json")).not.toBeInTheDocument();
+    fireEvent.change(index, { target: { value: "0" } });
+
+    const envelope = JSON.parse((await screen.findByTestId("evidence-envelope-json")).textContent ?? "") as Record<string, unknown>;
+    expect(envelope).toMatchObject({
+      action: "CUSTOMER_CLAIM",
+      claim_category: "NOT_AS_ORDERED",
+      criterion_index: 0,
+      criterion_kind: "CONDITION",
+      item_id: "item-1",
+    });
   });
 
   it("rejects a non-public evidence URL and disables submission", async () => {
@@ -829,6 +1073,24 @@ describe("permissionless consensus", () => {
 });
 
 describe("order detail readback orchestration", () => {
+  it.each(["PACKED", "PICKED_UP", "DELIVERED", "CUSTOMER_CLAIM"] as const)(
+    "accepts contract-valid stored %s evidence in authoritative readback",
+    async (action) => {
+      const evidence = await storedContractEvidence(action);
+      genlayerMocks.readFoodGuard.mockImplementation((method: string) => {
+        if (method === "get_order") return Promise.resolve({ ...BASE_ORDER, state: "ACCEPTED" });
+        if (method === "get_evidence_count") return Promise.resolve("1");
+        if (method === "get_evidence") return Promise.resolve(evidence);
+        if (method === "get_round") return Promise.resolve("0");
+        throw new Error(`unexpected method ${method}`);
+      });
+
+      const result = await readAuthoritativeOrder("fg-mixed");
+
+      expect(result.evidence).toEqual([{ ...evidence, evidence_index: 0 }]);
+    },
+  );
+
   it("shows completion only after finalized execution and fresh active batch readback", async () => {
     (window as typeof window & { ethereum?: unknown }).ethereum = {
       request: vi.fn(({ method }: { method: string }) => {
@@ -1534,7 +1796,10 @@ describe("order detail readback orchestration", () => {
             action: "CUSTOMER_CLAIM",
             actor_wallet: CUSTOMER,
             chain_id: "61999",
+            claim_category: "ABSENT_AT_RECEIPT",
             contract_address: "0x4444444444444444444444444444444444444444",
+            criterion_index: 0,
+            criterion_kind: "ITEM",
             effective_action: "CUSTOMER_CLAIM",
             expires_at: "2030-01-01T00:00:00.000Z",
             issuer_id: "foodguard-web",
@@ -1610,8 +1875,17 @@ describe("order detail readback orchestration", () => {
     fireEvent.click(await screen.findByRole("button", { name: /confirm packed/i }));
     const source = await screen.findByRole("textbox", { name: /public HTTPS source URL/i });
     fireEvent.change(source, { target: { value: "https://evidence.foodguard.vn/packed-retry.json" } });
-    screen.getAllByRole("combobox", { name: /packed observation/i }).forEach((select) => {
-      fireEvent.change(select, { target: { value: "PACKED_AS_ORDERED" } });
+    screen.getAllByRole("combobox", { name: /item status/i }).forEach((select) => {
+      fireEvent.change(select, { target: { value: "AS_ORDERED" } });
+    });
+    screen.getAllByRole("combobox", { name: /quantity status/i }).forEach((select) => {
+      fireEvent.change(select, { target: { value: "EXACT" } });
+    });
+    screen.getAllByRole("spinbutton", { name: /substitution index/i }).forEach((input) => {
+      fireEvent.change(input, { target: { value: "-1" } });
+    });
+    screen.getAllByRole("combobox", { name: /condition status/i }).forEach((select) => {
+      fireEvent.change(select, { target: { value: "MET" } });
     });
     const publicDocument = await screen.findByTestId("evidence-public-json");
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({

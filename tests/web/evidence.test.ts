@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -26,19 +27,19 @@ import packedFixture from "../../public/evidence/order-fg-demo-packed.json";
 import pickupFixture from "../../public/evidence/order-fg-demo-pickup.json";
 
 const FIXTURE_DIGESTS = Object.freeze({
-  "order-fg-demo-claim-missing-item.json": "0xc6b1996f8fb0350c217679fdd40b425c5b0385f32d7db608713087e3f6d989c3",
-  "order-fg-batch-demo-claim-item-1.json": "0xe5893f78ead60ce4e2ceeccc26860a5c97a515a599bf62b7c0058fd50baa8e3d",
-  "order-fg-batch-demo-claim-item-2.json": "0xb5783653e62d1b67c30975f7bce2de6e1ede3af83358012bd7261d3b68f98337",
-  "order-fg-batch-demo-claim-item-3.json": "0x42699bcc3e6910ce5f9f4b88b264e9ebfdcc4306304a0abec8014d8239db8e34",
+  "order-fg-demo-claim-missing-item.json": "0x369f36ce1ee1dfa295188ac14bcb9a4bb87d82c345b676f27b4d6f6d9e5310c0",
+  "order-fg-batch-demo-claim-item-1.json": "0x218027b53de26811659a4115e1abd473095d5484a366a978eade19112b3f9153",
+  "order-fg-batch-demo-claim-item-2.json": "0x2aae37460a744592de2ab5210c1a1314b375d18b31745cdb5bdae39c900afce7",
+  "order-fg-batch-demo-claim-item-3.json": "0xea1cba3872886fd6035d2638d1050a3489ea79b599ab35898d58c57cc3f64f31",
   "order-fg-batch-demo-cure-batch.json": "0x41548c1306fd12785adc5dd6400b2ac235849777ba9de31dea4e7f367239587c",
   "order-fg-batch-demo-delivered.json": "0xf96d1e24534f191172fd59f3208ff2365a370de9203bcfecc47e6c6b1b6bf040",
   "order-fg-batch-demo-manifest.json": "0x8f539b60979571dad557f25b32d5804291fe868ade8814a4576d77ec440240e5",
-  "order-fg-batch-demo-packed.json": "0x348ffb2c9f916b87ecbd8cc54594125c5210d46a9c3b2303acf2e0ff43cf7e44",
-  "order-fg-batch-demo-pickup.json": "0xd0d1d6d895b1ce845a2e70edfc73e27e87bc51761e205ab25244f333cbcef83b",
+  "order-fg-batch-demo-packed.json": "0x392829da88b3055235f1e06c955fd2ed1cb4854836834dacf528ae353844b64d",
+  "order-fg-batch-demo-pickup.json": "0x142a08c9acd79fa0778ad379baf1d85ad8dcef94717c0a1ab6745b5444efe13a",
   "order-fg-demo-delivered.json": "0x1f75f32767e97a2dfe7bdec507fe3b963d7ff151e3a13cb5a169a1570bfccd0f",
   "order-fg-demo-manifest.json": "0xc8b3c3caf0d9c51e79a636095a5c8b1a603b61a39bc80027e7ae9ab91ac76ac5",
-  "order-fg-demo-packed.json": "0x81aeb38f325af53321789f67ca05cd2423f5cb4d5c4511eaf9ebd0a896ef8d48",
-  "order-fg-demo-pickup.json": "0x1619d7c15f830b0c6279f2cee4ee2687b800aba22590c7fba5d2114ca7035344",
+  "order-fg-demo-packed.json": "0x115ea48350deee4d01615855dd5fa6a7b204be04f1e2b22bd67b7df768ae24ac",
+  "order-fg-demo-pickup.json": "0x691e62959c1ee8966a63c97496a02bff33bd396a9890f16881d2b8b5d6037222",
 } as const satisfies Record<string, HexDigest>);
 
 const validEvidence = {
@@ -106,6 +107,72 @@ function without(value: Record<string, unknown>, key: string) {
   delete copy[key];
   return copy;
 }
+
+function canonicalTestJson(value: unknown): string {
+  if (value === null || typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalTestJson).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalTestJson(record[key])}`).join(",")}}`;
+}
+
+function withIndependentDigest(preimage: Record<string, unknown>): EvidenceDocument {
+  const sha256 = `0x${createHash("sha256").update(canonicalTestJson(preimage), "utf8").digest("hex")}` as HexDigest;
+  return { ...preimage, sha256 } as unknown as EvidenceDocument;
+}
+
+function contractBaseEvidence(
+  action: "PACKED" | "PICKED_UP" | "DELIVERED" | "CUSTOMER_CLAIM",
+  facts: Record<string, unknown>,
+  itemId = "",
+): EvidenceDocument {
+  const orderId = "fg-demo";
+  const actor = action === "PACKED"
+    ? "0x2222222222222222222222222222222222222222"
+    : action === "CUSTOMER_CLAIM"
+      ? "0x1111111111111111111111111111111111111111"
+      : "0x3333333333333333333333333333333333333333";
+  return withIndependentDigest({
+    action,
+    actor_wallet: actor,
+    chain_id: "61999",
+    contract_address: "0x4444444444444444444444444444444444444444",
+    expires_at: "2030-01-02T00:00:00.000Z",
+    ...facts,
+    issuer_id: "foodguard-web",
+    ...(itemId ? { item_id: itemId } : {}),
+    nonce: `contract-valid-${action.toLowerCase()}`,
+    observed_at: "2030-01-01T00:00:00.000Z",
+    order_id: orderId,
+    schema_version: "foodguard-evidence/1",
+    source_url: `https://evidence.foodguard.app/${orderId}/${action.toLowerCase()}.json`,
+    subject: itemId ? `order:${orderId}/item:${itemId}` : `order:${orderId}`,
+    submitted_at: "2030-01-01T00:00:00.000Z",
+  });
+}
+
+const contractValidBaseEvidence = [
+  ["PACKED", contractBaseEvidence("PACKED", {
+    item_observations: manifestFixture.items.map((item, itemIndex) => ({
+      condition_statuses: item.conditions.map((_condition, conditionIndex) => ({
+        condition_index: conditionIndex,
+        status: itemIndex === 0 && conditionIndex === 1 ? "UNKNOWN" : "MET",
+      })),
+      item_id: item.item_id,
+      item_status: itemIndex === 1 ? "PERMITTED_SUBSTITUTION" : "AS_ORDERED",
+      quantity_status: itemIndex === 1 ? "SHORT" : "EXACT",
+      substitution_index: itemIndex === 1 ? 0 : -1,
+    })),
+  })],
+  ["PICKED_UP", contractBaseEvidence("PICKED_UP", { pickup_observation: "UNKNOWN" })],
+  ["DELIVERED", contractBaseEvidence("DELIVERED", { delivery_observation: "UNKNOWN" })],
+  ["CUSTOMER_CLAIM", contractBaseEvidence("CUSTOMER_CLAIM", {
+    claim_category: "NOT_AS_ORDERED",
+    criterion_index: 0,
+    criterion_kind: "CONDITION",
+  }, "item-2")],
+] as const;
 
 const targetIndices = [3, 4, 5];
 const expectedDigest = "0x068241e2ab5daf5e25a9f3073efa43889a9a6d2e035ad520238b28ade8bee95b";
@@ -347,9 +414,52 @@ describe("batch correction evidence", () => {
       ],
     })).rejects.toThrow(TypeError);
   });
+
+  it.each([
+    ["missing manifest item", "item-missing", "ITEM", 0],
+    ["out-of-range ITEM index", "item-1", "ITEM", 1],
+    ["out-of-range SUBSTITUTION index", "item-2", "SUBSTITUTION", 1],
+    ["out-of-range CONDITION index 999", "item-1", "CONDITION", 999],
+    ["out-of-range QUANTITY index", "item-1", "QUANTITY", 1],
+    ["out-of-range DELIVERY index", "item-1", "DELIVERY", 0],
+  ] as const)("rejects manifest-invalid correction claim: %s", (_name, claimItemId, criterionKind, criterionIndex) => {
+    const statement = {
+      claim_category: "NOT_AS_ORDERED",
+      criterion_index: criterionIndex,
+      criterion_kind: criterionKind,
+      effective_action: "CUSTOMER_CLAIM",
+      item_id: claimItemId,
+    } satisfies CorrectionStatement;
+    const document = withIndependentDigest({
+      ...without(canonicalFixture as unknown as Record<string, unknown>, "sha256"),
+      statements: [statement],
+      supersedes_evidence_indices: [3],
+    });
+    const target = contractBaseEvidence("CUSTOMER_CLAIM", {
+      claim_category: "NOT_AS_ORDERED",
+      criterion_index: criterionKind === "DELIVERY" ? -1 : 0,
+      criterion_kind: criterionKind,
+    }, claimItemId);
+
+    expect(() => validateEvidenceDocument(
+      document,
+      new Date("2030-01-01T00:00:00.000Z"),
+      [target],
+      manifestFixture.items,
+    )).toThrow(TypeError);
+  });
 });
 
 describe("FoodGuard evidence", () => {
+  it.each(contractValidBaseEvidence)("accepts contract-valid base %s evidence with manifest bounds", (_action, document) => {
+    expect(validateEvidenceDocument(
+      document,
+      new Date("2030-01-01T00:00:00.000Z"),
+      undefined,
+      manifestFixture.items,
+    )).toEqual(document);
+  });
+
   it.each([
     ["PACKED without observations", { action: "PACKED" }],
     ["PACKED with an unknown observation", {

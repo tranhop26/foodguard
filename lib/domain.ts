@@ -34,33 +34,43 @@ export type EvidenceAction =
 
 export type CorrectionEffectiveAction = "PACKED" | "PICKED_UP" | "DELIVERED" | "CUSTOMER_CLAIM";
 
+export type PackedItemStatus = "AS_ORDERED" | "PERMITTED_SUBSTITUTION" | "ABSENT" | "DIFFERENT" | "UNKNOWN";
+export type QuantityStatus = "EXACT" | "SHORT" | "EXCESS" | "UNKNOWN";
+export type ConditionStatus = "MET" | "NOT_MET" | "UNKNOWN";
+export type PickupObservation = "PICKUP_CONFIRMED" | "PICKUP_FAILED" | "UNKNOWN";
+export type DeliveryObservation = "HANDOFF_CONFIRMED" | "HANDOFF_FAILED" | "UNKNOWN";
+export type ClaimCategory = "ABSENT_AT_RECEIPT" | "NOT_AS_ORDERED" | "HANDOFF_NOT_RECEIVED";
+export type ClaimCriterionKind = "ITEM" | "SUBSTITUTION" | "CONDITION" | "QUANTITY" | "DELIVERY";
+
+export interface PackedItemObservation {
+  item_id: string;
+  item_status: PackedItemStatus;
+  quantity_status: QuantityStatus;
+  substitution_index: number;
+  condition_statuses: Array<{
+    condition_index: number;
+    status: ConditionStatus;
+  }>;
+}
+
 export type CorrectionStatement =
   | {
       effective_action: "PACKED";
-      item_observations: Array<{
-        item_id: string;
-        item_status: "AS_ORDERED" | "PERMITTED_SUBSTITUTION" | "ABSENT" | "DIFFERENT" | "UNKNOWN";
-        quantity_status: "EXACT" | "SHORT" | "EXCESS" | "UNKNOWN";
-        substitution_index: number;
-        condition_statuses: Array<{
-          condition_index: number;
-          status: "MET" | "NOT_MET" | "UNKNOWN";
-        }>;
-      }>;
+      item_observations: PackedItemObservation[];
     }
   | {
       effective_action: "PICKED_UP";
-      pickup_observation: "PICKUP_CONFIRMED" | "PICKUP_FAILED" | "UNKNOWN";
+      pickup_observation: PickupObservation;
     }
   | {
       effective_action: "DELIVERED";
-      delivery_observation: "HANDOFF_CONFIRMED" | "HANDOFF_FAILED" | "UNKNOWN";
+      delivery_observation: DeliveryObservation;
     }
   | {
       effective_action: "CUSTOMER_CLAIM";
       item_id: string;
-      claim_category: "ABSENT_AT_RECEIPT" | "NOT_AS_ORDERED" | "HANDOFF_NOT_RECEIVED";
-      criterion_kind: "ITEM" | "SUBSTITUTION" | "CONDITION" | "QUANTITY" | "DELIVERY";
+      claim_category: ClaimCategory;
+      criterion_kind: ClaimCriterionKind;
       criterion_index: number;
     };
 
@@ -112,7 +122,13 @@ export interface EvidenceDocument {
   contract_address: string;
   nonce: string;
   items?: OrderItem[];
+  item_observations?: PackedItemObservation[];
+  pickup_observation?: PickupObservation;
+  delivery_observation?: DeliveryObservation;
+  claim_category?: ClaimCategory;
+  criterion_kind?: ClaimCriterionKind;
+  criterion_index?: number;
   statements?: CorrectionStatement[];
   supersedes_evidence_indices?: number[];
-  [key: string]: JsonValue | OrderItem[] | CorrectionStatement[] | undefined;
+  [key: string]: JsonValue | OrderItem[] | PackedItemObservation[] | CorrectionStatement[] | undefined;
 }
