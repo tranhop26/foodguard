@@ -28,7 +28,7 @@ import { RoleConsole, type RoleAction } from "../../../components/order/RoleCons
 import { TransactionLifecycle } from "../../../components/order/TransactionLifecycle";
 import { WalletButton, type WalletSnapshot } from "../../../components/wallet/WalletButton";
 import type { DeliveryOutcome, EvidenceAction, EvidenceDocument, ItemOutcome, OrderItem, OrderState } from "../../../lib/domain";
-import { canonicalizeEvidenceEnvelope, validateCorrectionStatement, validateEvidenceDocument } from "../../../lib/evidence";
+import { canonicalizeEvidenceEnvelope, validateCorrectionStatement, validateHistoricalEvidenceDocument } from "../../../lib/evidence";
 import { getFoodGuardReadClient, readFoodGuard, writeFoodGuard } from "../../../lib/genlayer/client";
 import {
   FOODGUARD_CHAIN,
@@ -247,7 +247,7 @@ async function evidenceRecord(value: unknown, order: OrderDetailView, evidenceIn
   try {
     const parsed = JSON.parse(value.envelope_json as string);
     if (!plainObject(parsed) || canonicalJson(parsed) !== value.envelope_json) throw new TypeError();
-    envelope = validateEvidenceDocument(parsed, new Date(), undefined, items);
+    envelope = validateHistoricalEvidenceDocument(parsed, undefined, items);
   } catch {
     throw new TypeError("Evidence envelope readback is malformed");
   }

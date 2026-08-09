@@ -380,6 +380,27 @@ function sha256Hex(text: string): HexDigest {
   return `0x${Array.from(hash, (word) => word.toString(16).padStart(8, "0")).join("")}`;
 }
 
+function validateEvidenceDocumentCore(
+  value: unknown,
+  now: Date | undefined,
+  correctionTargets?: readonly EvidenceDocument[],
+  manifestItems?: readonly OrderItem[],
+): EvidenceDocument {
+  const evidence = validateEvidenceShape(value, manifestItems);
+  if (evidence.action === "CURE" || evidence.action === "APPEAL") {
+    validateBatchCorrection(evidence as unknown as Record<string, unknown>, correctionTargets, manifestItems);
+  }
+  const observedAt = parseTimestamp(evidence.observed_at, "observed_at");
+  const submittedAt = parseTimestamp(evidence.submitted_at, "submitted_at");
+  const expiresAt = parseTimestamp(evidence.expires_at, "expires_at");
+  if (observedAt > submittedAt || submittedAt > expiresAt) throw new TypeError("evidence timestamps must be ordered");
+  if (now && expiresAt <= now.getTime()) throw new TypeError("evidence has expired");
+  if (evidence.sha256.toLowerCase() !== sha256Hex(canonicalize(digestPreimage(evidence)))) {
+    throw new TypeError("sha256 does not bind the canonical evidence preimage");
+  }
+  return evidence;
+}
+
 export function validateEvidenceDocument<T extends EvidenceDocument>(
   value: T,
   now?: Date,
@@ -398,19 +419,25 @@ export function validateEvidenceDocument(
   correctionTargets?: readonly EvidenceDocument[],
   manifestItems?: readonly OrderItem[],
 ): EvidenceDocument {
-  const evidence = validateEvidenceShape(value, manifestItems);
-  if (evidence.action === "CURE" || evidence.action === "APPEAL") {
-    validateBatchCorrection(evidence as unknown as Record<string, unknown>, correctionTargets, manifestItems);
-  }
-  const observedAt = parseTimestamp(evidence.observed_at, "observed_at");
-  const submittedAt = parseTimestamp(evidence.submitted_at, "submitted_at");
-  const expiresAt = parseTimestamp(evidence.expires_at, "expires_at");
-  if (observedAt > submittedAt || submittedAt > expiresAt) throw new TypeError("evidence timestamps must be ordered");
-  if (expiresAt <= now.getTime()) throw new TypeError("evidence has expired");
-  if (evidence.sha256.toLowerCase() !== sha256Hex(canonicalize(digestPreimage(evidence)))) {
-    throw new TypeError("sha256 does not bind the canonical evidence preimage");
-  }
-  return evidence;
+  return validateEvidenceDocumentCore(value, now, correctionTargets, manifestItems);
+}
+
+export function validateHistoricalEvidenceDocument<T extends EvidenceDocument>(
+  value: T,
+  correctionTargets?: readonly EvidenceDocument[],
+  manifestItems?: readonly OrderItem[],
+): T;
+export function validateHistoricalEvidenceDocument(
+  value: unknown,
+  correctionTargets?: readonly EvidenceDocument[],
+  manifestItems?: readonly OrderItem[],
+): EvidenceDocument;
+export function validateHistoricalEvidenceDocument(
+  value: unknown,
+  correctionTargets?: readonly EvidenceDocument[],
+  manifestItems?: readonly OrderItem[],
+): EvidenceDocument {
+  return validateEvidenceDocumentCore(value, undefined, correctionTargets, manifestItems);
 }
 
 export function canonicalizeEvidence(value: EvidenceDocument, manifestItems?: readonly OrderItem[]): string {

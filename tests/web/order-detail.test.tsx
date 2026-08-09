@@ -1177,6 +1177,32 @@ describe("order detail readback orchestration", () => {
     });
   });
 
+  it("keeps expired historical getter evidence readable in cure and resolution history", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2031-01-01T00:00:00.000Z"));
+    const { getter } = await storedContractEvidence("PACKED");
+    const resolution = {
+      ...UNRESOLVED_ORDER.resolution!,
+      evidence_hashes: [getter.sha256],
+      evidence_indices: [0],
+    };
+    genlayerMocks.readFoodGuard.mockImplementation((method: string) => {
+      if (method === "get_order") return Promise.resolve({ ...UNRESOLVED_ORDER, resolution });
+      if (method === "get_evidence_count") return Promise.resolve("1");
+      if (method === "get_evidence") return Promise.resolve(getter);
+      if (method === "get_resolution") return Promise.resolve(JSON.stringify(resolution));
+      if (method === "get_round") return Promise.resolve("1");
+      throw new Error(`unexpected method ${method}`);
+    });
+
+    const result = await readAuthoritativeOrder("fg-mixed");
+    const active = deriveActiveEvidenceRecords(result.evidence ?? [], JSON.parse(BASE_ORDER.manifest_json).items);
+
+    expect(active.map((record) => record.evidence_index)).toEqual([0]);
+    expect(active[0].item_observations).toHaveLength(2);
+    expect(result.resolution).toMatchObject({ evidence_hashes: [getter.sha256], evidence_indices: [0] });
+  });
+
   it("ignores a forged top-level typed duplicate and uses the canonical envelope fact", async () => {
     const { getter } = await storedContractEvidence("PICKED_UP");
     genlayerMocks.readFoodGuard.mockImplementation((method: string) => {
