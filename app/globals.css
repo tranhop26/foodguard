@@ -1651,6 +1651,39 @@ button.button--quiet:disabled {
   font-weight: 850;
 }
 
+.evidence-targets,
+.correction-statements,
+.correction-statement {
+  min-width: 0;
+}
+
+.evidence-facts .evidence-target {
+  grid-template-columns: 44px minmax(0, 1fr);
+  min-height: 44px;
+  align-items: center;
+}
+
+.evidence-facts .evidence-target input {
+  width: 44px;
+  min-height: 44px;
+  margin: 0;
+}
+
+.evidence-target span,
+.correction-statement h3 {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.correction-statement {
+  padding-block: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.correction-statement:last-of-type {
+  border-bottom: 0;
+}
+
 .evidence-preview {
   margin: 24px 0;
   padding: clamp(18px, 3vw, 28px);
@@ -1720,5 +1753,16 @@ button.button--quiet:disabled {
   .order-card,
   .transaction-lifecycle {
     border-radius: 16px;
+  }
+
+  .evidence-facts {
+    padding: 14px;
+  }
+
+  .evidence-drawer,
+  .evidence-preview,
+  .correction-statements {
+    max-width: 100%;
+    overflow-x: hidden;
   }
 }

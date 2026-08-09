@@ -225,7 +225,7 @@ function authoritativeBase(value: unknown, expectedOrderId: string): OrderDetail
   return base;
 }
 
-async function evidenceRecord(value: unknown, order: OrderDetailView): Promise<EvidenceRecordView> {
+async function evidenceRecord(value: unknown, order: OrderDetailView, evidenceIndex: number): Promise<EvidenceRecordView> {
   if (!plainObject(value)) throw new TypeError("Evidence readback is malformed");
   const required = [
     "schema_version", "order_id", "subject", "action", "actor_wallet", "issuer_id", "source_url",
@@ -294,7 +294,35 @@ async function evidenceRecord(value: unknown, order: OrderDetailView): Promise<E
   if ((await hashEvidence(envelope as EvidenceDocument)).toLowerCase() !== (value.sha256 as string).toLowerCase()) {
     throw new TypeError("Evidence digest binding is malformed");
   }
-  return value as unknown as EvidenceRecordView;
+  const correction = envelope.action === "CURE" || envelope.action === "APPEAL"
+    ? {
+        effective_action: "BATCH_CORRECTION" as const,
+        statements: envelope.statements as EvidenceRecordView["statements"],
+        supersedes_evidence_indices: envelope.supersedes_evidence_indices as number[],
+      }
+    : { effective_action: envelope.action as EvidenceRecordView["effective_action"] };
+  if (typeof value.effective_action === "string" && value.effective_action !== correction.effective_action) {
+    throw new TypeError("Evidence effective action binding is malformed");
+  }
+  return { ...(value as unknown as EvidenceRecordView), ...correction, evidence_index: evidenceIndex };
+}
+
+export function deriveActiveEvidenceRecords(evidence: readonly EvidenceRecordView[]): EvidenceRecordView[] {
+  const active = new Set(evidence.map((_record, index) => index));
+  for (const record of evidence) {
+    if (record.action !== "CURE" && record.action !== "APPEAL") continue;
+    const targets = record.supersedes_evidence_indices;
+    if (!Array.isArray(targets) || targets.length === 0) throw new TypeError("Batch correction active-set readback is malformed");
+    let previous = -1;
+    for (const target of targets) {
+      if (!Number.isSafeInteger(target) || target <= previous || target >= evidence.length || !active.has(target)) {
+        throw new TypeError("Batch correction active-set readback is malformed");
+      }
+      previous = target;
+      active.delete(target);
+    }
+  }
+  return [...active].sort((left, right) => left - right).map((index) => ({ ...evidence[index], evidence_index: index }));
 }
 
 function parseResolution(value: unknown, manifestJson: string): ResolutionView {
@@ -590,7 +618,7 @@ export async function readAuthoritativeOrder(orderId: string): Promise<OrderDeta
   const evidence = await Promise.all(
     Array.from({ length: Number(count) }, (_, index) =>
       readFoodGuard<unknown>("get_evidence", [normalizedOrderId, BigInt(index)])
-        .then((record) => evidenceRecord(record, order)),
+        .then((record) => evidenceRecord(record, order, index)),
     ),
   );
   const round = unsignedRaw(
@@ -856,7 +884,12 @@ export function OrderDetailWorkspace({
     );
   }
 
-  async function runWrite(method: string, args: string[], expectedAddress?: string) {
+  async function runWrite(
+    method: string,
+    args: string[],
+    expectedAddress?: string,
+    validateReadback?: (nextOrder: OrderDetailView) => void,
+  ) {
     if (!configuration.writesEnabled || pending || !order) return order;
     setPending(true);
     setError(null);
@@ -867,6 +900,7 @@ export function OrderDetailWorkspace({
       const result = transact
         ? await transact(method, args, expectedAddress, setStage)
         : await transactAndRead(order.order_id, method, args, expectedAddress, setStage);
+      validateReadback?.(result.order);
       setOrder(result.order);
       return result.order;
     } catch (caught) {
@@ -1002,10 +1036,29 @@ export function OrderDetailWorkspace({
               chainId={configuration.chainId}
               clock={clock}
               contractAddress={configuration.contractAddress}
+              correctableEvidence={deriveActiveEvidenceRecords(order.evidence ?? [])}
               disabled={pending || !evidenceWritesEnabled || wallet.status !== "READY"}
               now={new Date(Number(chainNowMs))}
               onSubmit={async (envelopeJson) => {
-                await runWrite(activeEvidence.method, [order.order_id, envelopeJson], wallet.address ?? undefined);
+                const submitted = JSON.parse(envelopeJson) as EvidenceDocument;
+                await runWrite(
+                  activeEvidence.method,
+                  [order.order_id, envelopeJson],
+                  wallet.address ?? undefined,
+                  activeEvidence.action === "CURE" || activeEvidence.action === "APPEAL"
+                    ? (nextOrder) => {
+                        const activeRecords = deriveActiveEvidenceRecords(nextOrder.evidence ?? []);
+                        const confirmed = activeRecords.some((record) => (
+                          record.action === activeEvidence.action &&
+                          record.actor_wallet.toLowerCase() === wallet.address?.toLowerCase() &&
+                          record.sha256.toLowerCase() === submitted.sha256.toLowerCase()
+                        ));
+                        const activeIndices = new Set(activeRecords.map((record) => record.evidence_index));
+                        const targetsRemoved = submitted.supersedes_evidence_indices?.every((index) => !activeIndices.has(index)) ?? false;
+                        if (!confirmed || !targetsRemoved) throw new TypeError(copy.detail.correctionReadbackFailed);
+                      }
+                    : undefined,
+                );
                 setActiveEvidence(null);
               }}
               order={order}

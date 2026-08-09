@@ -1,4 +1,6 @@
 import type {
+  CorrectionEffectiveAction,
+  CorrectionStatement,
   EvidenceAction,
   EvidenceDocument,
   HexDigest,
@@ -6,7 +8,14 @@ import type {
   OrderItem,
 } from "./domain";
 
-export type { EvidenceDocument, HexDigest, OrderItem } from "./domain";
+export type {
+  BatchCorrectionFacts,
+  CorrectionEffectiveAction,
+  CorrectionStatement,
+  EvidenceDocument,
+  HexDigest,
+  OrderItem,
+} from "./domain";
 
 const evidenceActions = new Set<EvidenceAction>([
   "ORDER_MANIFEST", "PACKED", "PICKED_UP", "DELIVERED", "CUSTOMER_CLAIM", "CURE", "APPEAL",
@@ -24,6 +33,126 @@ const baseEvidenceFields = new Set([
 const packedObservationCodes = new Set(["PACKED_AS_ORDERED", "NOT_PACKED", "PACKED_DIFFERENT"]);
 const deliveryObservationCodes = new Set(["HANDOFF_CONFIRMED", "HANDOFF_FAILED"]);
 const claimCategoryCodes = new Set(["ABSENT_AT_RECEIPT", "NOT_AS_ORDERED", "HANDOFF_NOT_RECEIVED"]);
+const MAX_ACTIVE_EVIDENCE = 103;
+
+export const PACKED_ITEM_STATUS_OPTIONS = ["AS_ORDERED", "PERMITTED_SUBSTITUTION", "ABSENT", "DIFFERENT", "UNKNOWN"] as const;
+export const QUANTITY_STATUS_OPTIONS = ["EXACT", "SHORT", "EXCESS", "UNKNOWN"] as const;
+export const CONDITION_STATUS_OPTIONS = ["MET", "NOT_MET", "UNKNOWN"] as const;
+export const PICKUP_OBSERVATION_OPTIONS = ["PICKUP_CONFIRMED", "PICKUP_FAILED", "UNKNOWN"] as const;
+export const DELIVERY_OBSERVATION_OPTIONS = ["HANDOFF_CONFIRMED", "HANDOFF_FAILED", "UNKNOWN"] as const;
+export const CLAIM_CATEGORY_OPTIONS = ["ABSENT_AT_RECEIPT", "NOT_AS_ORDERED", "HANDOFF_NOT_RECEIVED"] as const;
+export const CLAIM_CRITERION_KIND_OPTIONS = ["ITEM", "SUBSTITUTION", "CONDITION", "QUANTITY", "DELIVERY"] as const;
+
+const correctionActions = new Set<CorrectionEffectiveAction>(["PACKED", "PICKED_UP", "DELIVERED", "CUSTOMER_CLAIM"]);
+
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  return Object.keys(value).sort().join(",") === [...keys].sort().join(",");
+}
+
+function valueIn<const T extends readonly string[]>(options: T, value: unknown): value is T[number] {
+  return typeof value === "string" && (options as readonly string[]).includes(value);
+}
+
+function assertCorrectionStatement(value: unknown, path = "statement"): asserts value is CorrectionStatement {
+  if (!isPlainObject(value) || typeof value.effective_action !== "string" || !correctionActions.has(value.effective_action as CorrectionEffectiveAction)) {
+    throw new TypeError(`${path} must use a supported effective_action`);
+  }
+  if (value.effective_action === "PACKED") {
+    if (!hasExactKeys(value, ["effective_action", "item_observations"]) || !Array.isArray(value.item_observations) || value.item_observations.length === 0) {
+      throw new TypeError(`${path} PACKED facts are malformed`);
+    }
+    const itemIds = new Set<string>();
+    for (const [itemIndex, item] of value.item_observations.entries()) {
+      if (
+        !isPlainObject(item) ||
+        !hasExactKeys(item, ["condition_statuses", "item_id", "item_status", "quantity_status", "substitution_index"]) ||
+        typeof item.item_id !== "string" || !item.item_id || itemIds.has(item.item_id) ||
+        !valueIn(PACKED_ITEM_STATUS_OPTIONS, item.item_status) ||
+        !valueIn(QUANTITY_STATUS_OPTIONS, item.quantity_status) ||
+        !Number.isSafeInteger(item.substitution_index) ||
+        (item.item_status === "PERMITTED_SUBSTITUTION" ? (item.substitution_index as number) < 0 : item.substitution_index !== -1) ||
+        !Array.isArray(item.condition_statuses)
+      ) throw new TypeError(`${path}.item_observations[${itemIndex}] is malformed`);
+      itemIds.add(item.item_id);
+      for (const [conditionIndex, condition] of item.condition_statuses.entries()) {
+        if (
+          !isPlainObject(condition) ||
+          !hasExactKeys(condition, ["condition_index", "status"]) ||
+          condition.condition_index !== conditionIndex ||
+          !valueIn(CONDITION_STATUS_OPTIONS, condition.status)
+        ) throw new TypeError(`${path}.item_observations[${itemIndex}].condition_statuses is malformed`);
+      }
+    }
+    return;
+  }
+  if (value.effective_action === "PICKED_UP") {
+    if (!hasExactKeys(value, ["effective_action", "pickup_observation"]) || !valueIn(PICKUP_OBSERVATION_OPTIONS, value.pickup_observation)) {
+      throw new TypeError(`${path} PICKED_UP facts are malformed`);
+    }
+    return;
+  }
+  if (value.effective_action === "DELIVERED") {
+    if (!hasExactKeys(value, ["delivery_observation", "effective_action"]) || !valueIn(DELIVERY_OBSERVATION_OPTIONS, value.delivery_observation)) {
+      throw new TypeError(`${path} DELIVERED facts are malformed`);
+    }
+    return;
+  }
+  if (
+    !hasExactKeys(value, ["claim_category", "criterion_index", "criterion_kind", "effective_action", "item_id"]) ||
+    typeof value.item_id !== "string" || !value.item_id ||
+    !valueIn(CLAIM_CATEGORY_OPTIONS, value.claim_category) ||
+    !valueIn(CLAIM_CRITERION_KIND_OPTIONS, value.criterion_kind) ||
+    !Number.isSafeInteger(value.criterion_index) ||
+    (value.criterion_kind === "DELIVERY" ? value.criterion_index !== -1 : (value.criterion_index as number) < 0)
+  ) throw new TypeError(`${path} CUSTOMER_CLAIM facts are malformed`);
+}
+
+function correctionSlots(document: EvidenceDocument): Array<[CorrectionEffectiveAction, string]> {
+  if (document.action === "CURE" || document.action === "APPEAL") {
+    if (!Array.isArray(document.statements)) throw new TypeError("target batch statements are missing");
+    return document.statements.map((statement, index) => {
+      assertCorrectionStatement(statement, `target.statements[${index}]`);
+      return [statement.effective_action, statement.effective_action === "CUSTOMER_CLAIM" ? statement.item_id : ""];
+    });
+  }
+  if (!correctionActions.has(document.action as CorrectionEffectiveAction)) {
+    throw new TypeError("a correction target must have a semantic evidence action");
+  }
+  return [[document.action as CorrectionEffectiveAction, document.action === "CUSTOMER_CLAIM" ? document.item_id ?? "" : ""]];
+}
+
+function validateBatchCorrection(value: Record<string, unknown>, targets?: readonly EvidenceDocument[]): void {
+  assertExactEvidenceFields(value, ["statements", "supersedes_evidence_indices"]);
+  if (
+    value.item_id !== undefined ||
+    !Array.isArray(value.supersedes_evidence_indices) || value.supersedes_evidence_indices.length === 0 ||
+    !Array.isArray(value.statements) || value.statements.length === 0 || value.statements.length > MAX_ACTIVE_EVIDENCE
+  ) throw new TypeError("typed corrective evidence is required");
+  const directTargets = value.supersedes_evidence_indices as unknown[];
+  const statements = value.statements as unknown[];
+  let previous = -1;
+  for (const target of directTargets) {
+    if (!Number.isSafeInteger(target) || (target as number) <= previous) throw new TypeError("correction targets must be strictly increasing safe integers");
+    previous = target as number;
+  }
+  statements.forEach((statement, index) => assertCorrectionStatement(statement, `statements[${index}]`));
+  if (!targets && directTargets.length > 1 && directTargets.length !== statements.length) {
+    throw new TypeError("correction target slots and statements must have equal length");
+  }
+  const expectedSlots = targets
+    ? targets.flatMap(correctionSlots)
+    : directTargets.map((_target, index) => {
+        const statement = statements[index] as CorrectionStatement | undefined;
+        return statement ? [statement.effective_action, statement.effective_action === "CUSTOMER_CLAIM" ? statement.item_id : ""] : null;
+      }).filter((slot): slot is [CorrectionEffectiveAction, string] => slot !== null);
+  if (targets && targets.length !== directTargets.length) throw new TypeError("authoritative correction targets do not match direct target indices");
+  if (targets && expectedSlots.length !== statements.length) throw new TypeError("correction target slots and statements must have equal length");
+  expectedSlots.forEach(([action, itemId], index) => {
+    const statement = statements[index] as CorrectionStatement;
+    const actualItemId = statement.effective_action === "CUSTOMER_CLAIM" ? statement.item_id : "";
+    if (statement.effective_action !== action || actualItemId !== itemId) throw new TypeError("correction statements must preserve ordered semantic slots");
+  });
+}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
@@ -127,7 +256,7 @@ function validateActionSchema(value: Record<string, unknown>, action: EvidenceAc
     return;
   }
   if (action === "CURE" || action === "APPEAL") {
-    assertExactEvidenceFields(value, [], ["item_id"]);
+    validateBatchCorrection(value);
     return;
   }
   assertExactEvidenceFields(value, []);
@@ -201,8 +330,25 @@ function sha256Hex(text: string): HexDigest {
   return `0x${Array.from(hash, (word) => word.toString(16).padStart(8, "0")).join("")}`;
 }
 
-export function validateEvidenceDocument(value: unknown, now = new Date()): EvidenceDocument {
+export function validateEvidenceDocument<T extends EvidenceDocument>(
+  value: T,
+  now?: Date,
+  correctionTargets?: readonly EvidenceDocument[],
+): T;
+export function validateEvidenceDocument(
+  value: unknown,
+  now?: Date,
+  correctionTargets?: readonly EvidenceDocument[],
+): EvidenceDocument;
+export function validateEvidenceDocument(
+  value: unknown,
+  now = new Date(),
+  correctionTargets?: readonly EvidenceDocument[],
+): EvidenceDocument {
   const evidence = validateEvidenceShape(value);
+  if (evidence.action === "CURE" || evidence.action === "APPEAL") {
+    validateBatchCorrection(evidence as unknown as Record<string, unknown>, correctionTargets);
+  }
   const observedAt = parseTimestamp(evidence.observed_at, "observed_at");
   const submittedAt = parseTimestamp(evidence.submitted_at, "submitted_at");
   const expiresAt = parseTimestamp(evidence.expires_at, "expires_at");

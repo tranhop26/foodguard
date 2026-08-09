@@ -29,7 +29,11 @@ import {
 } from "../../components/order/authoritativeClock";
 import { ConsensusPanel } from "../../components/order/ConsensusPanel";
 import { EvidenceDrawer } from "../../components/order/EvidenceDrawer";
-import { ItemOutcomeTable, type OrderDetailView } from "../../components/order/ItemOutcomeTable";
+import {
+  ItemOutcomeTable,
+  type EvidenceRecordView,
+  type OrderDetailView,
+} from "../../components/order/ItemOutcomeTable";
 import { OrderTimeline } from "../../components/order/OrderTimeline";
 import { TransactionLifecycle } from "../../components/order/TransactionLifecycle";
 import { LocaleProvider, type Locale } from "../../lib/i18n";
@@ -401,6 +405,105 @@ describe("authoritative order outcome presentation", () => {
 });
 
 describe("evidence envelope preview", () => {
+  it("builds and submits one explicitly completed three-record cure batch", async () => {
+    const submit = vi.fn<(envelopeJson: string) => Promise<void>>().mockResolvedValue();
+    const batchOrder: OrderDetailView = {
+      ...UNRESOLVED_ORDER,
+      manifest_json: JSON.stringify({
+        items: [
+          ...JSON.parse(BASE_ORDER.manifest_json).items,
+          {
+            conditions: [],
+            item_id: "item-3",
+            name: "Dessert",
+            permitted_substitutions: [],
+            price_wei: "50",
+            quantity: 1,
+          },
+        ],
+      }),
+    };
+    const correctableEvidence = ["item-1", "item-2", "item-3"].map((targetItemId, offset) => ({
+      action: "CUSTOMER_CLAIM" as const,
+      actor_wallet: CUSTOMER,
+      chain_id: "61999",
+      contract_address: "0x4444444444444444444444444444444444444444",
+      effective_action: "CUSTOMER_CLAIM" as const,
+      evidence_index: offset + 3,
+      expires_at: "2030-01-01T00:00:00.000Z",
+      issuer_id: "foodguard-web",
+      item_id: targetItemId,
+      nonce: `claim-${offset + 1}`,
+      observed_at: "2029-12-31T00:00:00.000Z",
+      order_id: "fg-mixed",
+      schema_version: "foodguard-evidence/1" as const,
+      sha256: `0x${String(offset + 1).repeat(64)}`,
+      source_url: `https://evidence.foodguard.vn/claim-${offset + 1}.json`,
+      subject: `order:fg-mixed/item:${targetItemId}`,
+      submitted_at: "2029-12-31T00:00:00.000Z",
+    })) satisfies EvidenceRecordView[];
+
+    renderLocalized(
+      <EvidenceDrawer
+        action="CURE"
+        address={CUSTOMER}
+        chainId="61999"
+        clock={testClock(1_893_456_000n)}
+        contractAddress="0x4444444444444444444444444444444444444444"
+        correctableEvidence={correctableEvidence}
+        nonce="batch-cure-1"
+        now={new Date("2030-01-01T00:00:00.000Z")}
+        onSubmit={submit}
+        order={batchOrder}
+        sourceUrl="https://evidence.foodguard.vn/batch-cure-1.json"
+      />,
+      "en",
+    );
+
+    for (const index of [3, 4, 5]) {
+      fireEvent.click(screen.getByRole("checkbox", { name: `Select evidence #${index}` }));
+    }
+    expect(screen.getByText("3 records selected")).toBeVisible();
+    expect(screen.queryByTestId("evidence-public-json")).not.toBeInTheDocument();
+
+    const categories = screen.getAllByRole("combobox", { name: /claim category/i });
+    const kinds = screen.getAllByRole("combobox", { name: /criterion kind/i });
+    const indices = screen.getAllByRole("spinbutton", { name: /criterion index/i });
+    ["ABSENT_AT_RECEIPT", "NOT_AS_ORDERED", "HANDOFF_NOT_RECEIVED"].forEach((value, index) => {
+      fireEvent.change(categories[index], { target: { value } });
+    });
+    ["ITEM", "QUANTITY", "DELIVERY"].forEach((value, index) => {
+      fireEvent.change(kinds[index], { target: { value } });
+      fireEvent.change(indices[index], { target: { value: index === 2 ? "-1" : "0" } });
+    });
+
+    const publicDocument = await screen.findByTestId("evidence-public-json");
+    const envelope = JSON.parse(screen.getByTestId("evidence-envelope-json").textContent ?? "") as Record<string, unknown>;
+    expect(envelope).toMatchObject({
+      action: "CURE",
+      subject: "order:fg-mixed",
+      supersedes_evidence_indices: [3, 4, 5],
+    });
+    expect(envelope).not.toHaveProperty("item_id");
+    expect(envelope.statements).toEqual([
+      { claim_category: "ABSENT_AT_RECEIPT", criterion_index: 0, criterion_kind: "ITEM", effective_action: "CUSTOMER_CLAIM", item_id: "item-1" },
+      { claim_category: "NOT_AS_ORDERED", criterion_index: 0, criterion_kind: "QUANTITY", effective_action: "CUSTOMER_CLAIM", item_id: "item-2" },
+      { claim_category: "HANDOFF_NOT_RECEIVED", criterion_index: -1, criterion_kind: "DELIVERY", effective_action: "CUSTOMER_CLAIM", item_id: "item-3" },
+    ]);
+    expect(screen.getByRole("button", { name: /submit cure evidence/i })).toBeDisabled();
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      text: () => Promise.resolve(publicDocument.textContent),
+    }));
+    fireEvent.click(screen.getByRole("button", { name: /verify public source/i }));
+    await screen.findByText("Public source matches the canonical document");
+    fireEvent.click(screen.getByRole("button", { name: /submit cure evidence/i }));
+
+    await waitFor(() => expect(submit).toHaveBeenCalledTimes(1));
+    expect(submit).toHaveBeenCalledWith(screen.getByTestId("evidence-envelope-json").textContent);
+  });
+
   it("binds the append-only envelope without any verdict or prompt path", async () => {
     const submit = vi.fn<(envelopeJson: string) => Promise<void>>().mockResolvedValue();
     renderLocalized(
@@ -689,7 +792,7 @@ describe("order detail readback orchestration", () => {
     const result = await readAuthoritativeOrder("fg-mixed");
 
     expect(result.resolution?.items[0].outcome).toBe("MATCHED");
-    expect(result.evidence).toEqual([evidence]);
+    expect(result.evidence).toEqual([{ ...evidence, effective_action: "DELIVERED", evidence_index: 0 }]);
     expect(result.resolution_round).toBe("2");
   });
 
@@ -1236,7 +1339,7 @@ describe("order detail readback orchestration", () => {
   it("does not relabel an evidence consensus failure as a resolution retry", async () => {
     (window as typeof window & { ethereum?: unknown }).ethereum = {
       request: vi.fn(({ method }: { method: string }) => {
-        if (method === "eth_requestAccounts" || method === "eth_accounts") return Promise.resolve([RESTAURANT]);
+        if (method === "eth_requestAccounts" || method === "eth_accounts") return Promise.resolve([CUSTOMER]);
         if (method === "eth_chainId") return Promise.resolve("0xf22f");
         throw new Error(`unexpected wallet method ${method}`);
       }),
@@ -1258,7 +1361,26 @@ describe("order detail readback orchestration", () => {
         configuration={configuration}
         orderId="fg-mixed"
         readChainTime={vi.fn().mockResolvedValue(1893456000n)}
-        readOrder={vi.fn().mockResolvedValue(UNRESOLVED_ORDER)}
+        readOrder={vi.fn().mockResolvedValue({
+          ...UNRESOLVED_ORDER,
+          evidence: [{
+            action: "CUSTOMER_CLAIM",
+            actor_wallet: CUSTOMER,
+            chain_id: "61999",
+            contract_address: "0x4444444444444444444444444444444444444444",
+            expires_at: "2030-01-01T00:00:00.000Z",
+            issuer_id: "foodguard-web",
+            item_id: "item-1",
+            nonce: "claim-cure-target",
+            observed_at: "2029-12-31T00:00:00.000Z",
+            order_id: "fg-mixed",
+            schema_version: "foodguard-evidence/1",
+            sha256: `0x${"12".repeat(32)}`,
+            source_url: "https://evidence.foodguard.vn/claim-cure-target.json",
+            subject: "order:fg-mixed/item:item-1",
+            submitted_at: "2029-12-31T00:00:00.000Z",
+          }],
+        })}
         transact={transact}
       />,
       "en",
@@ -1269,6 +1391,10 @@ describe("order detail readback orchestration", () => {
     fireEvent.change(await screen.findByRole("textbox", { name: /public HTTPS source URL/i }), {
       target: { value: "https://evidence.foodguard.vn/cure-retry.json" },
     });
+    fireEvent.click(screen.getByRole("checkbox", { name: /select evidence #0/i }));
+    fireEvent.change(screen.getByRole("combobox", { name: /claim category 1/i }), { target: { value: "ABSENT_AT_RECEIPT" } });
+    fireEvent.change(screen.getByRole("combobox", { name: /criterion kind 1/i }), { target: { value: "ITEM" } });
+    fireEvent.change(screen.getByRole("spinbutton", { name: /criterion index 1/i }), { target: { value: "0" } });
     const publicDocument = await screen.findByTestId("evidence-public-json");
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
       ok: true,

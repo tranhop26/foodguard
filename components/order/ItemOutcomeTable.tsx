@@ -1,6 +1,8 @@
 "use client";
 
 import type {
+  CorrectionEffectiveAction,
+  CorrectionStatement,
   DeliveryOutcome,
   EvidenceDocument,
   ItemOutcome,
@@ -28,7 +30,9 @@ export interface EvidenceRecordView {
   chain_id: string;
   contract_address: string;
   expires_at: string;
+  effective_action?: CorrectionEffectiveAction | "BATCH_CORRECTION";
   envelope_json?: string;
+  evidence_index?: number;
   issuer_id: string;
   item_id?: string;
   nonce: string;
@@ -39,6 +43,8 @@ export interface EvidenceRecordView {
   source_url: string;
   subject: string;
   submitted_at: string;
+  statements?: CorrectionStatement[];
+  supersedes_evidence_indices?: number[];
 }
 
 export interface SettlementView {

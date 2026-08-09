@@ -46,12 +46,12 @@ export function AppealPanel({
     : null;
   const participant = role !== null && role !== "OUTSIDER";
   const normalizedAddress = address?.toLowerCase();
-  const cureUsed = order.evidence?.some(
-    (record) => record.action === "CURE" && record.actor_wallet.toLowerCase() === normalizedAddress,
-  ) ?? false;
-  const appealUsed = order.evidence?.some(
-    (record) => record.action === "APPEAL" && record.actor_wallet.toLowerCase() === normalizedAddress,
-  ) ?? false;
+  const authoritativeCorrectionActions = new Set(order.evidence
+    ?.filter((record) => record.actor_wallet.toLowerCase() === normalizedAddress)
+    .map((record) => record.action)
+    .filter((action) => action === "CURE" || action === "APPEAL") ?? []);
+  const cureUsed = authoritativeCorrectionActions.has("CURE");
+  const appealUsed = authoritativeCorrectionActions.has("APPEAL");
   const deadline = deadlineSeconds(order.appeal_deadline);
   const appealOpen = (
     participant &&

@@ -32,6 +32,43 @@ export type EvidenceAction =
   | "CURE"
   | "APPEAL";
 
+export type CorrectionEffectiveAction = "PACKED" | "PICKED_UP" | "DELIVERED" | "CUSTOMER_CLAIM";
+
+export type CorrectionStatement =
+  | {
+      effective_action: "PACKED";
+      item_observations: Array<{
+        item_id: string;
+        item_status: "AS_ORDERED" | "PERMITTED_SUBSTITUTION" | "ABSENT" | "DIFFERENT" | "UNKNOWN";
+        quantity_status: "EXACT" | "SHORT" | "EXCESS" | "UNKNOWN";
+        substitution_index: number;
+        condition_statuses: Array<{
+          condition_index: number;
+          status: "MET" | "NOT_MET" | "UNKNOWN";
+        }>;
+      }>;
+    }
+  | {
+      effective_action: "PICKED_UP";
+      pickup_observation: "PICKUP_CONFIRMED" | "PICKUP_FAILED" | "UNKNOWN";
+    }
+  | {
+      effective_action: "DELIVERED";
+      delivery_observation: "HANDOFF_CONFIRMED" | "HANDOFF_FAILED" | "UNKNOWN";
+    }
+  | {
+      effective_action: "CUSTOMER_CLAIM";
+      item_id: string;
+      claim_category: "ABSENT_AT_RECEIPT" | "NOT_AS_ORDERED" | "HANDOFF_NOT_RECEIVED";
+      criterion_kind: "ITEM" | "SUBSTITUTION" | "CONDITION" | "QUANTITY" | "DELIVERY";
+      criterion_index: number;
+    };
+
+export interface BatchCorrectionFacts {
+  supersedes_evidence_indices: number[];
+  statements: CorrectionStatement[];
+}
+
 export type HexDigest = `0x${string}`;
 
 export type JsonPrimitive = boolean | null | number | string;
@@ -75,5 +112,7 @@ export interface EvidenceDocument {
   contract_address: string;
   nonce: string;
   items?: OrderItem[];
-  [key: string]: JsonValue | OrderItem[] | undefined;
+  statements?: CorrectionStatement[];
+  supersedes_evidence_indices?: number[];
+  [key: string]: JsonValue | OrderItem[] | CorrectionStatement[] | undefined;
 }

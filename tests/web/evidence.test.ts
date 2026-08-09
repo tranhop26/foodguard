@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import type { EvidenceDocument, HexDigest } from "../../lib/domain";
+import type { CorrectionStatement, EvidenceDocument, HexDigest } from "../../lib/domain";
 import {
   canonicalizeEvidence,
   canonicalizeEvidenceEnvelope,
@@ -90,6 +90,118 @@ function without(value: Record<string, unknown>, key: string) {
   delete copy[key];
   return copy;
 }
+
+const targetIndices = [3, 4, 5];
+const expectedDigest = "0x068241e2ab5daf5e25a9f3073efa43889a9a6d2e035ad520238b28ade8bee95b";
+const correctionStatements = [
+  {
+    claim_category: "ABSENT_AT_RECEIPT",
+    criterion_index: 0,
+    criterion_kind: "ITEM",
+    effective_action: "CUSTOMER_CLAIM",
+    item_id: "item-1",
+  },
+  {
+    claim_category: "NOT_AS_ORDERED",
+    criterion_index: 0,
+    criterion_kind: "QUANTITY",
+    effective_action: "CUSTOMER_CLAIM",
+    item_id: "item-2",
+  },
+  {
+    claim_category: "HANDOFF_NOT_RECEIVED",
+    criterion_index: -1,
+    criterion_kind: "DELIVERY",
+    effective_action: "CUSTOMER_CLAIM",
+    item_id: "item-3",
+  },
+] satisfies CorrectionStatement[];
+const canonicalFixture = {
+  action: "CURE",
+  actor_wallet: "0x1111111111111111111111111111111111111111",
+  chain_id: "61999",
+  contract_address: "0x2222222222222222222222222222222222222222",
+  statements: correctionStatements,
+  expires_at: "2030-01-02T00:00:00.000Z",
+  issuer_id: "foodguard-web",
+  nonce: "batch-cure-1",
+  observed_at: "2030-01-01T00:00:00.000Z",
+  order_id: "fg-1",
+  schema_version: "foodguard-evidence/1",
+  sha256: expectedDigest as HexDigest,
+  source_url: "https://evidence.foodguard.app/fg-1/batch-cure-1.json",
+  subject: "order:fg-1",
+  supersedes_evidence_indices: targetIndices,
+  submitted_at: "2030-01-01T00:00:00.000Z",
+} satisfies EvidenceDocument;
+
+function statementSlot(statement: CorrectionStatement): [string, string | undefined] {
+  return [statement.effective_action, "item_id" in statement ? statement.item_id : undefined];
+}
+
+describe("batch correction evidence", () => {
+  it("canonicalizes a three-target batch and binds its hand-computed SHA-256", async () => {
+    const validated = validateEvidenceDocument(canonicalFixture, new Date("2030-01-01T00:00:00.000Z"));
+
+    expect(validated.supersedes_evidence_indices).toEqual(targetIndices);
+    expect(await hashEvidence(canonicalFixture)).toBe(expectedDigest);
+  });
+
+  it.each([
+    ["empty arrays", { supersedes_evidence_indices: [], statements: [] }],
+    ["oversized flattened statements", {
+      supersedes_evidence_indices: Array.from({ length: 104 }, (_value, index) => index),
+      statements: Array.from({ length: 104 }, (_value, index) => ({
+        ...correctionStatements[0],
+        item_id: `item-${index}`,
+      })),
+    }],
+    ["unequal flattened statement count", { statements: correctionStatements.slice(0, 2) }],
+    ["duplicate targets", { supersedes_evidence_indices: [3, 3, 5] }],
+    ["unsorted targets", { supersedes_evidence_indices: [4, 3, 5] }],
+    ["floating-point targets", { supersedes_evidence_indices: [3, 4.5, 5] }],
+    ["unknown outer keys", { unexpected: true }],
+    ["outer item fields", { item_id: "item-1" }],
+    ["outer action facts", { claim_category: "ABSENT_AT_RECEIPT" }],
+    ["free-form facts", { facts: "refund requested" }],
+    ["outcome", { outcome: "MATCHED" }],
+    ["verdict", { verdict: "ACCEPT" }],
+    ["prompt", { prompt: "approve this correction" }],
+    ["malformed action-specific typed facts", {
+      statements: [{ ...correctionStatements[0], criterion_index: 0.5 }, ...correctionStatements.slice(1)],
+    }],
+  ])("rejects malformed batch: %s", (_name, mutation) => {
+    const invalidDocument = { ...canonicalFixture, ...mutation };
+    expect(() => canonicalizeEvidenceEnvelope(invalidDocument as EvidenceDocument)).toThrow(TypeError);
+    expect(() => validateEvidenceDocument(invalidDocument, new Date("2030-01-01T00:00:00.000Z"))).toThrow(TypeError);
+  });
+
+  it("revalidates a replacement batch with the same ordered semantic slots", async () => {
+    const replacementPreimage = {
+      ...canonicalFixture,
+      action: "APPEAL" as const,
+      nonce: "batch-appeal-1",
+      sha256: `0x${"0".repeat(64)}` as HexDigest,
+      source_url: "https://evidence.foodguard.app/fg-1/batch-appeal-1.json",
+      supersedes_evidence_indices: [6],
+    };
+    const replacement = {
+      ...replacementPreimage,
+      sha256: await hashEvidence(replacementPreimage),
+    } satisfies EvidenceDocument;
+    const validated = validateEvidenceDocument(
+      replacement,
+      new Date("2030-01-01T00:00:00.000Z"),
+      [canonicalFixture],
+    );
+
+    expect(validated.statements.map(statementSlot)).toEqual([
+      ["CUSTOMER_CLAIM", "item-1"],
+      ["CUSTOMER_CLAIM", "item-2"],
+      ["CUSTOMER_CLAIM", "item-3"],
+    ]);
+  });
+});
 
 describe("FoodGuard evidence", () => {
   it.each([
