@@ -1,0 +1,114 @@
+{
+  "version": "foodguard-catalog/1",
+  "locale": "vi",
+  "restaurants": [
+    {
+      "restaurant_id": "com-nha-ben-hien",
+      "name": "Cơm Nhà Bên Hiên",
+      "description": "Mâm cơm gọn gàng, vị nhà và nguyên liệu được mô tả rõ trong từng món.",
+      "neighborhood": "Quận 3",
+      "categories": ["Cơm Việt"],
+      "delivery_time_minutes": [24, 32],
+      "image_src": "/images/foodguard/rice-bowl.webp",
+      "image_alt": "Tô cơm gà nướng với rau thơm, dưa leo và đồ chua",
+      "featured_item": {
+        "item_id": "ben-hien-com-ga",
+        "name": "Cơm gà nướng rau thơm",
+        "quantity": 1,
+        "permitted_substitutions": [],
+        "price_wei": "420000000000000000",
+        "conditions": ["gà nướng", "kèm rau thơm", "phục vụ ấm"]
+      }
+    },
+    {
+      "restaurant_id": "pho-som",
+      "name": "Phở Sớm",
+      "description": "Nước dùng trong, thịt cắt dày và phần rau ăn kèm đóng riêng cho chuyến đi.",
+      "neighborhood": "Bình Thạnh",
+      "categories": ["Món nước"],
+      "delivery_time_minutes": [18, 28],
+      "image_src": "/images/foodguard/pho-bowl.webp",
+      "image_alt": "Tô phở bò với giá, húng quế, ớt và chanh",
+      "featured_item": {
+        "item_id": "pho-som-tai-nam",
+        "name": "Phở tái nạm",
+        "quantity": 1,
+        "permitted_substitutions": ["không hành"],
+        "price_wei": "390000000000000000",
+        "conditions": ["nước dùng đóng riêng", "kèm rau", "không hành khi yêu cầu"]
+      }
+    },
+    {
+      "restaurant_id": "bep-la",
+      "name": "Bếp Lá",
+      "description": "Bếp chay theo mùa với rau xanh, nấm áp chảo và nước sốt làm trong ngày.",
+      "neighborhood": "Phú Nhuận",
+      "categories": ["Món chay"],
+      "delivery_time_minutes": [22, 30],
+      "image_src": "/images/foodguard/vegetarian-spread.webp",
+      "image_alt": "Mâm món chay với đậu hũ, nấm, rau xanh, gỏi và cuốn",
+      "featured_item": {
+        "item_id": "bep-la-mam-mua",
+        "name": "Mâm chay theo mùa",
+        "quantity": 1,
+        "permitted_substitutions": ["rau theo mùa tương đương"],
+        "price_wei": "480000000000000000",
+        "conditions": ["thuần chay", "ba món", "sốt đóng riêng"]
+      }
+    },
+    {
+      "restaurant_id": "ganh-cuon",
+      "name": "Gánh Cuốn",
+      "description": "Cuốn tươi làm theo đơn, nhiều rau và phần sốt được niêm riêng để giữ kết cấu.",
+      "neighborhood": "Quận 1",
+      "categories": ["Cuốn & gỏi"],
+      "delivery_time_minutes": [16, 24],
+      "image_src": "/images/foodguard/vegetarian-spread.webp",
+      "image_alt": "Cuốn rau tươi bên cạnh đậu hũ, nấm và nước sốt mè",
+      "featured_item": {
+        "item_id": "ganh-cuon-thap-cam",
+        "name": "Cuốn rau thập cẩm",
+        "quantity": 1,
+        "permitted_substitutions": ["đổi sốt mè sang tương gừng"],
+        "price_wei": "280000000000000000",
+        "conditions": ["bốn cuốn", "sốt đóng riêng", "không đậu phộng khi yêu cầu"]
+      }
+    },
+    {
+      "restaurant_id": "chao-lua",
+      "name": "Chảo Lửa",
+      "description": "Món nướng đậm vị, chia phần rõ ràng và đóng gói để hơi nóng không làm mềm rau.",
+      "neighborhood": "Quận 10",
+      "categories": ["Cơm Việt"],
+      "delivery_time_minutes": [26, 36],
+      "image_src": "/images/foodguard/rice-bowl.webp",
+      "image_alt": "Cơm trắng với gà nướng vàng, rau thơm và dưa góp",
+      "featured_item": {
+        "item_id": "chao-lua-ga-nuong",
+        "name": "Gà nướng chảo cơm trắng",
+        "quantity": 1,
+        "permitted_substitutions": [],
+        "price_wei": "440000000000000000",
+        "conditions": ["một phần đùi gà", "cơm trắng", "rau đóng riêng"]
+      }
+    },
+    {
+      "restaurant_id": "tram-nuoc-leo",
+      "name": "Trạm Nước Lèo",
+      "description": "Những tô nước nóng dễ nhận diện thành phần, đóng tách nước dùng cho đường xa.",
+      "neighborhood": "Tân Bình",
+      "categories": ["Món nước"],
+      "delivery_time_minutes": [20, 29],
+      "image_src": "/images/foodguard/pho-bowl.webp",
+      "image_alt": "Tô phở bò đầy đặn với rau húng, giá, ớt đỏ và chanh",
+      "featured_item": {
+        "item_id": "tram-nuoc-leo-pho-bo",
+        "name": "Phở bò đầy đặn",
+        "quantity": 1,
+        "permitted_substitutions": ["bún gạo thay bánh phở"],
+        "price_wei": "410000000000000000",
+        "conditions": ["nước dùng đóng riêng", "thịt bò chín vừa", "kèm rau"]
+      }
+    }
+  ]
+}

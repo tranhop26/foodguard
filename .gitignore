@@ -3,9 +3,15 @@
 work/
 node_modules/
 .next/
+.next-e2e-*/
 dist/
 coverage/
+test-results/
+*.tsbuildinfo
 .env
 .env.*
 !.env.example
 *.log
+__pycache__/
+
+.vercel/

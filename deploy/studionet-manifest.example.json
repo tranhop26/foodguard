@@ -1,0 +1,28 @@
+{
+  "schema_version": "foodguard-studionet-deployment/1",
+  "status": "EXAMPLE_ONLY_NON_DEPLOYABLE",
+  "deployable": false,
+  "network": {
+    "name": "GenLayer StudioNet",
+    "chain_id": 61999
+  },
+  "source": {
+    "path": "contracts/food_guard.py",
+    "sha256": "a2d4d113f023a20eba3f24d5287bd82995348c6f3ea2b24a704d7dd531b2f3ee",
+    "git_commit": ""
+  },
+  "deployment": {
+    "contract_address": "",
+    "transaction_hash": "",
+    "explorer_url": "",
+    "deployer_wallet": "",
+    "confirmed_at": ""
+  },
+  "confirmation": {
+    "wallet_and_action_confirmed": false,
+    "execution_success_verified": false,
+    "authoritative_readback_verified": false,
+    "source_hash_match_verified": false
+  },
+  "note": "Schema example only. The source SHA-256 is the actual reviewed contracts/food_guard.py byte hash. Git commit is intentionally empty because a commit cannot contain its own final hash. Empty deployment identity, transaction, address, wallet, explorer, confirmation time, and URL values are intentional; this file cannot authorize or evidence a deployment."
+}

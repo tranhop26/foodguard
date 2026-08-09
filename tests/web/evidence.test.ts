@@ -1,0 +1,642 @@
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+import { describe, expect, it } from "vitest";
+
+import type { CorrectionStatement, EvidenceDocument, HexDigest, OrderItem } from "../../lib/domain";
+import {
+  canonicalizeEvidence,
+  canonicalizeEvidenceEnvelope,
+  hashEvidence,
+  validateEvidenceDocument,
+} from "../../lib/evidence";
+import claimFixture from "../../public/evidence/order-fg-demo-claim-missing-item.json";
+import batchClaimItem1Fixture from "../../public/evidence/order-fg-batch-demo-claim-item-1.json";
+import batchClaimItem2Fixture from "../../public/evidence/order-fg-batch-demo-claim-item-2.json";
+import batchClaimItem3Fixture from "../../public/evidence/order-fg-batch-demo-claim-item-3.json";
+import batchCureFixture from "../../public/evidence/order-fg-batch-demo-cure-batch.json";
+import batchDeliveredFixture from "../../public/evidence/order-fg-batch-demo-delivered.json";
+import batchManifestFixture from "../../public/evidence/order-fg-batch-demo-manifest.json";
+import batchPackedFixture from "../../public/evidence/order-fg-batch-demo-packed.json";
+import batchPickupFixture from "../../public/evidence/order-fg-batch-demo-pickup.json";
+import deliveredFixture from "../../public/evidence/order-fg-demo-delivered.json";
+import manifestFixture from "../../public/evidence/order-fg-demo-manifest.json";
+import packedFixture from "../../public/evidence/order-fg-demo-packed.json";
+import pickupFixture from "../../public/evidence/order-fg-demo-pickup.json";
+
+const FIXTURE_DIGESTS = Object.freeze({
+  "order-fg-demo-claim-missing-item.json": "0x369f36ce1ee1dfa295188ac14bcb9a4bb87d82c345b676f27b4d6f6d9e5310c0",
+  "order-fg-batch-demo-claim-item-1.json": "0x218027b53de26811659a4115e1abd473095d5484a366a978eade19112b3f9153",
+  "order-fg-batch-demo-claim-item-2.json": "0x2aae37460a744592de2ab5210c1a1314b375d18b31745cdb5bdae39c900afce7",
+  "order-fg-batch-demo-claim-item-3.json": "0xea1cba3872886fd6035d2638d1050a3489ea79b599ab35898d58c57cc3f64f31",
+  "order-fg-batch-demo-cure-batch.json": "0x41548c1306fd12785adc5dd6400b2ac235849777ba9de31dea4e7f367239587c",
+  "order-fg-batch-demo-delivered.json": "0xf96d1e24534f191172fd59f3208ff2365a370de9203bcfecc47e6c6b1b6bf040",
+  "order-fg-batch-demo-manifest.json": "0x8f539b60979571dad557f25b32d5804291fe868ade8814a4576d77ec440240e5",
+  "order-fg-batch-demo-packed.json": "0x392829da88b3055235f1e06c955fd2ed1cb4854836834dacf528ae353844b64d",
+  "order-fg-batch-demo-pickup.json": "0x142a08c9acd79fa0778ad379baf1d85ad8dcef94717c0a1ab6745b5444efe13a",
+  "order-fg-demo-delivered.json": "0x1f75f32767e97a2dfe7bdec507fe3b963d7ff151e3a13cb5a169a1570bfccd0f",
+  "order-fg-demo-manifest.json": "0xc8b3c3caf0d9c51e79a636095a5c8b1a603b61a39bc80027e7ae9ab91ac76ac5",
+  "order-fg-demo-packed.json": "0x115ea48350deee4d01615855dd5fa6a7b204be04f1e2b22bd67b7df768ae24ac",
+  "order-fg-demo-pickup.json": "0x691e62959c1ee8966a63c97496a02bff33bd396a9890f16881d2b8b5d6037222",
+} as const satisfies Record<string, HexDigest>);
+
+const validEvidence = {
+  schema_version: "foodguard-evidence/1",
+  order_id: "fg-1",
+  subject: "order:fg-1",
+  action: "ORDER_MANIFEST",
+  actor_wallet: "0x1111111111111111111111111111111111111111",
+  issuer_id: "restaurant-demo",
+  source_url: "https://evidence.example/order-fg-1.json",
+  sha256: "0x1a29f5cfc265fa8b7c4b265ec12d3b8012184a1c77d72844dd60bc5cfe6d3dc3" as HexDigest,
+  observed_at: "2026-08-08T00:00:00.000Z",
+  submitted_at: "2026-08-08T00:01:00.000Z",
+  expires_at: "2026-08-08T01:00:00.000Z",
+  chain_id: "genlayer-studionet",
+  contract_address: "0x2222222222222222222222222222222222222222",
+  nonce: "manifest-1",
+  items: [
+    {
+      item_id: "item-1",
+      name: "Com tam",
+      quantity: 1,
+      permitted_substitutions: [],
+      price_wei: "1000000000000000000",
+      conditions: ["served warm"],
+    },
+  ],
+} satisfies EvidenceDocument;
+
+const fixtureA = validEvidence;
+const fixtureB = {
+  nonce: validEvidence.nonce,
+  subject: validEvidence.subject,
+  contract_address: validEvidence.contract_address,
+  chain_id: validEvidence.chain_id,
+  expires_at: validEvidence.expires_at,
+  submitted_at: validEvidence.submitted_at,
+  observed_at: validEvidence.observed_at,
+  sha256: validEvidence.sha256,
+  source_url: validEvidence.source_url,
+  issuer_id: validEvidence.issuer_id,
+  actor_wallet: validEvidence.actor_wallet,
+  action: validEvidence.action,
+  order_id: validEvidence.order_id,
+  schema_version: validEvidence.schema_version,
+  items: validEvidence.items,
+} satisfies EvidenceDocument;
+
+const nestedReorderedFixture = {
+  ...fixtureB,
+  items: [
+    {
+      conditions: ["served warm"],
+      price_wei: "1000000000000000000",
+      permitted_substitutions: [],
+      quantity: 1,
+      name: "Com tam",
+      item_id: "item-1",
+    },
+  ],
+} satisfies EvidenceDocument;
+
+function without(value: Record<string, unknown>, key: string) {
+  const copy = { ...value };
+  delete copy[key];
+  return copy;
+}
+
+function canonicalTestJson(value: unknown): string {
+  if (value === null || typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalTestJson).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalTestJson(record[key])}`).join(",")}}`;
+}
+
+function withIndependentDigest(preimage: Record<string, unknown>): EvidenceDocument {
+  const sha256 = `0x${createHash("sha256").update(canonicalTestJson(preimage), "utf8").digest("hex")}` as HexDigest;
+  return { ...preimage, sha256 } as unknown as EvidenceDocument;
+}
+
+function contractBaseEvidence(
+  action: "PACKED" | "PICKED_UP" | "DELIVERED" | "CUSTOMER_CLAIM",
+  facts: Record<string, unknown>,
+  itemId = "",
+): EvidenceDocument {
+  const orderId = "fg-demo";
+  const actor = action === "PACKED"
+    ? "0x2222222222222222222222222222222222222222"
+    : action === "CUSTOMER_CLAIM"
+      ? "0x1111111111111111111111111111111111111111"
+      : "0x3333333333333333333333333333333333333333";
+  return withIndependentDigest({
+    action,
+    actor_wallet: actor,
+    chain_id: "61999",
+    contract_address: "0x4444444444444444444444444444444444444444",
+    expires_at: "2030-01-02T00:00:00.000Z",
+    ...facts,
+    issuer_id: "foodguard-web",
+    ...(itemId ? { item_id: itemId } : {}),
+    nonce: `contract-valid-${action.toLowerCase()}`,
+    observed_at: "2030-01-01T00:00:00.000Z",
+    order_id: orderId,
+    schema_version: "foodguard-evidence/1",
+    source_url: `https://evidence.foodguard.app/${orderId}/${action.toLowerCase()}.json`,
+    subject: itemId ? `order:${orderId}/item:${itemId}` : `order:${orderId}`,
+    submitted_at: "2030-01-01T00:00:00.000Z",
+  });
+}
+
+const contractValidBaseEvidence = [
+  ["PACKED", contractBaseEvidence("PACKED", {
+    item_observations: manifestFixture.items.map((item, itemIndex) => ({
+      condition_statuses: item.conditions.map((_condition, conditionIndex) => ({
+        condition_index: conditionIndex,
+        status: itemIndex === 0 && conditionIndex === 1 ? "UNKNOWN" : "MET",
+      })),
+      item_id: item.item_id,
+      item_status: itemIndex === 1 ? "PERMITTED_SUBSTITUTION" : "AS_ORDERED",
+      quantity_status: itemIndex === 1 ? "SHORT" : "EXACT",
+      substitution_index: itemIndex === 1 ? 0 : -1,
+    })),
+  })],
+  ["PICKED_UP", contractBaseEvidence("PICKED_UP", { pickup_observation: "UNKNOWN" })],
+  ["DELIVERED", contractBaseEvidence("DELIVERED", { delivery_observation: "UNKNOWN" })],
+  ["CUSTOMER_CLAIM", contractBaseEvidence("CUSTOMER_CLAIM", {
+    claim_category: "NOT_AS_ORDERED",
+    criterion_index: 0,
+    criterion_kind: "CONDITION",
+  }, "item-2")],
+] as const;
+
+const targetIndices = [3, 4, 5];
+const expectedDigest = "0x068241e2ab5daf5e25a9f3073efa43889a9a6d2e035ad520238b28ade8bee95b";
+const correctionStatements = [
+  {
+    claim_category: "ABSENT_AT_RECEIPT",
+    criterion_index: 0,
+    criterion_kind: "ITEM",
+    effective_action: "CUSTOMER_CLAIM",
+    item_id: "item-1",
+  },
+  {
+    claim_category: "NOT_AS_ORDERED",
+    criterion_index: 0,
+    criterion_kind: "QUANTITY",
+    effective_action: "CUSTOMER_CLAIM",
+    item_id: "item-2",
+  },
+  {
+    claim_category: "HANDOFF_NOT_RECEIVED",
+    criterion_index: -1,
+    criterion_kind: "DELIVERY",
+    effective_action: "CUSTOMER_CLAIM",
+    item_id: "item-3",
+  },
+] satisfies CorrectionStatement[];
+const canonicalFixture = {
+  action: "CURE",
+  actor_wallet: "0x1111111111111111111111111111111111111111",
+  chain_id: "61999",
+  contract_address: "0x2222222222222222222222222222222222222222",
+  statements: correctionStatements,
+  expires_at: "2030-01-02T00:00:00.000Z",
+  issuer_id: "foodguard-web",
+  nonce: "batch-cure-1",
+  observed_at: "2030-01-01T00:00:00.000Z",
+  order_id: "fg-1",
+  schema_version: "foodguard-evidence/1",
+  sha256: expectedDigest as HexDigest,
+  source_url: "https://evidence.foodguard.app/fg-1/batch-cure-1.json",
+  subject: "order:fg-1",
+  supersedes_evidence_indices: targetIndices,
+  submitted_at: "2030-01-01T00:00:00.000Z",
+} satisfies EvidenceDocument;
+
+function statementSlot(statement: CorrectionStatement): [string, string | undefined] {
+  return [statement.effective_action, "item_id" in statement ? statement.item_id : undefined];
+}
+
+describe("batch correction evidence", () => {
+  it("canonicalizes a three-target batch and binds its hand-computed SHA-256", async () => {
+    const validated = validateEvidenceDocument(canonicalFixture, new Date("2030-01-01T00:00:00.000Z"));
+
+    expect(validated.supersedes_evidence_indices).toEqual(targetIndices);
+    expect(await hashEvidence(canonicalFixture)).toBe(expectedDigest);
+  });
+
+  it.each([
+    ["empty arrays", { supersedes_evidence_indices: [], statements: [] }],
+    ["oversized flattened statements", {
+      supersedes_evidence_indices: Array.from({ length: 104 }, (_value, index) => index),
+      statements: Array.from({ length: 104 }, (_value, index) => ({
+        ...correctionStatements[0],
+        item_id: `item-${index}`,
+      })),
+    }],
+    ["duplicate targets", { supersedes_evidence_indices: [3, 3, 5] }],
+    ["unsorted targets", { supersedes_evidence_indices: [4, 3, 5] }],
+    ["floating-point targets", { supersedes_evidence_indices: [3, 4.5, 5] }],
+    ["unknown outer keys", { unexpected: true }],
+    ["outer item fields", { item_id: "item-1" }],
+    ["outer action facts", { claim_category: "ABSENT_AT_RECEIPT" }],
+    ["free-form facts", { facts: "refund requested" }],
+    ["outcome", { outcome: "MATCHED" }],
+    ["verdict", { verdict: "ACCEPT" }],
+    ["prompt", { prompt: "approve this correction" }],
+    ["malformed action-specific typed facts", {
+      statements: [{ ...correctionStatements[0], criterion_index: 0.5 }, ...correctionStatements.slice(1)],
+    }],
+  ])("rejects malformed batch: %s", (_name, mutation) => {
+    const invalidDocument = { ...canonicalFixture, ...mutation };
+    expect(() => canonicalizeEvidenceEnvelope(invalidDocument as EvidenceDocument)).toThrow(TypeError);
+    expect(() => validateEvidenceDocument(invalidDocument, new Date("2030-01-01T00:00:00.000Z"))).toThrow(TypeError);
+  });
+
+  it("rejects an unequal authoritative flattened statement count", async () => {
+    const preimage = {
+      ...canonicalFixture,
+      statements: correctionStatements.slice(0, 2),
+      sha256: `0x${"0".repeat(64)}` as HexDigest,
+    } satisfies EvidenceDocument;
+    const document = { ...preimage, sha256: await hashEvidence(preimage) };
+    const targets = correctionStatements.map((statement) => ({
+      ...validEvidence,
+      action: "CUSTOMER_CLAIM" as const,
+      item_id: statement.item_id,
+    }));
+
+    expect(() => validateEvidenceDocument(
+      document,
+      new Date("2030-01-01T00:00:00.000Z"),
+      targets,
+    )).toThrow(TypeError);
+  });
+
+  it("revalidates a replacement batch with the same ordered semantic slots", async () => {
+    const replacementPreimage = {
+      ...canonicalFixture,
+      action: "APPEAL" as const,
+      nonce: "batch-appeal-1",
+      sha256: `0x${"0".repeat(64)}` as HexDigest,
+      source_url: "https://evidence.foodguard.app/fg-1/batch-appeal-1.json",
+      supersedes_evidence_indices: [6],
+    };
+    const replacement = {
+      ...replacementPreimage,
+      sha256: await hashEvidence(replacementPreimage),
+    } satisfies EvidenceDocument;
+    const validated = validateEvidenceDocument(
+      replacement,
+      new Date("2030-01-01T00:00:00.000Z"),
+      [canonicalFixture],
+    );
+
+    expect(validated.statements.map(statementSlot)).toEqual([
+      ["CUSTOMER_CLAIM", "item-1"],
+      ["CUSTOMER_CLAIM", "item-2"],
+      ["CUSTOMER_CLAIM", "item-3"],
+    ]);
+  });
+
+  const packedManifest = [
+    {
+      conditions: ["sealed", "warm"],
+      item_id: "item-1",
+      name: "Pho",
+      permitted_substitutions: ["Bun bo"],
+      price_wei: "400",
+      quantity: 1,
+    },
+    {
+      conditions: [],
+      item_id: "item-2",
+      name: "Tea",
+      permitted_substitutions: [],
+      price_wei: "100",
+      quantity: 1,
+    },
+  ] satisfies OrderItem[];
+  const packedStatement = {
+    effective_action: "PACKED",
+    item_observations: [
+      {
+        condition_statuses: [
+          { condition_index: 0, status: "MET" },
+          { condition_index: 1, status: "UNKNOWN" },
+        ],
+        item_id: "item-1",
+        item_status: "PERMITTED_SUBSTITUTION",
+        quantity_status: "EXACT",
+        substitution_index: 0,
+      },
+      {
+        condition_statuses: [],
+        item_id: "item-2",
+        item_status: "UNKNOWN",
+        quantity_status: "UNKNOWN",
+        substitution_index: -1,
+      },
+    ],
+  } satisfies CorrectionStatement;
+  const packedTarget = { ...validEvidence, action: "PACKED" as const };
+
+  async function packedBatch(statement: CorrectionStatement): Promise<EvidenceDocument> {
+    const preimage = {
+      ...canonicalFixture,
+      statements: [statement],
+      supersedes_evidence_indices: [3],
+      sha256: `0x${"0".repeat(64)}` as HexDigest,
+    } satisfies EvidenceDocument;
+    return { ...preimage, sha256: await hashEvidence(preimage) };
+  }
+
+  it("binds PACKED correction observations to the real manifest order and bounds", async () => {
+    const document = await packedBatch(packedStatement);
+    expect(validateEvidenceDocument(
+      document,
+      new Date("2030-01-01T00:00:00.000Z"),
+      [packedTarget],
+      packedManifest,
+    )).toEqual(document);
+  });
+
+  it.each([
+    ["reordered manifest observations", {
+      ...packedStatement,
+      item_observations: [...packedStatement.item_observations].reverse(),
+    }],
+    ["missing manifest observation", {
+      ...packedStatement,
+      item_observations: packedStatement.item_observations.slice(0, 1),
+    }],
+    ["substitution index beyond the permitted set", {
+      ...packedStatement,
+      item_observations: [
+        { ...packedStatement.item_observations[0], substitution_index: 1 },
+        packedStatement.item_observations[1],
+      ],
+    }],
+    ["wrong condition count", {
+      ...packedStatement,
+      item_observations: [
+        { ...packedStatement.item_observations[0], condition_statuses: packedStatement.item_observations[0].condition_statuses.slice(0, 1) },
+        packedStatement.item_observations[1],
+      ],
+    }],
+  ])("rejects PACKED correction facts with %s", async (_name, statement) => {
+    const document = await packedBatch(statement as CorrectionStatement);
+    expect(() => validateEvidenceDocument(
+      document,
+      new Date("2030-01-01T00:00:00.000Z"),
+      [packedTarget],
+      packedManifest,
+    )).toThrow(TypeError);
+  });
+
+  it("rejects a non-positional PACKED condition index before hashing", async () => {
+    await expect(packedBatch({
+      ...packedStatement,
+      item_observations: [
+        {
+          ...packedStatement.item_observations[0],
+          condition_statuses: [
+            packedStatement.item_observations[0].condition_statuses[0],
+            { condition_index: 2, status: "UNKNOWN" as const },
+          ],
+        },
+        packedStatement.item_observations[1],
+      ],
+    })).rejects.toThrow(TypeError);
+  });
+
+  it.each([
+    ["missing manifest item", "item-missing", "ITEM", 0],
+    ["out-of-range ITEM index", "item-1", "ITEM", 1],
+    ["out-of-range SUBSTITUTION index", "item-2", "SUBSTITUTION", 1],
+    ["out-of-range CONDITION index 999", "item-1", "CONDITION", 999],
+    ["out-of-range QUANTITY index", "item-1", "QUANTITY", 1],
+    ["out-of-range DELIVERY index", "item-1", "DELIVERY", 0],
+  ] as const)("rejects manifest-invalid correction claim: %s", (_name, claimItemId, criterionKind, criterionIndex) => {
+    const statement = {
+      claim_category: "NOT_AS_ORDERED",
+      criterion_index: criterionIndex,
+      criterion_kind: criterionKind,
+      effective_action: "CUSTOMER_CLAIM",
+      item_id: claimItemId,
+    } satisfies CorrectionStatement;
+    const document = withIndependentDigest({
+      ...without(canonicalFixture as unknown as Record<string, unknown>, "sha256"),
+      statements: [statement],
+      supersedes_evidence_indices: [3],
+    });
+    const target = contractBaseEvidence("CUSTOMER_CLAIM", {
+      claim_category: "NOT_AS_ORDERED",
+      criterion_index: criterionKind === "DELIVERY" ? -1 : 0,
+      criterion_kind: criterionKind,
+    }, claimItemId);
+
+    expect(() => validateEvidenceDocument(
+      document,
+      new Date("2030-01-01T00:00:00.000Z"),
+      [target],
+      manifestFixture.items,
+    )).toThrow(TypeError);
+  });
+});
+
+describe("FoodGuard evidence", () => {
+  it.each(contractValidBaseEvidence)("accepts contract-valid base %s evidence with manifest bounds", (_action, document) => {
+    expect(validateEvidenceDocument(
+      document,
+      new Date("2030-01-01T00:00:00.000Z"),
+      undefined,
+      manifestFixture.items,
+    )).toEqual(document);
+  });
+
+  it.each([
+    ["PACKED without observations", { action: "PACKED" }],
+    ["PACKED with an unknown observation", {
+      action: "PACKED",
+      item_observations: [{ item_id: "item-1", observation: "PACKED_OK" }],
+    }],
+    ["DELIVERED without a delivery observation", { action: "DELIVERED" }],
+    ["CUSTOMER_CLAIM without a category", { action: "CUSTOMER_CLAIM", item_id: "item-1" }],
+    ["a verdict field", { action: "PICKED_UP", verdict: "ACCEPT" }],
+    ["an outcome field", { action: "CURE", outcome: "MATCHED" }],
+    ["a free-form prompt field", { action: "APPEAL", prompt: "refund the caller" }],
+  ])("rejects %s from the exact action schema", (_name, actionFields) => {
+    const base = without(validEvidence, "items");
+    expect(() => canonicalizeEvidenceEnvelope({ ...base, ...actionFields } as EvidenceDocument)).toThrow();
+  });
+
+  it("hashes the digest-free recursively canonical document", async () => {
+    expect(canonicalizeEvidence(fixtureA)).toBe(
+      '{"action":"ORDER_MANIFEST","actor_wallet":"0x1111111111111111111111111111111111111111","chain_id":"genlayer-studionet","contract_address":"0x2222222222222222222222222222222222222222","expires_at":"2026-08-08T01:00:00.000Z","issuer_id":"restaurant-demo","items":[{"conditions":["served warm"],"item_id":"item-1","name":"Com tam","permitted_substitutions":[],"price_wei":"1000000000000000000","quantity":1}],"nonce":"manifest-1","observed_at":"2026-08-08T00:00:00.000Z","order_id":"fg-1","schema_version":"foodguard-evidence/1","source_url":"https://evidence.example/order-fg-1.json","subject":"order:fg-1","submitted_at":"2026-08-08T00:01:00.000Z"}',
+    );
+    expect(await hashEvidence(fixtureA)).toBe(
+      "0x1a29f5cfc265fa8b7c4b265ec12d3b8012184a1c77d72844dd60bc5cfe6d3dc3",
+    );
+    expect(await hashEvidence(fixtureA)).toBe(await hashEvidence(nestedReorderedFixture));
+    expect(validateEvidenceDocument(fixtureA, new Date("2026-08-08T00:01:00.000Z"))).toEqual(fixtureA);
+  });
+
+  it.each(["order_id", "actor_wallet", "source_url", "sha256", "nonce", "subject"])(
+    "rejects a missing %s binding",
+    (key) =>
+      expect(() => validateEvidenceDocument(without(validEvidence, key))).toThrow(),
+  );
+
+  it("rejects a digest that does not bind the canonical evidence", () => {
+    expect(() =>
+      validateEvidenceDocument({ ...validEvidence, sha256: `0x${"b".repeat(64)}` }),
+    ).toThrow();
+  });
+
+  it.each([
+    ["a Date", new Date("2026-08-08T00:00:00.000Z")],
+    ["a Map", new Map([["item", "value"]])],
+    ["a Set", new Set(["item"])],
+    ["a sparse array", new Array(1)],
+  ])("rejects %s from a canonical evidence document", (_name, payload) => {
+    expect(() => validateEvidenceDocument({ ...validEvidence, payload } as unknown)).toThrow();
+  });
+
+  it.each([
+    ["malformed", { observed_at: "not-a-time" }],
+    ["expired", { expires_at: "2026-08-07T23:59:59.999Z" }],
+    ["out of order", { observed_at: "2026-08-08T00:02:00.000Z" }],
+  ])("rejects %s timestamps", (_name, timestamps) => {
+    expect(() =>
+      validateEvidenceDocument(
+        { ...validEvidence, ...timestamps },
+        new Date("2026-08-08T00:01:00.000Z"),
+      ),
+    ).toThrow();
+  });
+
+  it("rejects evidence at the exact expiry boundary", () => {
+    expect(() => validateEvidenceDocument(
+      validEvidence,
+      new Date(validEvidence.expires_at),
+    )).toThrow(TypeError);
+  });
+});
+
+describe("committed demo evidence fixtures", () => {
+  const fixtures = [
+    ["order-fg-demo-manifest.json", manifestFixture, FIXTURE_DIGESTS["order-fg-demo-manifest.json"]],
+    ["order-fg-demo-packed.json", packedFixture, FIXTURE_DIGESTS["order-fg-demo-packed.json"]],
+    ["order-fg-demo-pickup.json", pickupFixture, FIXTURE_DIGESTS["order-fg-demo-pickup.json"]],
+    ["order-fg-demo-delivered.json", deliveredFixture, FIXTURE_DIGESTS["order-fg-demo-delivered.json"]],
+    ["order-fg-demo-claim-missing-item.json", claimFixture, FIXTURE_DIGESTS["order-fg-demo-claim-missing-item.json"]],
+    ["order-fg-batch-demo-manifest.json", batchManifestFixture, FIXTURE_DIGESTS["order-fg-batch-demo-manifest.json"]],
+    ["order-fg-batch-demo-packed.json", batchPackedFixture, FIXTURE_DIGESTS["order-fg-batch-demo-packed.json"]],
+    ["order-fg-batch-demo-pickup.json", batchPickupFixture, FIXTURE_DIGESTS["order-fg-batch-demo-pickup.json"]],
+    ["order-fg-batch-demo-delivered.json", batchDeliveredFixture, FIXTURE_DIGESTS["order-fg-batch-demo-delivered.json"]],
+    ["order-fg-batch-demo-claim-item-1.json", batchClaimItem1Fixture, FIXTURE_DIGESTS["order-fg-batch-demo-claim-item-1.json"]],
+    ["order-fg-batch-demo-claim-item-2.json", batchClaimItem2Fixture, FIXTURE_DIGESTS["order-fg-batch-demo-claim-item-2.json"]],
+    ["order-fg-batch-demo-claim-item-3.json", batchClaimItem3Fixture, FIXTURE_DIGESTS["order-fg-batch-demo-claim-item-3.json"]],
+    ["order-fg-batch-demo-cure-batch.json", batchCureFixture, FIXTURE_DIGESTS["order-fg-batch-demo-cure-batch.json"]],
+  ] as const;
+
+  it.each(fixtures)("pins the canonical envelope and digest for %s", async (name, rawFixture, expectedDigest) => {
+    const fixture = rawFixture as unknown as EvidenceDocument;
+    const canonicalEnvelope = canonicalizeEvidenceEnvelope(fixture);
+    const committedBytes = readFileSync(resolve("public/evidence", name));
+    const indexedBytes = execFileSync("git", ["show", `:public/evidence/${name}`]);
+    const expectedFileBytes = Buffer.from(`${canonicalEnvelope}\n`, "utf8");
+
+    expect(fixture.sha256).toBe(expectedDigest);
+    expect(await hashEvidence(fixture)).toBe(expectedDigest);
+    expect(validateEvidenceDocument(fixture, new Date("2030-01-01T00:00:00.000Z"))).toEqual(fixture);
+    expect(indexedBytes.equals(expectedFileBytes)).toBe(true);
+    expect(committedBytes.equals(expectedFileBytes)).toBe(true);
+  });
+
+  it("forces LF checkout bytes for every evidence fixture", () => {
+    const paths = fixtures.map(([name]) => `public/evidence/${name}`);
+    const values = execFileSync("git", ["check-attr", "-z", "text", "eol", "--", ...paths], {
+      encoding: "utf8",
+    }).split("\0").filter(Boolean);
+    const attributes = new Map<string, Record<string, string>>();
+
+    for (let index = 0; index < values.length; index += 3) {
+      const [path, attribute, value] = values.slice(index, index + 3);
+      attributes.set(path, { ...attributes.get(path), [attribute]: value });
+    }
+
+    for (const path of paths) {
+      expect(attributes.get(path)).toEqual({ eol: "lf", text: "set" });
+    }
+  });
+
+  it.each(fixtures)("binds %s to its committed public fixture path", (name, rawFixture) => {
+    const fixture = rawFixture as unknown as EvidenceDocument;
+    const source = new URL(fixture.source_url);
+    const expectedOrderId = name.startsWith("order-fg-batch-demo-") ? "fg-batch-demo" : "fg-demo";
+
+    expect(source.pathname).toBe(`/evidence/${name}`);
+    expect(fixture.order_id).toBe(expectedOrderId);
+    expect(fixture.issuer_id).toBe("foodguard-offline-fixture");
+  });
+
+  it("cross-checks action actors and item references against the order manifest", () => {
+    const manifestItemIds = manifestFixture.items.map((item) => item.item_id);
+    const customer = "0x1111111111111111111111111111111111111111";
+    const restaurant = "0x2222222222222222222222222222222222222222";
+    const courier = "0x3333333333333333333333333333333333333333";
+
+    expect(packedFixture.item_observations.map((item) => item.item_id)).toEqual(manifestItemIds);
+    expect(manifestItemIds).toContain(claimFixture.item_id);
+    expect(claimFixture.subject).toBe(`order:fg-demo/item:${claimFixture.item_id}`);
+    expect(manifestFixture.actor_wallet).toBe(customer);
+    expect(packedFixture.actor_wallet).toBe(restaurant);
+    expect(pickupFixture.actor_wallet).toBe(courier);
+    expect(deliveredFixture.actor_wallet).toBe(courier);
+    expect(claimFixture.actor_wallet).toBe(customer);
+    expect(new Set([customer, restaurant, courier]).size).toBe(3);
+  });
+
+  it("derives the cure targets from a coherent committed three-claim history", () => {
+    const batchHistory = [
+      batchPackedFixture,
+      batchPickupFixture,
+      batchDeliveredFixture,
+      batchClaimItem1Fixture,
+      batchClaimItem2Fixture,
+      batchClaimItem3Fixture,
+    ] as unknown as EvidenceDocument[];
+    const manifestItems = batchManifestFixture.items;
+    const targets = batchCureFixture.supersedes_evidence_indices.map((index) => batchHistory[index]);
+    const targetSlots = targets.map((target) => [target.action, target.item_id]);
+
+    expect(batchHistory.map((record) => record.action)).toEqual([
+      "PACKED", "PICKED_UP", "DELIVERED", "CUSTOMER_CLAIM", "CUSTOMER_CLAIM", "CUSTOMER_CLAIM",
+    ]);
+    expect(targets.every((target) => target !== undefined)).toBe(true);
+    expect(targets.every((target) => target.actor_wallet === batchCureFixture.actor_wallet)).toBe(true);
+    expect(targetSlots).toEqual([
+      ["CUSTOMER_CLAIM", "item-1"],
+      ["CUSTOMER_CLAIM", "item-2"],
+      ["CUSTOMER_CLAIM", "item-3"],
+    ]);
+    expect(new Set(targets.map((target) => target.item_id)).size).toBe(3);
+    expect(batchCureFixture.statements.map((statement) => [statement.effective_action, statement.item_id])).toEqual(targetSlots);
+    for (const record of batchHistory) {
+      expect(validateEvidenceDocument(record, new Date("2030-01-01T00:00:00.000Z"), undefined, manifestItems)).toEqual(record);
+    }
+    expect(validateEvidenceDocument(
+      batchCureFixture,
+      new Date("2030-01-01T00:00:00.000Z"),
+      targets,
+      manifestItems,
+    )).toEqual(batchCureFixture);
+  });
+});

@@ -1,0 +1,49 @@
+{
+  "schema_version": "foodguard-studionet-deployment/1",
+  "status": "STUDIONET_DEPLOYED_VERIFIED",
+  "deployable": true,
+  "network": {
+    "name": "GenLayer StudioNet",
+    "chain_id": 61999
+  },
+  "source": {
+    "path": "contracts/food_guard.py",
+    "sha256": "a2d4d113f023a20eba3f24d5287bd82995348c6f3ea2b24a704d7dd531b2f3ee",
+    "git_commit": "ac9c800daee2a741729588ba79bf24df2c48655a"
+  },
+  "deployment": {
+    "contract_address": "0x9214256f05c613Bacaba8e7E8762C62B5BDB52A5",
+    "transaction_hash": "0xab80bf526784d2b4a7d527abf02834bacecdd1a54e3da39e4846f7964ea1e0b0",
+    "explorer_url": "https://explorer-studio.genlayer.com/tx/0xab80bf526784d2b4a7d527abf02834bacecdd1a54e3da39e4846f7964ea1e0b0",
+    "contract_explorer_url": "https://explorer-studio.genlayer.com/address/0x9214256f05c613Bacaba8e7E8762C62B5BDB52A5",
+    "deployer_wallet": "0x21b45103dd05c43969daF3CbB4277391777e2eC7",
+    "confirmed_at": "2026-08-09T06:29:06Z"
+  },
+  "confirmation": {
+    "wallet_and_action_confirmed": true,
+    "finality_verified": true,
+    "execution_success_verified": true,
+    "authoritative_readback_verified": true,
+    "source_hash_match_verified": true
+  },
+  "readback": {
+    "method": "get_creation_paused",
+    "value": false
+  },
+  "frontend": {
+    "provider": "Vercel",
+    "team": "tdh-s-projects",
+    "project": "foodguard-genlayer",
+    "deployment_id": "dpl_ARefQRUQS8SvbnnP3F3yu1xXAmxk",
+    "git_commit": "1d72e99d9d93f67ccbe46a12c3428fb5efd27ca9",
+    "production_url": "https://foodguard-genlayer.vercel.app",
+    "deployment_url": "https://foodguard-genlayer-1fid6vo6g-tdh-s-projects.vercel.app",
+    "ready_state": "READY",
+    "verified_at": "2026-08-09T07:03:07Z"
+  },
+  "limitations": [
+    "StudioNet GEN is simulated and is not production money.",
+    "Deployment verification does not substitute for live three-wallet workflow evidence.",
+    "The production UI is live, but promoted three-wallet terminal workflow branches still require live StudioNet evidence."
+  ]
+}
