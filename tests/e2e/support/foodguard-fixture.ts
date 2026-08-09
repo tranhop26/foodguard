@@ -323,11 +323,13 @@ function encodedResult(value: Json): string {
   return Buffer.from(abi.calldata.encode(value)).toString("hex");
 }
 
-function contractCall(data: string): { args: Json[]; method: string } {
+function contractCall(data: string): { args: Json[]; contract?: string; method: string } {
   const raw = data.slice(2);
   let calldata: string;
+  let contract: string | undefined;
   if (raw.startsWith("27241a99")) {
     const argumentsHex = raw.slice(8);
+    contract = `0x${argumentsHex.slice(64 + 24, 2 * 64)}`;
     const offset = Number.parseInt(argumentsHex.slice(4 * 64, 5 * 64), 16) * 2;
     const length = Number.parseInt(argumentsHex.slice(offset, offset + 64), 16) * 2;
     const framed = argumentsHex.slice(offset + 64, offset + 64 + length);
@@ -359,7 +361,7 @@ function contractCall(data: string): { args: Json[]; method: string } {
   const method = methods.find((candidate) => methodValue === candidate);
   if (!method) throw new Error("Unexpected mocked GenLayer contract call");
   if (argsValue !== undefined && !Array.isArray(argsValue)) throw new Error("Malformed mocked GenLayer contract call args");
-  return { args: (argsValue ?? []) as Json[], method };
+  return { args: (argsValue ?? []) as Json[], contract, method };
 }
 
 function transactionResult(
@@ -409,15 +411,26 @@ export async function installWalletAndRpcFixture(page: Page, scenario: FoodGuard
   const account = scenarioAccount(scenario);
   const walletWrites: Array<{ args: Json[]; method: string }> = [];
   let batchWritten = false;
+  let participantCancellationWriteValid = false;
   await page.exposeFunction("__foodGuardRecordWrite", (params: unknown) => {
     if (!Array.isArray(params) || typeof params[0] !== "object" || params[0] === null) {
       throw new Error("Malformed local E2E wallet write");
     }
-    const data = (params[0] as { data?: unknown }).data;
+    const transaction = params[0] as { data?: unknown; from?: unknown; to?: unknown };
+    const data = transaction.data;
     if (typeof data !== "string") throw new Error("Local E2E wallet write calldata is missing");
     const call = contractCall(data);
-    walletWrites.push(call);
+    walletWrites.push({ args: call.args, method: call.method });
     if (call.method === "submit_cure_evidence") batchWritten = true;
+    if (call.method === "cancel_before_packed") {
+      participantCancellationWriteValid = (
+        call.args.length === 1 &&
+        call.args[0] === "fg-1" &&
+        typeof transaction.from === "string" &&
+        transaction.from.toLowerCase() === RESTAURANT.toLowerCase() &&
+        call.contract?.toLowerCase() === CONTRACT.toLowerCase()
+      );
+    }
   });
   const recordsWalletWrites = (
     scenario === "accept-transport-failure" ||
@@ -485,20 +498,28 @@ export async function installWalletAndRpcFixture(page: Page, scenario: FoodGuard
     else if (payload.method === "eth_gasPrice") result = "0x1";
     else if (payload.method === "eth_getTransactionByHash") {
       const failed = scenario === "consensus-failed";
-      settlementExecuted = !failed;
-      if (
-        scenario === "participant-cancellation" &&
+      const exactCancellationWrite = (
+        participantCancellationWriteValid &&
+        walletWrites.length === 1 &&
         walletWrites.some((write) => (
           write.method === "cancel_before_packed" &&
           write.args.length === 1 &&
           write.args[0] === "fg-1"
         ))
-      ) participantCancellationFinalized = true;
-      result = scenario === "batch-cure"
-        ? transactionResult("FINALIZED", "submit_cure_evidence", [BATCH_ORDER_ID, expectedBatchEnvelopeJson])
-        : scenario === "participant-cancellation"
-          ? transactionResult("FINALIZED", "cancel_before_packed", ["fg-1"], RESTAURANT)
-        : transactionResult(failed ? "UNDETERMINED" : "FINALIZED");
+      );
+      if (scenario === "participant-cancellation") {
+        if (payload.params[0] === TRANSACTION_HASH && exactCancellationWrite) {
+          participantCancellationFinalized = true;
+          result = transactionResult("FINALIZED", "cancel_before_packed", ["fg-1"], RESTAURANT);
+        } else {
+          result = null;
+        }
+      } else {
+        settlementExecuted = !failed;
+        result = scenario === "batch-cure"
+          ? transactionResult("FINALIZED", "submit_cure_evidence", [BATCH_ORDER_ID, expectedBatchEnvelopeJson])
+          : transactionResult(failed ? "UNDETERMINED" : "FINALIZED");
+      }
     } else if (payload.method === "gen_call") {
       const first = payload.params[0];
       if (typeof first !== "object" || first === null || typeof first.data !== "string") {
@@ -511,6 +532,22 @@ export async function installWalletAndRpcFixture(page: Page, scenario: FoodGuard
         throw new Error("Deterministic recovery readback must use latest-final");
       }
       const { args, method } = contractCall(first.data);
+      if (
+        scenario === "participant-cancellation" &&
+        method === "get_order_settlement" &&
+        !participantCancellationFinalized
+      ) {
+        await route.fulfill({
+          body: JSON.stringify({
+            error: { code: -32000, message: "[EXPECTED] settlement not found" },
+            id: payload.id,
+            jsonrpc: "2.0",
+          }),
+          contentType: "application/json",
+          status: 200,
+        });
+        return;
+      }
       const unresolved = scenario === "batch-cure" || scenario === "unresolved" || scenario === "consensus-failed" || scenario === "escalated";
       const preResolution = scenario === "accept-transport-failure" || scenario === "participant-cancellation";
       const recordedAcceptance = walletWrites.some((write) => (

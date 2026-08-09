@@ -81,8 +81,20 @@ export function TransactionLifecycle({
           </span>
         </li>
         <li data-complete={readbackConfirmed || undefined} data-testid="transaction-readback">
-          <code>{readbackConfirmed ? "READBACK_CONFIRMED" : "READBACK_PENDING"}</code>
-          <span>{readbackConfirmed ? copy.detail.readbackConfirmed : copy.detail.readbackPending}</span>
+          <code>
+            {stateReadbackConfirmed
+              ? "STATE_READBACK_CONFIRMED"
+              : readbackConfirmed
+                ? "READBACK_CONFIRMED"
+                : "READBACK_PENDING"}
+          </code>
+          <span>
+            {stateReadbackConfirmed
+              ? copy.detail.stateReadbackConfirmed
+              : readbackConfirmed
+                ? copy.detail.readbackConfirmed
+                : copy.detail.readbackPending}
+          </span>
         </li>
       </ol>
       {stage === "CONSENSUS_FAILED" && permissionlessRetry && (

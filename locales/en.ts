@@ -131,6 +131,7 @@ const en = {
     executionError: "Execution error",
     readbackPending: "Readback pending",
     readbackConfirmed: "Authoritative readback confirmed",
+    stateReadbackConfirmed: "Only authoritative contract state is confirmed; transaction finality and execution remain unproven.",
     reconciling: "The wallet may have submitted the transaction. FoodGuard is reconciling with the contract — never resend.",
     outcomeUnknown: "The outcome has not been verified. Never resend; check the contract state.",
     consensusUnchanged: "Validator consensus failed. Contract state and reserved funds did not change; anyone may retry safely.",

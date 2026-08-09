@@ -1301,7 +1301,19 @@ describe("authoritative order outcome presentation", () => {
     expect(screen.getByTestId("transaction-execution")).not.toHaveAttribute("data-complete");
     expect(screen.getByTestId("transaction-execution")).toHaveTextContent("EXECUTION_PENDING");
     expect(screen.getByTestId("transaction-readback")).toHaveAttribute("data-complete", "true");
-    expect(screen.getByTestId("transaction-readback")).toHaveTextContent("READBACK_CONFIRMED");
+    expect(screen.getByTestId("transaction-readback")).toHaveTextContent("STATE_READBACK_CONFIRMED");
+    expect(screen.getByText(
+      "Only authoritative contract state is confirmed; transaction finality and execution remain unproven.",
+    )).toBeVisible();
+  });
+
+  it("renders the narrower hashless state confirmation in Vietnamese", () => {
+    renderLocalized(<TransactionLifecycle stage="STATE_READBACK_CONFIRMED" />, "vi");
+
+    expect(screen.getByText("STATE_READBACK_CONFIRMED", { exact: true })).toBeVisible();
+    expect(screen.getByText(
+      "Chỉ trạng thái contract có thẩm quyền được xác nhận; finality và execution của giao dịch vẫn chưa được chứng minh.",
+    )).toBeVisible();
   });
 
   it("presents RECONCILING as non-final and tells Vietnamese users never to resend", () => {

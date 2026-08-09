@@ -131,6 +131,7 @@ const vi = {
     executionError: "Lỗi thực thi",
     readbackPending: "Đang chờ đọc lại",
     readbackConfirmed: "Đã xác nhận đọc lại từ contract",
+    stateReadbackConfirmed: "Chỉ trạng thái contract có thẩm quyền được xác nhận; finality và execution của giao dịch vẫn chưa được chứng minh.",
     reconciling: "Ví có thể đã gửi giao dịch. FoodGuard đang đối chiếu contract — không gửi lại.",
     outcomeUnknown: "Chưa xác minh được kết quả. Không gửi lại; hãy kiểm tra trạng thái contract.",
     consensusUnchanged: "Validator không đạt đồng thuận. Trạng thái contract và tiền dự trữ không đổi; bất kỳ ai cũng có thể thử lại an toàn.",
