@@ -854,6 +854,7 @@ export function OrderDetailWorkspace({
   const [activeEvidence, setActiveEvidence] = useState<ActiveEvidenceRequest | null>(null);
   const [transactionActorAddress, setTransactionActorAddress] = useState<string | null>(null);
   const [transactionMethod, setTransactionMethod] = useState<string | null>(null);
+  const [confirmedCorrectionTargetCount, setConfirmedCorrectionTargetCount] = useState<number | null>(null);
   const [clock, setClock] = useState<AuthoritativeClock | null>(null);
   const [clockError, setClockError] = useState<string | null>(null);
   const load = useCallback(async () => {
@@ -998,6 +999,12 @@ export function OrderDetailWorkspace({
           <ItemOutcomeTable order={order} />
           <section className="order-card" aria-labelledby="evidence-history-title">
             <h2 id="evidence-history-title">{copy.detail.evidenceHistory}</h2>
+            <p className="form-notice">
+              Active evidence indices: {" "}
+              <code data-testid="active-evidence-indices">
+                {deriveActiveEvidenceRecords(order.evidence ?? []).map((record) => record.evidence_index).join(", ")}
+              </code>
+            </p>
             {order.evidence?.length ? (
               <ol className="evidence-history">
                 {order.evidence.map((record, index) => (
@@ -1098,6 +1105,9 @@ export function OrderDetailWorkspace({
                       }
                     : undefined,
                 );
+                if (activeEvidence.action === "CURE" || activeEvidence.action === "APPEAL") {
+                  setConfirmedCorrectionTargetCount(submitted.supersedes_evidence_indices?.length ?? null);
+                }
                 setActiveEvidence(null);
               }}
               order={order}
@@ -1108,6 +1118,13 @@ export function OrderDetailWorkspace({
             operation={transactionMethod}
             stage={stage}
           />
+          {confirmedCorrectionTargetCount !== null && (
+            <p className="form-notice form-notice--success">
+              {locale === "en"
+                ? `${confirmedCorrectionTargetCount} evidence selected`
+                : `${confirmedCorrectionTargetCount} bằng chứng đã chọn`}
+            </p>
+          )}
         </>
       )}
     </div>

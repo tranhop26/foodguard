@@ -34,7 +34,7 @@ Create an append-only audit inventory from authoritative views. Do not use brows
 - raw order state and all actor addresses;
 - item manifest and exact reserved values;
 - every deadline and acceptance/settlement flag;
-- evidence count, each envelope, source URL, digest, actor, action, subject, and nonce;
+- evidence count, each envelope, source URL, digest, actor, action, subject, nonce, direct supersession targets, and flattened typed statement slots;
 - resolution round/result when present;
 - settlement proposal/signatures when present;
 - final settlement allocation/ID when present;
@@ -53,12 +53,18 @@ Keep the export outside public source until it has been reviewed for credentials
 V1 has no admin rewrite, upgrade proxy, rescue sweep, or automatic migration. Therefore:
 
 - safe lifecycle actions continue on V1 under their original wallets and deadlines;
-- `UNRESOLVED` value remains locked for cure/re-resolution;
+- `UNRESOLVED` value remains locked for cure/re-resolution. When one actor owns several stale active records, submit one atomic `submit_cure_evidence(order_id, envelope_json)` batch with strictly increasing direct targets and one typed statement per flattened semantic slot;
+- preflight the complete batch before wallet confirmation: every target must still be active, earlier than the new record, owned by the connected actor, and positionally action/item compatible. Never split a required three-record repair across partial writes;
+- after `FINALIZED` and execution success, re-read the append-only history. Confirm one new `BATCH_CORRECTION` record, all direct targets inactive, and the expected authoritative active set before retrying resolution;
+- if the public source for an earlier active batch is unavailable, a later valid batch may directly replace that one batch record while preserving all of its ordered statement slots; do not recursively copy history records;
+- one accepted batch consumes one history slot and the existing one-cure or one-appeal quota for that actor/round. The limits remain `MAX_ITEMS = 100`, `MAX_ACTIVE_EVIDENCE = 103`, and `MAX_EVIDENCE_HISTORY = 112`;
 - later unresolved/escalated orders require a valid fully signed mutual settlement when the contract allows it;
 - no operator may manufacture evidence, signatures, outcomes, or transfers;
 - do not recreate an active V1 order on V2 while its V1 value remains reserved.
 
 Publish participant guidance that names the exact permitted method and consequence for each affected state.
+
+The committed `order-fg-demo-cure-batch.json` and Playwright three-claim scenario are rehearsal material only. They prove canonical bytes and deterministic local behavior, including active indices `0, 1, 2, 6`; they are not incident evidence, StudioNet finality, or permission to perform a wallet action.
 
 ## 6. Review and deploy V2
 

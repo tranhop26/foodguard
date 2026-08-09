@@ -53,11 +53,11 @@ export function TransactionLifecycle({
           <code>{stage === "CONSENSUS_FAILED" ? "CONSENSUS_FAILED" : "CONSENSUS_PENDING"}</code>
           <span>{stage === "CONSENSUS_FAILED" ? copy.detail.consensusFailed : copy.detail.validatorProgress}</span>
         </li>
-        <li data-complete={finalized || undefined}>
+        <li data-complete={finalized || undefined} data-testid="transaction-finality">
           <code>FINALIZED</code>
           <span>{finalized ? copy.detail.finalityRecorded : copy.detail.stagePending}</span>
         </li>
-        <li data-complete={stage === "EXECUTION_SUCCESS" || readbackConfirmed || undefined}>
+        <li data-complete={stage === "EXECUTION_SUCCESS" || readbackConfirmed || undefined} data-testid="transaction-execution">
           <code>
             {stage === "EXECUTION_ERROR"
               ? "EXECUTION_ERROR"
@@ -73,7 +73,7 @@ export function TransactionLifecycle({
                 : copy.detail.stagePending}
           </span>
         </li>
-        <li data-complete={readbackConfirmed || undefined}>
+        <li data-complete={readbackConfirmed || undefined} data-testid="transaction-readback">
           <code>{readbackConfirmed ? "READBACK_CONFIRMED" : "READBACK_PENDING"}</code>
           <span>{readbackConfirmed ? copy.detail.readbackConfirmed : copy.detail.readbackPending}</span>
         </li>

@@ -54,7 +54,11 @@ Each `foodguard-evidence/1` envelope contains common order, actor, issuer, sourc
 - `PICKED_UP`: no extra action fact.
 - `DELIVERED`: `delivery_observation`.
 - `CUSTOMER_CLAIM`: `item_id` and `claim_category`.
-- `CURE` / `APPEAL`: optional `item_id` only.
+- `CURE` / `APPEAL`: order-level `supersedes_evidence_indices` plus positionally bound typed `statements`; there is no outer `item_id` or caller-selected outcome.
+
+A cure or appeal can atomically replace several active records owned by the caller. The contract validates the complete sorted target list and every typed statement before any mutation, appends one `BATCH_CORRECTION` history record, and then deactivates every direct target. Replacing an active earlier batch preserves that batch's ordered semantic slots without recursive storage. One successful batch still consumes one cure/appeal quota entry and one history slot; `MAX_ITEMS = 100`, `MAX_ACTIVE_EVIDENCE = 103`, and `MAX_EVIDENCE_HISTORY = 112` are unchanged.
+
+`order-fg-demo-cure-batch.json` is the fixed three-record recovery example. It replaces indices `3, 4, 5`, is canonical UTF-8 with one LF, and pins digest `0x280f9d6f5c6f3e4e62cbd79b59aff3bbe90ae4560e003dcf76cf1b588990cc1e`. The browser scenario proves locally that three stale customer claims produce one `submit_cure_evidence` wallet request and a fresh active set `0, 1, 2, 6`; it is deterministic local evidence, not a StudioNet transaction or deployment claim.
 
 ### Local commands
 

@@ -12,6 +12,7 @@ import {
   validateEvidenceDocument,
 } from "../../lib/evidence";
 import claimFixture from "../../public/evidence/order-fg-demo-claim-missing-item.json";
+import batchCureFixture from "../../public/evidence/order-fg-demo-cure-batch.json";
 import deliveredFixture from "../../public/evidence/order-fg-demo-delivered.json";
 import manifestFixture from "../../public/evidence/order-fg-demo-manifest.json";
 import packedFixture from "../../public/evidence/order-fg-demo-packed.json";
@@ -19,6 +20,7 @@ import pickupFixture from "../../public/evidence/order-fg-demo-pickup.json";
 
 const FIXTURE_DIGESTS = Object.freeze({
   "order-fg-demo-claim-missing-item.json": "0xc6b1996f8fb0350c217679fdd40b425c5b0385f32d7db608713087e3f6d989c3",
+  "order-fg-demo-cure-batch.json": "0x280f9d6f5c6f3e4e62cbd79b59aff3bbe90ae4560e003dcf76cf1b588990cc1e",
   "order-fg-demo-delivered.json": "0x1f75f32767e97a2dfe7bdec507fe3b963d7ff151e3a13cb5a169a1570bfccd0f",
   "order-fg-demo-manifest.json": "0xc8b3c3caf0d9c51e79a636095a5c8b1a603b61a39bc80027e7ae9ab91ac76ac5",
   "order-fg-demo-packed.json": "0x81aeb38f325af53321789f67ca05cd2423f5cb4d5c4511eaf9ebd0a896ef8d48",
@@ -410,6 +412,7 @@ describe("committed demo evidence fixtures", () => {
     ["order-fg-demo-pickup.json", pickupFixture, FIXTURE_DIGESTS["order-fg-demo-pickup.json"]],
     ["order-fg-demo-delivered.json", deliveredFixture, FIXTURE_DIGESTS["order-fg-demo-delivered.json"]],
     ["order-fg-demo-claim-missing-item.json", claimFixture, FIXTURE_DIGESTS["order-fg-demo-claim-missing-item.json"]],
+    ["order-fg-demo-cure-batch.json", batchCureFixture, FIXTURE_DIGESTS["order-fg-demo-cure-batch.json"]],
   ] as const;
 
   it.each(fixtures)("pins the canonical envelope and digest for %s", async (name, rawFixture, expectedDigest) => {
@@ -467,5 +470,20 @@ describe("committed demo evidence fixtures", () => {
     expect(deliveredFixture.actor_wallet).toBe(courier);
     expect(claimFixture.actor_wallet).toBe(customer);
     expect(new Set([customer, restaurant, courier]).size).toBe(3);
+  });
+
+  it("binds the three-record cure fixture to ordered stale claims in the demo order", () => {
+    const manifestItemIds = new Set(manifestFixture.items.map((item) => item.item_id));
+
+    expect(batchCureFixture.supersedes_evidence_indices).toEqual([3, 4, 5]);
+    expect(batchCureFixture.statements.map((statement) => [
+      statement.effective_action,
+      statement.item_id,
+    ])).toEqual([
+      ["CUSTOMER_CLAIM", "item-1"],
+      ["CUSTOMER_CLAIM", "item-2"],
+      ["CUSTOMER_CLAIM", "item-1"],
+    ]);
+    expect(batchCureFixture.statements.every((statement) => manifestItemIds.has(statement.item_id))).toBe(true);
   });
 });

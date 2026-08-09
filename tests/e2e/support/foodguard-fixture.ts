@@ -4,6 +4,7 @@ import type { Locator, Page } from "@playwright/test";
 import { abi } from "genlayer-js";
 
 export type FoodGuardBrowserScenario =
+  | "batch-cure"
   | "consensus-failed"
   | "create-preview"
   | "escalated"
@@ -17,6 +18,9 @@ const RESTAURANT = "0x2222222222222222222222222222222222222222";
 const COURIER = "0x3333333333333333333333333333333333333333";
 const TRANSACTION_HASH = `0x${"9".repeat(64)}`;
 const CHAIN_NOW_SECONDS = 2_000_000_000;
+const BATCH_CHAIN_NOW_SECONDS = 1_893_456_000;
+const BATCH_ORDER_ID = "fg-batch-1";
+const BATCH_SOURCE_URL = "https://app.foodguard.vn/evidence/order-fg-batch-1-cure-batch.json";
 
 type Json = boolean | null | number | string | Json[] | { [key: string]: Json };
 
@@ -38,6 +42,28 @@ const manifest = {
       name: "Broken rice plate",
       permitted_substitutions: [],
       price_wei: "100",
+      quantity: 1,
+    },
+  ],
+} satisfies Json;
+
+const batchManifest = {
+  items: [
+    ...manifest.items,
+    {
+      conditions: [],
+      item_id: "item-2",
+      name: "Kumquat tea",
+      permitted_substitutions: [],
+      price_wei: "20",
+      quantity: 1,
+    },
+    {
+      conditions: [],
+      item_id: "item-3",
+      name: "Dessert",
+      permitted_substitutions: [],
+      price_wei: "50",
       quantity: 1,
     },
   ],
@@ -65,7 +91,96 @@ const evidenceEnvelope = {
 } satisfies Json;
 const evidenceRecord = {
   ...evidenceEnvelope,
+  effective_action: "DELIVERED",
   envelope_json: canonical(evidenceEnvelope),
+  item_id: "",
+} satisfies Json;
+
+function batchBaseEvidence(
+  action: "PACKED" | "PICKED_UP" | "DELIVERED" | "CUSTOMER_CLAIM",
+  actor: string,
+  nonce: string,
+  facts: Record<string, Json> = {},
+) {
+  const itemId = typeof facts.item_id === "string" ? facts.item_id : "";
+  const preimage = {
+    action,
+    actor_wallet: actor,
+    chain_id: "61999",
+    contract_address: CONTRACT,
+    expires_at: "2030-01-02T01:00:00.000Z",
+    issuer_id: "foodguard-e2e-local-fixture",
+    nonce,
+    observed_at: "2030-01-01T00:00:00.000Z",
+    order_id: BATCH_ORDER_ID,
+    schema_version: "foodguard-evidence/1",
+    source_url: `https://app.foodguard.vn/evidence/${nonce}.json`,
+    subject: itemId ? `order:${BATCH_ORDER_ID}/item:${itemId}` : `order:${BATCH_ORDER_ID}`,
+    submitted_at: "2030-01-01T00:00:01.000Z",
+    ...facts,
+  } satisfies Json;
+  const envelope = { ...preimage, sha256: sha256(preimage) } satisfies Json;
+  return {
+    ...envelope,
+    effective_action: action,
+    envelope_json: canonical(envelope),
+    item_id: itemId,
+  } satisfies Json;
+}
+
+const batchInitialEvidence = [
+  batchBaseEvidence("PACKED", RESTAURANT, "e2e-batch-packed", {
+    item_observations: batchManifest.items.map((item) => ({
+      item_id: item.item_id,
+      observation: "PACKED_AS_ORDERED",
+    })),
+  }),
+  batchBaseEvidence("PICKED_UP", COURIER, "e2e-batch-pickup"),
+  batchBaseEvidence("DELIVERED", COURIER, "e2e-batch-delivered", {
+    delivery_observation: "HANDOFF_CONFIRMED",
+  }),
+  ...batchManifest.items.map((item, index) => batchBaseEvidence(
+    "CUSTOMER_CLAIM",
+    CUSTOMER,
+    `e2e-batch-claim-${index + 1}`,
+    {
+      claim_category: index === 0 ? "ABSENT_AT_RECEIPT" : index === 1 ? "NOT_AS_ORDERED" : "HANDOFF_NOT_RECEIVED",
+      item_id: item.item_id,
+    },
+  )),
+] satisfies Json[];
+
+const expectedBatchPublicDocument = canonical({
+  action: "CURE",
+  actor_wallet: CUSTOMER,
+  chain_id: "61999",
+  contract_address: CONTRACT,
+  expires_at: "2030-01-02T00:13:20.000Z",
+  issuer_id: "foodguard-web",
+  nonce: "000102030405060708090a0b0c0d0e0f",
+  observed_at: "2030-01-01T00:00:00.000Z",
+  order_id: BATCH_ORDER_ID,
+  schema_version: "foodguard-evidence/1",
+  source_url: BATCH_SOURCE_URL,
+  statements: [
+    { claim_category: "ABSENT_AT_RECEIPT", criterion_index: 0, criterion_kind: "ITEM", effective_action: "CUSTOMER_CLAIM", item_id: "item-1" },
+    { claim_category: "NOT_AS_ORDERED", criterion_index: 0, criterion_kind: "QUANTITY", effective_action: "CUSTOMER_CLAIM", item_id: "item-2" },
+    { claim_category: "HANDOFF_NOT_RECEIVED", criterion_index: -1, criterion_kind: "DELIVERY", effective_action: "CUSTOMER_CLAIM", item_id: "item-3" },
+  ],
+  subject: `order:${BATCH_ORDER_ID}`,
+  submitted_at: "2030-01-01T00:00:00.000Z",
+  supersedes_evidence_indices: [3, 4, 5],
+});
+const expectedBatchEnvelope = {
+  ...(JSON.parse(expectedBatchPublicDocument) as Record<string, Json>),
+  sha256: sha256(expectedBatchPublicDocument),
+} satisfies Json;
+const expectedBatchEnvelopeJson = canonical(expectedBatchEnvelope);
+const batchEvidenceRecord = {
+  ...expectedBatchEnvelope,
+  effective_action: "BATCH_CORRECTION",
+  envelope_json: expectedBatchEnvelopeJson,
+  item_id: "",
 } satisfies Json;
 const matchedResolution = {
   delivery_outcome: "DELIVERED",
@@ -99,9 +214,18 @@ const settlement = {
 function baseOrder(
   state: "EVIDENCE_CURE" | "ESCALATED" | "READY_FOR_PICKUP" | "RESOLVED" | "SETTLED",
   settlementWindowExpired = false,
+  batch = false,
 ) {
   const settledState = state === "SETTLED";
-  const deadlines = settlementWindowExpired
+  const deadlines = batch
+    ? {
+        acceptance: "1893455000",
+        appeal: "1893456800",
+        delivery: "1893455400",
+        packing: "1893455200",
+        review: "1893456600",
+      }
+    : settlementWindowExpired
     ? {
         acceptance: "1999999000",
         appeal: "1999999800",
@@ -126,20 +250,20 @@ function baseOrder(
     delivery_fee: "30",
     delivery_settled: settledState,
     items_settled: settledState,
-    manifest_json: canonical(manifest),
-    order_id: "fg-1",
+    manifest_json: canonical(batch ? batchManifest : manifest),
+    order_id: batch ? BATCH_ORDER_ID : "fg-1",
     packing_deadline: deadlines.packing,
     refund_emitted: false,
     restaurant: RESTAURANT,
     restaurant_accepted: true,
     review_deadline: deadlines.review,
     state,
-    subtotal: "100",
-    total_value: "130",
+    subtotal: batch ? "170" : "100",
+    total_value: batch ? "200" : "130",
   } satisfies Json;
 }
 
-function rpcBlock() {
+function rpcBlock(timestamp = CHAIN_NOW_SECONDS) {
   const zeroBloom = `0x${"0".repeat(512)}`;
   const hash = (character: string) => `0x${character.repeat(64)}`;
   return {
@@ -159,7 +283,7 @@ function rpcBlock() {
     sha3Uncles: hash("d"),
     size: "0x1",
     stateRoot: hash("e"),
-    timestamp: `0x${CHAIN_NOW_SECONDS.toString(16)}`,
+    timestamp: `0x${timestamp.toString(16)}`,
     totalDifficulty: "0x0",
     transactions: [],
     transactionsRoot: hash("f"),
@@ -171,9 +295,26 @@ function encodedResult(value: Json): string {
   return Buffer.from(abi.calldata.encode(value)).toString("hex");
 }
 
-function contractMethod(data: string): string {
-  const decoded = Buffer.from(data.slice(2), "hex").toString("utf8");
+function contractCall(data: string): { args: Json[]; method: string } {
+  const raw = data.slice(2);
+  let calldata: string;
+  if (raw.startsWith("27241a99")) {
+    const argumentsHex = raw.slice(8);
+    const offset = Number.parseInt(argumentsHex.slice(4 * 64, 5 * 64), 16) * 2;
+    const length = Number.parseInt(argumentsHex.slice(offset, offset + 64), 16) * 2;
+    const framed = argumentsHex.slice(offset + 64, offset + 64 + length);
+    const mapStart = framed.indexOf("160461726773");
+    if (mapStart < 0 || !framed.endsWith("00")) throw new Error("Malformed local E2E wallet calldata");
+    calldata = framed.slice(mapStart, -2);
+  } else {
+    if (!raw.endsWith("00")) throw new Error("Malformed local E2E read calldata");
+    calldata = raw.slice(4, -2);
+  }
+  const decoded = abi.calldata.decode(Uint8Array.from(Buffer.from(calldata, "hex")));
+  const methodValue = decoded instanceof Map ? decoded.get("method") : undefined;
+  const argsValue = decoded instanceof Map ? decoded.get("args") : undefined;
   const methods = [
+    "submit_cure_evidence",
     "get_settlement_proposal_count",
     "get_settlement_proposal_digest",
     "get_settlement_proposal",
@@ -185,12 +326,13 @@ function contractMethod(data: string): string {
     "get_round",
     "get_order",
   ];
-  const method = methods.find((candidate) => decoded.includes(candidate));
+  const method = methods.find((candidate) => methodValue === candidate);
   if (!method) throw new Error("Unexpected mocked GenLayer contract call");
-  return method;
+  if (argsValue !== undefined && !Array.isArray(argsValue)) throw new Error("Malformed mocked GenLayer contract call args");
+  return { args: (argsValue ?? []) as Json[], method };
 }
 
-function transactionResult(status: "FINALIZED" | "UNDETERMINED") {
+function transactionResult(status: "FINALIZED" | "UNDETERMINED", method = "execute_settlement", args: Json[] = ["fg-1"]) {
   return {
     blockHash: null,
     blockNumber: null,
@@ -206,7 +348,7 @@ function transactionResult(status: "FINALIZED" | "UNDETERMINED") {
     to: CONTRACT,
     transactionIndex: null,
     txDataDecoded: {
-      callData: { args: ["fg-1"], method: status === "FINALIZED" ? "execute_settlement" : "request_resolution" },
+      callData: { args, method: status === "FINALIZED" ? method : "request_resolution" },
       leaderOnly: false,
       type: "call",
     },
@@ -229,20 +371,53 @@ function scenarioAccount(scenario: FoodGuardBrowserScenario): string {
  */
 export async function installWalletAndRpcFixture(page: Page, scenario: FoodGuardBrowserScenario) {
   const account = scenarioAccount(scenario);
-  await page.addInitScript(({ walletAccount, transactionHash }) => {
+  const walletWrites: Array<{ args: Json[]; method: string }> = [];
+  let batchWritten = false;
+  await page.exposeFunction("__foodGuardRecordWrite", (params: unknown) => {
+    if (!Array.isArray(params) || typeof params[0] !== "object" || params[0] === null) {
+      throw new Error("Malformed local E2E wallet write");
+    }
+    const data = (params[0] as { data?: unknown }).data;
+    if (typeof data !== "string") throw new Error("Local E2E wallet write calldata is missing");
+    const call = contractCall(data);
+    walletWrites.push(call);
+    if (call.method === "submit_cure_evidence") batchWritten = true;
+  });
+  await page.addInitScript(({ deterministicBatch, walletAccount, transactionHash }) => {
     type WalletRequest = { method: string; params?: unknown };
     const provider = {
-      async request({ method }: WalletRequest) {
+      async request({ method, params }: WalletRequest) {
         if (method === "eth_chainId") return "0xf22f";
         if (method === "eth_accounts" || method === "eth_requestAccounts") return [walletAccount];
-        if (method === "eth_sendTransaction") return transactionHash;
+        if (method === "eth_sendTransaction") {
+          if (deterministicBatch) {
+            await (window as typeof window & { __foodGuardRecordWrite(params: unknown): Promise<void> }).__foodGuardRecordWrite(params);
+          }
+          return transactionHash;
+        }
         throw new Error(`Unexpected local E2E wallet method: ${method}`);
       },
       on() {},
       removeListener() {},
     };
+    if (deterministicBatch) {
+      Object.defineProperty(window.performance, "now", { configurable: true, value: () => 1_000 });
+      Object.defineProperty(window.crypto, "getRandomValues", {
+        configurable: true,
+        value: (values: Uint8Array) => {
+          values.forEach((_value, index) => { values[index] = index; });
+          return values;
+        },
+      });
+    }
     (window as typeof window & { ethereum?: typeof provider }).ethereum = provider;
-  }, { transactionHash: TRANSACTION_HASH, walletAccount: account });
+  }, { deterministicBatch: scenario === "batch-cure", transactionHash: TRANSACTION_HASH, walletAccount: account });
+
+  if (scenario === "batch-cure") {
+    await page.route(BATCH_SOURCE_URL, async (route) => {
+      await route.fulfill({ body: expectedBatchPublicDocument, contentType: "application/json", status: 200 });
+    });
+  }
 
   let settlementExecuted = false;
   await page.route("https://studio.genlayer.com/api", async (route) => {
@@ -254,21 +429,23 @@ export async function installWalletAndRpcFixture(page: Page, scenario: FoodGuard
     };
     let result: unknown;
 
-    if (payload.method === "eth_getBlockByNumber") result = rpcBlock();
+    if (payload.method === "eth_getBlockByNumber") result = rpcBlock(scenario === "batch-cure" ? BATCH_CHAIN_NOW_SECONDS : CHAIN_NOW_SECONDS);
     else if (payload.method === "eth_getTransactionCount") result = "0x0";
     else if (payload.method === "eth_estimateGas") result = "0x30d40";
     else if (payload.method === "eth_gasPrice") result = "0x1";
     else if (payload.method === "eth_getTransactionByHash") {
       const failed = scenario === "consensus-failed";
       settlementExecuted = !failed;
-      result = transactionResult(failed ? "UNDETERMINED" : "FINALIZED");
+      result = scenario === "batch-cure"
+        ? transactionResult("FINALIZED", "submit_cure_evidence", [BATCH_ORDER_ID, expectedBatchEnvelopeJson])
+        : transactionResult(failed ? "UNDETERMINED" : "FINALIZED");
     } else if (payload.method === "gen_call") {
       const first = payload.params[0];
       if (typeof first !== "object" || first === null || typeof first.data !== "string") {
         throw new Error("Malformed local E2E gen_call request");
       }
-      const method = contractMethod(first.data);
-      const unresolved = scenario === "unresolved" || scenario === "consensus-failed" || scenario === "escalated";
+      const { args, method } = contractCall(first.data);
+      const unresolved = scenario === "batch-cure" || scenario === "unresolved" || scenario === "consensus-failed" || scenario === "escalated";
       const state = unresolved
         ? scenario === "escalated" ? "ESCALATED" : "EVIDENCE_CURE"
         : scenario === "ready-for-pickup"
@@ -277,12 +454,19 @@ export async function installWalletAndRpcFixture(page: Page, scenario: FoodGuard
             ? "SETTLED"
             : "RESOLVED";
       const values: Record<string, Json> = {
-        get_evidence: evidenceRecord,
-        get_evidence_count: unresolved || scenario === "ready-for-pickup" ? 0 : 1,
+        get_evidence: scenario === "batch-cure"
+          ? (batchWritten && Number(args[1]) === 6 ? batchEvidenceRecord : batchInitialEvidence[Number(args[1])])
+          : evidenceRecord,
+        get_evidence_count: scenario === "batch-cure" ? (batchWritten ? 7 : 6) : unresolved || scenario === "ready-for-pickup" ? 0 : 1,
         get_creation_paused: false,
-        get_order: baseOrder(state, scenario === "happy-path" || scenario === "escalated"),
+        get_order: baseOrder(state, scenario === "happy-path" || scenario === "escalated", scenario === "batch-cure"),
         get_order_settlement: settlement,
-        get_resolution: canonical(unresolved ? unresolvedResolution : matchedResolution),
+        get_resolution: canonical(scenario === "batch-cure" ? {
+          delivery_outcome: "UNRESOLVED",
+          evidence_hashes: batchInitialEvidence.map((record) => record.sha256),
+          evidence_indices: [0, 1, 2, 3, 4, 5],
+          items: batchManifest.items.map((item) => ({ facts: ["Local deterministic stale claim"], item_id: item.item_id, outcome: "UNRESOLVED" })),
+        } : unresolved ? unresolvedResolution : matchedResolution),
         get_round: scenario === "escalated" ? 2 : unresolved || state === "RESOLVED" || state === "SETTLED" ? 1 : 0,
         get_settlement_proposal: {},
         get_settlement_proposal_count: 0,
@@ -299,6 +483,13 @@ export async function installWalletAndRpcFixture(page: Page, scenario: FoodGuard
       status: 200,
     });
   });
+
+  return {
+    expectedEnvelopeJson: expectedBatchEnvelopeJson,
+    expectedPublicDocument: expectedBatchPublicDocument,
+    sourceUrl: BATCH_SOURCE_URL,
+    walletWrites,
+  };
 }
 
 export function trackConsoleErrors(page: Page, allowed: RegExp[] = []): string[] {
