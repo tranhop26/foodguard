@@ -69,6 +69,7 @@ const en = {
     noAction: "This role has no action in the current state.",
     evidenceRequired: "This action needs valid public evidence; open the order details and attach it before submission.",
     pending: "Waiting for contract finality and authoritative readback…",
+    checkContractState: "Check contract state",
     cancelBeforePackedConfirmation: "Cancel before packing; all simulated GEN is refunded to the customer.",
     actions: {
       acceptRestaurant: "Restaurant accepts order",

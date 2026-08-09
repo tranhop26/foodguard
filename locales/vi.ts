@@ -69,6 +69,7 @@ const vi = {
     noAction: "Không có hành động nào cho vai trò này ở trạng thái hiện tại.",
     evidenceRequired: "Hành động này cần bằng chứng công khai hợp lệ; mở chi tiết đơn để đính kèm trước khi gửi.",
     pending: "Đang chờ contract hoàn tất và đọc lại trạng thái…",
+    checkContractState: "Kiểm tra trạng thái contract",
     cancelBeforePackedConfirmation: "Hủy trước khi đóng gói; toàn bộ simulated GEN được hoàn cho khách hàng.",
     actions: {
       acceptRestaurant: "Nhà hàng nhận đơn",

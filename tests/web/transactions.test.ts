@@ -165,6 +165,46 @@ describe("StudioNet RPC resilience", () => {
     expect(operation).toHaveBeenCalledTimes(2);
   });
 
+  it("leases a hung read so a later same-key read starts fresh without stale cleanup races", async () => {
+    vi.useFakeTimers();
+    let resolveOld: ((value: string) => void) | undefined;
+    let resolveFresh: ((value: string) => void) | undefined;
+    const operation = vi
+      .fn<() => Promise<string>>()
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveOld = resolve;
+      }))
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveFresh = resolve;
+      }));
+
+    const oldRead = singleFlight("get_order:fg-lease", operation);
+    await vi.advanceTimersByTimeAsync(30_000);
+    const freshRead = singleFlight("get_order:fg-lease", operation);
+
+    expect(operation).toHaveBeenCalledTimes(2);
+    resolveOld?.("old");
+    await expect(oldRead).resolves.toBe("old");
+
+    const sharedFreshRead = singleFlight("get_order:fg-lease", operation);
+    expect(operation).toHaveBeenCalledTimes(2);
+    resolveFresh?.("fresh");
+    await expect(Promise.all([freshRead, sharedFreshRead])).resolves.toEqual([
+      "fresh",
+      "fresh",
+    ]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("clears the lease timer as soon as a read settles", async () => {
+    vi.useFakeTimers();
+
+    await expect(singleFlight("get_order:fg-settled", async () => "done"))
+      .resolves.toBe("done");
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("honors the exact server retry delay and clears its timer", async () => {
     vi.useFakeTimers();
     const operation = vi
@@ -786,7 +826,9 @@ describe("FoodGuard StudioNet client", () => {
     expect(sdk.writeContract).toHaveBeenCalledTimes(1);
     expect(readback).toHaveBeenCalledTimes(1);
     expect(stages).toContain("RECONCILING");
-    expect(stages.at(-1)).toBe("READBACK_CONFIRMED");
+    expect(stages).not.toContain("FINALIZED");
+    expect(stages).not.toContain("EXECUTION_SUCCESS");
+    expect(stages.at(-1)).toBe("STATE_READBACK_CONFIRMED");
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -830,7 +872,9 @@ describe("FoodGuard StudioNet client", () => {
     expect(sdk.getTransaction).toHaveBeenCalledTimes(40);
     expect(readback).toHaveBeenCalledTimes(1);
     expect(stages).toContain("RECONCILING");
-    expect(stages.at(-1)).toBe("READBACK_CONFIRMED");
+    expect(stages).not.toContain("FINALIZED");
+    expect(stages).not.toContain("EXECUTION_SUCCESS");
+    expect(stages.at(-1)).toBe("STATE_READBACK_CONFIRMED");
     expect(vi.getTimerCount()).toBe(0);
   });
 

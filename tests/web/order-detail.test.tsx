@@ -511,7 +511,7 @@ describe("participant cancellation actions", () => {
     expect(genlayerMocks.writeFoodGuard).not.toHaveBeenCalled();
   });
 
-  it("shows non-final never-resend guidance where cancellation reconciliation is owned", async () => {
+  it("keeps cancellation locked until a read-only contract check matches", async () => {
     vi.useFakeTimers();
     vi.spyOn(window, "confirm").mockReturnValue(true);
     genlayerMocks.writeFoodGuard.mockRejectedValue(
@@ -519,12 +519,24 @@ describe("participant cancellation actions", () => {
         cause: { details: new TypeError("Failed to fetch") },
       }),
     );
-    const readOrder = vi.fn(() => new Promise<OrderDetailView>(() => undefined));
+    const submittedOrder = { ...BASE_ORDER, state: "ACCEPTED" as const };
+    const cancelledOrder: OrderDetailView = {
+      ...submittedOrder,
+      courier_accepted: false,
+      refund_emitted: true,
+      restaurant_accepted: false,
+      resolution: null,
+      state: "CANCELLED_REFUNDED",
+    };
+    const readOrder = vi.fn()
+      .mockImplementationOnce(() => new Promise<OrderDetailView>(() => undefined))
+      .mockResolvedValueOnce(submittedOrder)
+      .mockResolvedValueOnce(cancelledOrder);
     renderLocalized(
       <RoleConsole
         address={RESTAURANT}
         clock={testClock(1_893_455_000n)}
-        order={{ ...BASE_ORDER, state: "ACCEPTED" }}
+        order={submittedOrder}
         readOrder={readOrder}
       />,
       "en",
@@ -549,6 +561,21 @@ describe("participant cancellation actions", () => {
     )).toBeVisible();
     expect(screen.getByRole("button", { name: "Confirm packed" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Cancel before packing" })).toBeDisabled();
+    const checkState = screen.getByRole("button", { name: "Check contract state" });
+
+    fireEvent.click(checkState);
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByText("OUTCOME_UNKNOWN")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Cancel before packing" })).toBeDisabled();
+    expect(genlayerMocks.writeFoodGuard).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Check contract state" }));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByTestId("raw-order-state")).toHaveTextContent("CANCELLED_REFUNDED");
+    expect(screen.getByText("STATE_READBACK_CONFIRMED")).toBeVisible();
+    expect(screen.getByTestId("transaction-finality")).not.toHaveAttribute("data-complete");
+    expect(screen.getByTestId("transaction-execution")).not.toHaveAttribute("data-complete");
+    expect(genlayerMocks.writeFoodGuard).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -593,11 +620,21 @@ describe("production role-action integration", () => {
   });
 
   it("locks evidence controls through local cancellation pending and OUTCOME_UNKNOWN", async () => {
-    (window as typeof window & { ethereum?: unknown }).ethereum = walletProvider(RESTAURANT);
+    const provider = walletProvider(RESTAURANT);
+    (window as typeof window & { ethereum?: unknown }).ethereum = provider;
     const acceptedOrder: OrderDetailView = { ...BASE_ORDER, resolution: null, state: "ACCEPTED" };
+    const cancelledOrder: OrderDetailView = {
+      ...acceptedOrder,
+      courier_accepted: false,
+      refund_emitted: true,
+      restaurant_accepted: false,
+      state: "CANCELLED_REFUNDED",
+    };
     const readOrder = vi.fn()
       .mockResolvedValueOnce(acceptedOrder)
-      .mockImplementation(() => new Promise<OrderDetailView>(() => undefined));
+      .mockImplementationOnce(() => new Promise<OrderDetailView>(() => undefined))
+      .mockResolvedValueOnce(acceptedOrder)
+      .mockResolvedValueOnce(cancelledOrder);
     genlayerMocks.writeFoodGuard.mockRejectedValue(
       new Error("wallet request failed", {
         cause: { details: new TypeError("Failed to fetch") },
@@ -634,6 +671,21 @@ describe("production role-action integration", () => {
     expect(screen.getByRole("button", { name: "Cancel before packing" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Confirm packed" })).toBeDisabled();
     expect(screen.getAllByRole("heading", { name: /transaction lifecycle/i })).toHaveLength(1);
+    const walletCallsBeforeRecovery = provider.request.mock.calls.length;
+
+    fireEvent.click(screen.getByRole("button", { name: "Check contract state" }));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByText("OUTCOME_UNKNOWN")).toBeVisible();
+    expect(screen.getByRole("button", { name: /submit packed evidence/i })).toBeDisabled();
+    expect(genlayerMocks.writeFoodGuard).toHaveBeenCalledTimes(1);
+    expect(provider.request).toHaveBeenCalledTimes(walletCallsBeforeRecovery);
+
+    fireEvent.click(screen.getByRole("button", { name: "Check contract state" }));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByTestId("raw-detail-state")).toHaveTextContent("CANCELLED_REFUNDED");
+    expect(screen.getByText("STATE_READBACK_CONFIRMED")).toBeVisible();
+    expect(genlayerMocks.writeFoodGuard).toHaveBeenCalledTimes(1);
+    expect(provider.request).toHaveBeenCalledTimes(walletCallsBeforeRecovery);
   });
 
   it("formats the main reserved total visibly as simulated GEN with exact wei audit text", async () => {

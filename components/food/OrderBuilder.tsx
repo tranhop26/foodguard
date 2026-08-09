@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isAddress, zeroAddress } from "viem";
 
 import type { EvidenceDocument, HexDigest, OrderItem } from "../../lib/domain";
@@ -11,7 +11,12 @@ import {
   getFoodGuardPublicAppOriginConfiguration,
   type FoodGuardPublicAppOriginConfiguration,
 } from "../../lib/genlayer/config";
-import { executeFoodGuardOperation } from "../../lib/genlayer/operations";
+import {
+  checkFoodGuardOperationState,
+  executeFoodGuardOperation,
+  type FoodGuardReadbackRecovery,
+} from "../../lib/genlayer/operations";
+import { OutcomeUnknownError } from "../../lib/genlayer/rpcResilience";
 import type { TxStage } from "../../lib/genlayer/transactions";
 import { useLocale } from "../../lib/i18n";
 import { RoleConsole, type FoodGuardOrderView } from "../order/RoleConsole";
@@ -252,6 +257,8 @@ export function OrderBuilder({
   const [creationPauseUnavailable, setCreationPauseUnavailable] = useState(false);
   const [authoritativeOrder, setAuthoritativeOrder] = useState<FoodGuardOrderView | null>(null);
   const [frozenCommitment, setFrozenCommitment] = useState<FrozenCommitment | null>(null);
+  const [recovery, setRecovery] = useState<FoodGuardReadbackRecovery<FoodGuardOrderView> | null>(null);
+  const lifecycleProofRef = useRef({ execution: false, finality: false });
 
   const items = useMemo(() => [canonicalItem(item)], [item]);
   const canonicalManifest = useMemo(() => canonicalOrderManifest(items), [items]);
@@ -384,7 +391,9 @@ export function OrderBuilder({
     deadlineBaseMs !== null &&
     Boolean(orderId.trim()) &&
     !authoritativeOrder &&
-    !pending;
+    !pending &&
+    recovery === null &&
+    stage !== "OUTCOME_UNKNOWN";
 
   function setActor(index: number, value: string) {
     setActors((current) => {
@@ -410,6 +419,20 @@ export function OrderBuilder({
     setPending(true);
     setError(null);
     setAuthoritativeOrder(null);
+    setRecovery(null);
+    lifecycleProofRef.current = { execution: false, finality: false };
+    const operationReadback = () => readFoodGuard<FoodGuardOrderView>(
+      "get_order",
+      [commitment.orderId],
+    );
+    const operationMatches = (candidate: FoodGuardOrderView) =>
+      matchesFrozenCommitment(candidate, commitment);
+    const observeStage = (nextStage: TxStage) => {
+      if (nextStage === "FINALIZED") lifecycleProofRef.current.finality = true;
+      if (nextStage === "EXECUTION_SUCCESS") lifecycleProofRef.current.execution = true;
+      setStage(nextStage);
+    };
+    let retainCommitment = false;
     try {
       const readback = await executeFoodGuardOperation<FoodGuardOrderView>({
         method: "create_order",
@@ -423,19 +446,44 @@ export function OrderBuilder({
         ],
         value: commitment.amounts.total,
         expectedAccount: commitment.actors[0],
-        onStage: setStage,
-        readback: () => readFoodGuard<FoodGuardOrderView>(
-          "get_order",
-          [commitment.orderId],
-        ),
-        matches: (candidate) => matchesFrozenCommitment(candidate, commitment),
+        onStage: observeStage,
+        readback: operationReadback,
+        matches: operationMatches,
       });
       setAuthoritativeOrder(readback);
     } catch (caught) {
+      if (caught instanceof OutcomeUnknownError) {
+        retainCommitment = true;
+        setRecovery({
+          confirmationStage:
+            lifecycleProofRef.current.finality && lifecycleProofRef.current.execution
+              ? "READBACK_CONFIRMED"
+              : "STATE_READBACK_CONFIRMED",
+          matches: operationMatches,
+          onStage: observeStage,
+          readback: operationReadback,
+        });
+      }
       setError(caught instanceof Error ? caught.message : "FoodGuard write failed");
     } finally {
       setPending(false);
+      if (!retainCommitment) setFrozenCommitment(null);
+    }
+  }
+
+  async function checkContractState() {
+    if (!recovery || pending) return;
+    setPending(true);
+    setError(null);
+    try {
+      const readback = await checkFoodGuardOperationState(recovery);
+      setAuthoritativeOrder(readback);
+      setRecovery(null);
       setFrozenCommitment(null);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "FoodGuard readback failed");
+    } finally {
+      setPending(false);
     }
   }
 
@@ -454,7 +502,7 @@ export function OrderBuilder({
                 <input
                   aria-label={label}
                   autoComplete="off"
-                  disabled={pending}
+                  disabled={pending || recovery !== null}
                   onChange={(event) => setActor(index, event.target.value)}
                   spellCheck={false}
                   type="text"
@@ -476,7 +524,7 @@ export function OrderBuilder({
             <span>{copy.order.orderId}</span>
             <input
               autoComplete="off"
-              disabled={pending}
+              disabled={pending || recovery !== null}
               onChange={(event) => setOrderId(event.target.value)}
               type="text"
               value={visibleOrderId}
@@ -486,7 +534,7 @@ export function OrderBuilder({
             <span>{copy.order.deliveryFee}</span>
             <input
               inputMode="numeric"
-              disabled={pending}
+              disabled={pending || recovery !== null}
               onChange={(event) => setDeliveryFeeWei(event.target.value.trim())}
               type="text"
               value={visibleDeliveryFeeWei}
@@ -552,6 +600,16 @@ export function OrderBuilder({
         >
           {copy.order.create}
         </button>
+        {stage === "OUTCOME_UNKNOWN" && recovery && (
+          <button
+            className="button button--quiet"
+            disabled={pending}
+            onClick={() => void checkContractState()}
+            type="button"
+          >
+            {copy.console.checkContractState}
+          </button>
+        )}
         {pending && <p className="form-notice" role="status">{copy.order.writing}</p>}
         {stage && (
           <p className={`transaction-stage${stage === "CONSENSUS_FAILED" || stage === "EXECUTION_ERROR" ? " transaction-stage--failure" : ""}`}>

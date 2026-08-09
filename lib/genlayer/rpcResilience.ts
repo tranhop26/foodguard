@@ -168,14 +168,24 @@ export async function withStudioNetBackoff<T>(
   }
 }
 
-const inFlightReads = new Map<string, Promise<unknown>>();
+const singleFlightLeaseMs = 30_000;
+
+interface InFlightRead {
+  expiresAt: number;
+  promise: Promise<unknown>;
+}
+
+const inFlightReads = new Map<string, InFlightRead>();
 
 export function singleFlight<T>(
   key: string,
   operation: () => Promise<T>,
 ): Promise<T> {
   const existing = inFlightReads.get(key);
-  if (existing) return existing as Promise<T>;
+  if (existing && existing.expiresAt > Date.now()) {
+    return existing.promise as Promise<T>;
+  }
+  if (existing) inFlightReads.delete(key);
 
   let operationPromise: Promise<T>;
   try {
@@ -183,11 +193,14 @@ export function singleFlight<T>(
   } catch (error: unknown) {
     operationPromise = Promise.reject(error);
   }
+  const entry = {} as InFlightRead;
   const sharedPromise = operationPromise.finally(() => {
-    if (inFlightReads.get(key) === sharedPromise) {
+    if (inFlightReads.get(key) === entry) {
       inFlightReads.delete(key);
     }
   });
-  inFlightReads.set(key, sharedPromise);
+  entry.promise = sharedPromise;
+  entry.expiresAt = Date.now() + singleFlightLeaseMs;
+  inFlightReads.set(key, entry);
   return sharedPromise;
 }

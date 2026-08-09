@@ -511,6 +511,71 @@ describe("FoodGuard order builder", () => {
     expect(mocks.writeFoodGuard).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps create locked until a read-only contract check matches the frozen commitment", async () => {
+    const provider = installWallet();
+    mocks.writeFoodGuard.mockRejectedValue(
+      new Error("wallet request failed", {
+        cause: { error: new TypeError("Failed to fetch") },
+      }),
+    );
+    let exactOrder: FoodGuardOrderView | undefined;
+    mocks.readFoodGuard.mockImplementation((method: string) => {
+      if (method === "get_creation_paused") return Promise.resolve(false);
+      if (method !== "get_order") throw new Error(`Unexpected method: ${method}`);
+      const [, args, value] = mocks.writeFoodGuard.mock.calls[0];
+      const deadlines = JSON.parse(args[5] as string) as Record<string, number>;
+      exactOrder ??= {
+        acceptance_deadline: deadlines.acceptance_deadline,
+        appeal_deadline: deadlines.appeal_deadline,
+        courier: args[2] as string,
+        courier_accepted: false,
+        customer: CUSTOMER,
+        delivery_deadline: deadlines.delivery_deadline,
+        delivery_fee: String(args[4]),
+        manifest_json: args[3] as string,
+        order_id: args[0] as string,
+        packing_deadline: deadlines.packing_deadline,
+        restaurant: args[1] as string,
+        restaurant_accepted: false,
+        review_deadline: deadlines.review_deadline,
+        state: "FUNDED",
+        total_value: String(value),
+      };
+      if (mocks.readFoodGuard.mock.calls.filter(([name]) => name === "get_order").length === 1) {
+        return new Promise<FoodGuardOrderView>(() => undefined);
+      }
+      if (mocks.readFoodGuard.mock.calls.filter(([name]) => name === "get_order").length === 2) {
+        return Promise.resolve({ ...exactOrder, order_id: "fg-other" });
+      }
+      return Promise.resolve(exactOrder);
+    });
+    renderBuilder({ deliveryFeeWei: "50" });
+    fireEvent.click(screen.getByRole("button", { name: /kết nối ví/i }));
+    const createButton = screen.getByRole("button", { name: /tạo và ký quỹ/i });
+    await waitFor(() => expect(createButton).toBeEnabled());
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    fireEvent.click(createButton);
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_000); });
+    expect(screen.getByText("OUTCOME_UNKNOWN")).toBeVisible();
+    expect(createButton).toBeDisabled();
+    const walletCallsBeforeRecovery = provider.request.mock.calls.length;
+
+    fireEvent.click(screen.getByRole("button", { name: "Kiểm tra trạng thái contract" }));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByText("OUTCOME_UNKNOWN")).toBeVisible();
+    expect(createButton).toBeDisabled();
+    expect(mocks.writeFoodGuard).toHaveBeenCalledTimes(1);
+    expect(provider.request).toHaveBeenCalledTimes(walletCallsBeforeRecovery);
+
+    fireEvent.click(screen.getByRole("button", { name: "Kiểm tra trạng thái contract" }));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByTestId("raw-order-state")).toHaveTextContent("FUNDED");
+    expect(screen.getByText("STATE_READBACK_CONFIRMED")).toBeVisible();
+    expect(mocks.writeFoodGuard).toHaveBeenCalledTimes(1);
+    expect(provider.request).toHaveBeenCalledTimes(walletCallsBeforeRecovery);
+  });
+
   it("freezes every submitted commitment while wallet confirmation and readback are pending", async () => {
     mocks.writeFoodGuard.mockImplementation(() => new Promise(() => undefined));
     renderBuilder({ deliveryFeeWei: "50" });

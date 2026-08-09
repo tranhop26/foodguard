@@ -27,6 +27,17 @@ export interface FoodGuardOperation<T> {
   matches: (readback: T) => boolean;
 }
 
+export type ReadbackConfirmationStage =
+  | "READBACK_CONFIRMED"
+  | "STATE_READBACK_CONFIRMED";
+
+export interface FoodGuardReadbackRecovery<T> {
+  confirmationStage: ReadbackConfirmationStage;
+  matches: (readback: T) => boolean;
+  onStage: TxStageHandler;
+  readback: () => Promise<T>;
+}
+
 function trustedRecoverableHash(error: unknown): string | null {
   if (
     !(error instanceof WalletAccountChangedAfterSubmissionError) &&
@@ -83,7 +94,7 @@ async function reconcileFoodGuardOperation<T>(
   input: FoodGuardOperation<T>,
   ambiguousCause: unknown,
   deadline = Date.now() + reconciliationTimeoutMs,
-  confirmationStage: "READBACK_CONFIRMED" | "STATE_READBACK_CONFIRMED" = "READBACK_CONFIRMED",
+  confirmationStage: ReadbackConfirmationStage = "READBACK_CONFIRMED",
 ): Promise<T> {
   input.onStage("RECONCILING");
   if (deadline <= Date.now()) {
@@ -113,9 +124,35 @@ async function reconcileFoodGuardOperation<T>(
   }
 }
 
+export async function checkFoodGuardOperationState<T>(
+  input: FoodGuardReadbackRecovery<T>,
+): Promise<T> {
+  const deadline = Date.now() + reconciliationTimeoutMs;
+  try {
+    const candidate = await withReconciliationDeadline(input.readback(), deadline);
+    if (!input.matches(candidate)) throw new OutcomeUnknownError();
+    input.onStage(input.confirmationStage);
+    return candidate;
+  } catch {
+    input.onStage("OUTCOME_UNKNOWN");
+    throw new OutcomeUnknownError();
+  }
+}
+
 export async function executeFoodGuardOperation<T>(
   input: FoodGuardOperation<T>,
 ): Promise<T> {
+  let finalizedObserved = false;
+  let executionSuccessObserved = false;
+  const observeTrackingStage: TxStageHandler = (stage) => {
+    if (stage === "FINALIZED") finalizedObserved = true;
+    if (stage === "EXECUTION_SUCCESS") executionSuccessObserved = true;
+    if (stage !== "READBACK_CONFIRMED") input.onStage(stage);
+  };
+  const trackedConfirmationStage = (): ReadbackConfirmationStage =>
+    finalizedObserved && executionSuccessObserved
+      ? "READBACK_CONFIRMED"
+      : "STATE_READBACK_CONFIRMED";
   let hash: string;
   try {
     hash = await writeFoodGuard(
@@ -140,9 +177,7 @@ export async function executeFoodGuardOperation<T>(
   }
 
   try {
-    await trackTransaction<unknown>(hash, (stage) => {
-      if (stage !== "READBACK_CONFIRMED") input.onStage(stage);
-    });
+    await trackTransaction<unknown>(hash, observeTrackingStage);
   } catch (error: unknown) {
     if (
       !(error instanceof TransactionTrackingTimeoutError) &&
@@ -150,7 +185,12 @@ export async function executeFoodGuardOperation<T>(
     ) {
       throw error;
     }
-    return reconcileFoodGuardOperation(input, error);
+    return reconcileFoodGuardOperation(
+      input,
+      error,
+      Date.now() + reconciliationTimeoutMs,
+      trackedConfirmationStage(),
+    );
   }
 
   const readbackDeadline = Date.now() + reconciliationTimeoutMs;
@@ -160,15 +200,21 @@ export async function executeFoodGuardOperation<T>(
       readbackDeadline,
     );
     if (input.matches(finalReadback)) {
-      input.onStage("READBACK_CONFIRMED");
+      input.onStage(trackedConfirmationStage());
       return finalReadback;
     }
   } catch (error: unknown) {
-    return reconcileFoodGuardOperation(input, error, readbackDeadline);
+    return reconcileFoodGuardOperation(
+      input,
+      error,
+      readbackDeadline,
+      trackedConfirmationStage(),
+    );
   }
   return reconcileFoodGuardOperation(
     input,
     new TypeError("Failed to fetch a matching authoritative readback"),
     readbackDeadline,
+    trackedConfirmationStage(),
   );
 }

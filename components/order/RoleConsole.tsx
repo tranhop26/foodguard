@@ -4,7 +4,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { OrderState } from "../../lib/domain";
 import { readFoodGuard } from "../../lib/genlayer/client";
-import { executeFoodGuardOperation } from "../../lib/genlayer/operations";
+import {
+  checkFoodGuardOperationState,
+  executeFoodGuardOperation,
+  type FoodGuardReadbackRecovery,
+} from "../../lib/genlayer/operations";
+import { OutcomeUnknownError } from "../../lib/genlayer/rpcResilience";
 import type { TxStage } from "../../lib/genlayer/transactions";
 import { useLocale } from "../../lib/i18n";
 import {
@@ -282,6 +287,10 @@ export function RoleConsole<TOrder extends FoodGuardOrderView = FoodGuardOrderVi
   const [stage, setStage] = useState<TxStage | null>(null);
   const [stageOperation, setStageOperation] = useState<RoleAction["method"] | null>(null);
   const stageRef = useRef<TxStage | null>(null);
+  const lifecycleProofRef = useRef({ execution: false, finality: false });
+  const [recovery, setRecovery] = useState<
+    (FoodGuardReadbackRecovery<TOrder> & { method: RoleAction["method"] }) | null
+  >(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [nowSeconds, setNowSeconds] = useState<bigint | null>(null);
@@ -365,6 +374,8 @@ export function RoleConsole<TOrder extends FoodGuardOrderView = FoodGuardOrderVi
       return;
     }
     stageRef.current = null;
+    lifecycleProofRef.current = { execution: false, finality: false };
+    setRecovery(null);
     setStage(null);
     setStageOperation(action.method);
     setPending(true);
@@ -372,6 +383,22 @@ export function RoleConsole<TOrder extends FoodGuardOrderView = FoodGuardOrderVi
     const submittedAction = action;
     const submittedOrder = authoritativeOrder;
     const expectedActor = address ?? undefined;
+    const operationReadback = () => readOrder
+      ? readOrder(submittedOrder.order_id)
+      : readFoodGuard<TOrder>("get_order", [submittedOrder.order_id]);
+    const operationMatches = (candidate: TOrder) => matchesRoleActionReadback(
+      submittedAction.method,
+      candidate,
+      submittedOrder,
+      expectedActor,
+    );
+    const observeStage = (nextStage: TxStage) => {
+      if (nextStage === "FINALIZED") lifecycleProofRef.current.finality = true;
+      if (nextStage === "EXECUTION_SUCCESS") lifecycleProofRef.current.execution = true;
+      stageRef.current = nextStage;
+      setStage(nextStage);
+      publishOperationState(submittedAction.method, true, nextStage);
+    };
     try {
       const readback = submittedAction.requiresEvidence
         ? await onAction!(submittedAction, submittedOrder)
@@ -380,28 +407,47 @@ export function RoleConsole<TOrder extends FoodGuardOrderView = FoodGuardOrderVi
             args: [submittedOrder.order_id],
             value: 0n,
             expectedAccount: expectedActor,
-            onStage: (nextStage) => {
-              stageRef.current = nextStage;
-              setStage(nextStage);
-              publishOperationState(submittedAction.method, true, nextStage);
-            },
-            readback: () => readOrder
-              ? readOrder(submittedOrder.order_id)
-              : readFoodGuard<TOrder>("get_order", [submittedOrder.order_id]),
-            matches: (candidate) => matchesRoleActionReadback(
-              submittedAction.method,
-              candidate,
-              submittedOrder,
-              expectedActor,
-            ),
+            onStage: observeStage,
+            readback: operationReadback,
+            matches: operationMatches,
           });
       setAuthoritativeOrder(readback);
       if (!submittedAction.requiresEvidence) onOrderChange?.(readback);
     } catch (caught) {
+      if (!submittedAction.requiresEvidence && caught instanceof OutcomeUnknownError) {
+        setRecovery({
+          confirmationStage:
+            lifecycleProofRef.current.finality && lifecycleProofRef.current.execution
+              ? "READBACK_CONFIRMED"
+              : "STATE_READBACK_CONFIRMED",
+          matches: operationMatches,
+          method: submittedAction.method,
+          onStage: observeStage,
+          readback: operationReadback,
+        });
+      }
       setError(caught instanceof Error ? caught.message : "FoodGuard write failed");
     } finally {
       setPending(false);
       publishOperationState(submittedAction.method, false, stageRef.current);
+    }
+  }
+
+  async function checkContractState() {
+    if (!recovery || pending) return;
+    setPending(true);
+    setError(null);
+    publishOperationState(recovery.method, true, stageRef.current);
+    try {
+      const readback = await checkFoodGuardOperationState(recovery);
+      setAuthoritativeOrder(readback);
+      onOrderChange?.(readback);
+      setRecovery(null);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "FoodGuard readback failed");
+    } finally {
+      setPending(false);
+      publishOperationState(recovery.method, false, stageRef.current);
     }
   }
 
@@ -442,6 +488,16 @@ export function RoleConsole<TOrder extends FoodGuardOrderView = FoodGuardOrderVi
           {copy.console.actions[action.id]}
         </button>
       ))}
+      {stage === "OUTCOME_UNKNOWN" && recovery && (
+        <button
+          className="button button--quiet"
+          disabled={pending}
+          onClick={() => void checkContractState()}
+          type="button"
+        >
+          {copy.console.checkContractState}
+        </button>
+      )}
       {pending && <p className="form-notice" role="status">{copy.console.pending}</p>}
       {showLifecycle && (
         <TransactionLifecycle
