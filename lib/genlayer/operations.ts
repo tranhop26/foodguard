@@ -111,9 +111,8 @@ export async function executeFoodGuardOperation<T>(
     return reconcileFoodGuardOperation(input, error);
   }
 
-  let trackedReadback: T;
   try {
-    trackedReadback = await trackTransaction<T>(hash, (stage) => {
+    await trackTransaction<unknown>(hash, (stage) => {
       if (stage !== "READBACK_CONFIRMED") input.onStage(stage);
     });
   } catch (error: unknown) {
@@ -126,9 +125,14 @@ export async function executeFoodGuardOperation<T>(
     return reconcileFoodGuardOperation(input, error);
   }
 
-  if (input.matches(trackedReadback)) {
-    input.onStage("READBACK_CONFIRMED");
-    return trackedReadback;
+  try {
+    const finalReadback = await input.readback();
+    if (input.matches(finalReadback)) {
+      input.onStage("READBACK_CONFIRMED");
+      return finalReadback;
+    }
+  } catch (error: unknown) {
+    return reconcileFoodGuardOperation(input, error);
   }
   return reconcileFoodGuardOperation(
     input,

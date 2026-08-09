@@ -767,7 +767,7 @@ describe("FoodGuard StudioNet client", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("suppresses tracked readback confirmation until the operation predicate matches", async () => {
+  it("suppresses the tracker confirmation until the operation readback matches", async () => {
     const stages: TxStage[] = [];
     const trackedOrder = {
       courier: "0x3333333333333333333333333333333333333333",
@@ -789,6 +789,12 @@ describe("FoodGuard StudioNet client", () => {
       statusName: TransactionStatus.FINALIZED,
       txExecutionResultName: ExecutionResult.FINISHED_WITH_RETURN,
     });
+    const readback = vi.fn(async () => {
+      expect(stages).toContain("FINALIZED");
+      expect(stages).toContain("EXECUTION_SUCCESS");
+      expect(stages).not.toContain("READBACK_CONFIRMED");
+      return matchedOrder;
+    });
 
     await expect(executeFoodGuardOperation<typeof trackedOrder>({
       method: "accept_restaurant",
@@ -796,15 +802,59 @@ describe("FoodGuard StudioNet client", () => {
       value: 0n,
       expectedAccount: ADDRESS,
       onStage: (stage) => stages.push(stage),
-      readback: vi.fn().mockResolvedValue(matchedOrder),
+      readback,
       matches: (candidate) => candidate.restaurant_accepted === true,
     })).resolves.toEqual(matchedOrder);
 
+    expect(readback).toHaveBeenCalledTimes(1);
     expect(stages.filter((stage) => stage === "READBACK_CONFIRMED")).toHaveLength(1);
-    expect(stages.indexOf("RECONCILING")).toBeLessThan(
-      stages.indexOf("READBACK_CONFIRMED"),
-    );
+    expect(stages).not.toContain("RECONCILING");
+    expect(stages.at(-1)).toBe("READBACK_CONFIRMED");
     expect(sdk.writeContract).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns the enriched operation readback after normal tracked success", async () => {
+    const stages: TxStage[] = [];
+    const trackedOrder = {
+      courier: "0x3333333333333333333333333333333333333333",
+      courier_accepted: false,
+      customer: "0x1111111111111111111111111111111111111111",
+      order_id: "fg-1",
+      restaurant: ADDRESS,
+      restaurant_accepted: true,
+      state: "PARTIALLY_ACCEPTED",
+    };
+    const enrichedOrder = {
+      ...trackedOrder,
+      evidence: [{ evidence_index: 0, sha256: `0x${"d".repeat(64)}` }],
+      mutual_settlement: null,
+      resolution: null,
+      settlement: { settlement_id: `0x${"e".repeat(64)}` },
+      settlement_proposals: [],
+    };
+    const readback = vi.fn().mockResolvedValue(enrichedOrder);
+    sdk.writeContract.mockResolvedValue(HASH);
+    sdk.readContract.mockResolvedValue(trackedOrder);
+    mockReceipt({
+      statusName: TransactionStatus.FINALIZED,
+      txExecutionResultName: ExecutionResult.FINISHED_WITH_RETURN,
+    });
+
+    await expect(executeFoodGuardOperation<typeof enrichedOrder>({
+      method: "accept_restaurant",
+      args: ["fg-1"],
+      value: 0n,
+      expectedAccount: ADDRESS,
+      onStage: (stage) => stages.push(stage),
+      readback,
+      matches: (candidate) => candidate.restaurant_accepted === true,
+    })).resolves.toEqual(enrichedOrder);
+
+    expect(readback).toHaveBeenCalledTimes(1);
+    expect(stages).toContain("FINALIZED");
+    expect(stages).toContain("EXECUTION_SUCCESS");
+    expect(stages.filter((stage) => stage === "READBACK_CONFIRMED")).toHaveLength(1);
+    expect(stages.at(-1)).toBe("READBACK_CONFIRMED");
   });
 
   it("does not reconcile a known-hash explicit consensus failure", async () => {

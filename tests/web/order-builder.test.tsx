@@ -389,6 +389,29 @@ describe("FoodGuard order builder", () => {
   });
 
   it("funds create_order with the exact bigint subtotal plus delivery fee and waits for readback", async () => {
+    mocks.readFoodGuard.mockImplementation((method: string) => {
+      if (method === "get_creation_paused") return Promise.resolve(false);
+      if (method !== "get_order") throw new Error(`Unexpected method: ${method}`);
+      const [, args, value] = mocks.writeFoodGuard.mock.calls[0];
+      const deadlines = JSON.parse(args[5] as string) as Record<string, number>;
+      return Promise.resolve({
+        acceptance_deadline: deadlines.acceptance_deadline,
+        appeal_deadline: deadlines.appeal_deadline,
+        courier: args[2] as string,
+        courier_accepted: false,
+        customer: CUSTOMER,
+        delivery_deadline: deadlines.delivery_deadline,
+        delivery_fee: String(args[4]),
+        manifest_json: args[3] as string,
+        order_id: args[0] as string,
+        packing_deadline: deadlines.packing_deadline,
+        restaurant: args[1] as string,
+        restaurant_accepted: false,
+        review_deadline: deadlines.review_deadline,
+        state: "FUNDED" as const,
+        total_value: String(value),
+      });
+    });
     renderBuilder({ deliveryFeeWei: "50" });
 
     fireEvent.click(screen.getByRole("button", { name: /kết nối ví/i }));

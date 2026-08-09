@@ -356,6 +356,131 @@ describe("production role-action integration", () => {
     expect(genlayerMocks.writeFoodGuard).toHaveBeenCalledTimes(1);
     expect(readOrder).toHaveBeenCalledTimes(2);
   });
+
+  it("keeps the enriched authoritative order after a normal tracked hash succeeds", async () => {
+    (window as typeof window & { ethereum?: unknown }).ethereum = {
+      request: vi.fn(({ method }: { method: string }) => {
+        if (method === "eth_requestAccounts" || method === "eth_accounts") {
+          return Promise.resolve([RESTAURANT]);
+        }
+        if (method === "eth_chainId") return Promise.resolve("0xf22f");
+        throw new Error(`unexpected wallet method ${method}`);
+      }),
+    };
+    const packedEvidence: EvidenceRecordView = {
+      action: "PACKED",
+      actor_wallet: RESTAURANT,
+      chain_id: "61999",
+      contract_address: "0x4444444444444444444444444444444444444444",
+      effective_action: "PACKED",
+      evidence_index: 0,
+      expires_at: "2030-01-02T02:00:00.000Z",
+      issuer_id: "foodguard-web",
+      item_observations: [
+        {
+          condition_statuses: [{ condition_index: 0, status: "MET" }],
+          item_id: "item-1",
+          item_status: "AS_ORDERED",
+          quantity_status: "EXACT",
+          substitution_index: -1,
+        },
+        {
+          condition_statuses: [],
+          item_id: "item-2",
+          item_status: "AS_ORDERED",
+          quantity_status: "EXACT",
+          substitution_index: -1,
+        },
+      ],
+      nonce: "packed-normal-hash-success",
+      observed_at: "2030-01-01T00:00:00.000Z",
+      order_id: "fg-mixed",
+      schema_version: "foodguard-evidence/1",
+      sha256: `0x${"77".repeat(32)}`,
+      source_url: "https://evidence.foodguard.vn/packed-normal-hash-success.json",
+      subject: "order:fg-mixed",
+      submitted_at: "2030-01-01T00:00:00.000Z",
+    };
+    const initialOrder: OrderDetailView = {
+      ...BASE_ORDER,
+      delivery_deadline: "1893455999",
+      evidence: [packedEvidence],
+      mutual_settlement: null,
+      resolution: null,
+      resolution_round: "0",
+      settlement: null,
+      settlement_proposals: [],
+      state: "READY_FOR_PICKUP",
+    };
+    const enrichedRefund: OrderDetailView = {
+      ...initialOrder,
+      delivery_settled: true,
+      items_settled: true,
+      refund_emitted: true,
+      settlement: {
+        courier_wei: "0",
+        customer_wei: "950",
+        restaurant_wei: "0",
+        settlement_id: `0x${"88".repeat(32)}`,
+      },
+      state: "FULFILLMENT_TIMEOUT_REFUNDED",
+    };
+    const trackedBaseOrder: OrderDetailView = {
+      ...enrichedRefund,
+      evidence: undefined,
+      mutual_settlement: undefined,
+      resolution: undefined,
+      resolution_round: undefined,
+      settlement: undefined,
+      settlement_proposals: undefined,
+    };
+    const readOrder = vi.fn()
+      .mockResolvedValueOnce(initialOrder)
+      .mockResolvedValueOnce(enrichedRefund);
+    const legacyTransact = vi.fn();
+    genlayerMocks.writeFoodGuard.mockResolvedValue(`0x${"aa".repeat(32)}`);
+    genlayerMocks.trackTransaction.mockResolvedValue(trackedBaseOrder);
+
+    renderLocalized(
+      <OrderDetailWorkspace
+        configuration={{
+          contractAddress: "0x4444444444444444444444444444444444444444",
+          chainId: "61999",
+          message: null,
+          readsEnabled: true,
+          status: "READY",
+          writesEnabled: true,
+        }}
+        orderId="fg-mixed"
+        readChainTime={vi.fn().mockResolvedValue(1_893_456_000n)}
+        readOrder={readOrder}
+        transact={legacyTransact}
+      />,
+      "en",
+    );
+
+    expect(await screen.findByText("READY_FOR_PICKUP", {
+      selector: "[data-testid='raw-detail-state']",
+    })).toBeVisible();
+    expect(screen.getByRole("link", {
+      name: packedEvidence.source_url,
+    })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: /connect wallet/i }));
+    fireEvent.click(await screen.findByRole("button", {
+      name: /refund stalled fulfillment/i,
+    }));
+
+    expect(await screen.findByText("FULFILLMENT_TIMEOUT_REFUNDED", {
+      selector: "[data-testid='raw-detail-state']",
+    })).toBeVisible();
+    expect(readOrder).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("link", {
+      name: packedEvidence.source_url,
+    })).toBeVisible();
+    expect(legacyTransact).not.toHaveBeenCalled();
+    expect(genlayerMocks.writeFoodGuard).toHaveBeenCalledTimes(1);
+    expect(genlayerMocks.trackTransaction).toHaveBeenCalledTimes(1);
+  });
 });
 
 function renderLocalized(node: React.ReactNode, locale: Locale) {
