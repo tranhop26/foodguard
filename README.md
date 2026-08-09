@@ -2,7 +2,7 @@
 
 FoodGuard is a bilingual proof-marketplace demonstration for evidence-bound food orders on GenLayer StudioNet.
 
-> **StudioNet · Simulated GEN.** This repository is not production payments software. FoodGuard V1 is deployed at [`0x9214256f05c613Bacaba8e7E8762C62B5BDB52A5`](https://explorer-studio.genlayer.com/address/0x9214256f05c613Bacaba8e7E8762C62B5BDB52A5), and the verified production UI is available at [`foodguard-genlayer.vercel.app`](https://foodguard-genlayer.vercel.app). Unconfigured local builds remain locked as `DEPLOYMENT_REQUIRED`.
+> **StudioNet · Simulated GEN.** This repository is not production payments software. FoodGuard V2 is deployed at [`0xA672f8EbAdA651ad1bE6a22c0558Fc94c6422423`](https://explorer-studio.genlayer.com/address/0xA672f8EbAdA651ad1bE6a22c0558Fc94c6422423); the frozen V1 deployment remains separately recorded for its existing orders. The production UI is available at [`foodguard-genlayer.vercel.app`](https://foodguard-genlayer.vercel.app). Unconfigured local builds remain locked as `DEPLOYMENT_REQUIRED`.
 
 ## English
 
@@ -16,7 +16,7 @@ FoodGuard separates a food commitment from evidence about it and from the contra
 | Restaurant wallet | Accepts and records bounded packing facts | Receives only item value allocated by resolution or a fully signed mutual settlement | `PACKED`, `CURE`, `APPEAL` | Wallet + contract state gate each action | A separate, nonzero wallet is required |
 | Courier wallet | Accepts and records pickup/delivery facts | Receives only the delivery-fee allocation | `PICKED_UP`, `DELIVERED`, `CURE`, `APPEAL` | Wallet + contract state gate each action | A third separate, nonzero wallet is required |
 | GenLayer validators | Resolve typed evidence to item and delivery enums | No value moves at resolution; settlement later applies the stored decision | Canonical public envelopes and their committed digests | Consensus failure leaves the prior state and reserves unchanged | Validators do not hold participant wallet keys |
-| FoodGuard V1 contract | Enforces transitions, append-only evidence, conservation, deadlines, and one-time settlement | `MATCHED` pays the restaurant; other resolved item outcomes refund the customer; delivered fee pays courier; `UNRESOLVED` remains locked | `foodguard-evidence/1` metadata plus action-specific typed facts | Contract readback is authoritative | Contract escrow holds only Simulated GEN reserved for orders |
+| FoodGuard V2 contract | Enforces transitions, participant cancellation before packing, append-only evidence, conservation, deadlines, and one-time settlement | `MATCHED` pays the restaurant; other resolved item outcomes refund the customer; delivered fee pays courier; `UNRESOLVED` remains locked | `foodguard-evidence/1` metadata plus action-specific typed facts | Contract readback is authoritative | Contract escrow holds only Simulated GEN reserved for orders |
 
 The three participant addresses must be valid, nonzero, and pairwise distinct. A connected wallet is checked again at action time. Payable creation previews the exact integer-wei subtotal, delivery fee, total, manifest, deadlines, digest, customer account, and contract/network before wallet confirmation.
 
@@ -92,7 +92,7 @@ The secret scan reads tracked worktree content, staged index content, and untrac
 
 FoodGuard V1's exact contract classification is `INTENTIONALLY_FROZEN`: it is a frozen, non-upgradeable contract design. The deployer can pause **new order creation only**; the UI reads `get_creation_paused()` and fails closed for new funding if that authoritative read is unavailable. There is no upgrade proxy, arbitrary admin rewrite, custody sweep, or automatic migration of active orders. A defect therefore requires pausing creation, auditing every active V1 order, exporting public evidence, deploying reviewed V2 source after confirmation, routing only new orders to V2, and preserving V1 readback/action access until its orders are terminal. See `docs/recovery-runbook.md`.
 
-The deployed V1 source and address remain frozen and unchanged. The V2 source in this repository adds participant-initiated `cancel_before_packed` while an order is still `FUNDED`, `PARTIALLY_ACCEPTED`, or `ACCEPTED`, before packing. That V2 behavior is **source-only, not live**: it must not be attributed to StudioNet until a separate deployment is explicitly confirmed and recorded with its address, transaction, execution result, source hash, and authoritative readback.
+The deployed V1 source and address remain frozen and unchanged. V2 adds participant-initiated `cancel_before_packed` while an order is still `FUNDED`, `PARTIALLY_ACCEPTED`, or `ACCEPTED`, before packing. V2 is separately deployed and verified on StudioNet at `0xA672f8EbAdA651ad1bE6a22c0558Fc94c6422423`; this deployment proof does not by itself establish a live three-wallet workflow.
 
 Known limits: StudioNet and Simulated GEN are non-production; evidence availability and truth remain external assumptions; a digest proves integrity, not physical correctness; browser tests use local doubles; the contract and production UI are live but the promoted three-wallet workflow branches have not yet been exercised on StudioNet; and unresolved/escalated funds may require cure or a fully signed mutual settlement.
 
@@ -108,7 +108,7 @@ FoodGuard tách ba phần: cam kết món ăn, bằng chứng về cam kết, v�
 | Ví nhà hàng | Nhận đơn và ghi sự kiện đóng gói giới hạn | Chỉ nhận giá trị món được phân bổ | `PACKED`, `CURE`, `APPEAL` | Ví + trạng thái contract khóa/mở hành động | Phải là ví hợp lệ, khác hai ví còn lại |
 | Ví courier | Nhận đơn, ghi nhận lấy/giao hàng | Chỉ nhận phần phí giao được phân bổ | `PICKED_UP`, `DELIVERED`, `CURE`, `APPEAL` | Ví + trạng thái contract khóa/mở hành động | Là ví hợp lệ thứ ba, khác hai ví còn lại |
 | Validator GenLayer | Phân xử dữ kiện đã giới hạn thành enum món và giao hàng | Phân xử chưa di chuyển tiền; quyết toán sau đó mới áp dụng kết quả lưu | Envelope chuẩn hóa và digest đã cam kết | Lỗi đồng thuận giữ nguyên trạng thái và tiền dự trữ | Validator không giữ khóa ví người tham gia |
-| Contract FoodGuard V1 | Ép state machine, deadline, bằng chứng ghi nối thêm và bảo toàn giá trị | `UNRESOLVED` khóa tiền; các enum cuối xác định thanh toán/hoàn tiền | `foodguard-evidence/1` | Dữ liệu đọc lại từ contract là nguồn có thẩm quyền | Escrow chỉ giữ Simulated GEN của đơn |
+| Contract FoodGuard V2 | Ép state machine, hủy trước khi đóng gói, deadline, bằng chứng ghi nối thêm và bảo toàn giá trị | `UNRESOLVED` khóa tiền; các enum cuối xác định thanh toán/hoàn tiền | `foodguard-evidence/1` | Dữ liệu đọc lại từ contract là nguồn có thẩm quyền | Escrow chỉ giữ Simulated GEN của đơn |
 
 Ba ví phải hợp lệ, khác địa chỉ zero và khác nhau từng đôi một. Trước khi xác nhận ví, giao diện hiển thị chính xác subtotal, phí giao, tổng wei phải trả, manifest, deadline, digest, tài khoản khách hàng, chain và contract. Thành công bắt buộc đi qua `FINALIZED` → `EXECUTION_SUCCESS` → `READBACK_CONFIRMED`; chỉ finality là chưa đủ.
 
@@ -122,12 +122,13 @@ Dùng các lệnh trong phần English để chạy contract test, web test, bro
 
 Phân loại contract chính xác của V1 là `INTENTIONALLY_FROZEN`: contract đóng băng, không upgrade. Deployer chỉ có thể dừng tạo **đơn mới**; không thể sửa tùy ý, quét escrow hoặc tự động chuyển đơn đang chạy. Khi có lỗi: dừng tạo đơn sau xác nhận, kiểm kê đơn V1, xuất bằng chứng, review/deploy V2 sau xác nhận, chuyển đơn mới sang V2, và tiếp tục giữ giao diện V1 cho đến khi mọi đơn cũ kết thúc. Xác nhận deployment phải hiển thị chính token `INTENTIONALLY_FROZEN`. Mọi deployment StudioNet, deployment Vercel và push GitHub đều có cổng xác nhận riêng ngay tại thời điểm hành động.
 
-Source và địa chỉ V1 đã deploy vẫn đóng băng, không thay đổi. Source V2 trong repository bổ sung `cancel_before_packed` do người tham gia khởi tạo khi đơn còn `FUNDED`, `PARTIALLY_ACCEPTED` hoặc `ACCEPTED`, trước khi đóng gói. Hành vi V2 này mới chỉ tồn tại trong source, **chưa live**; không được gán cho StudioNet cho đến khi một deployment riêng được xác nhận và ghi nhận đầy đủ địa chỉ, giao dịch, execution, source hash và readback có thẩm quyền.
+Source và địa chỉ V1 đã deploy vẫn đóng băng, không thay đổi. V2 bổ sung `cancel_before_packed` do người tham gia khởi tạo khi đơn còn `FUNDED`, `PARTIALLY_ACCEPTED` hoặc `ACCEPTED`, trước khi đóng gói. V2 đã được deploy và xác minh riêng trên StudioNet tại `0xA672f8EbAdA651ad1bE6a22c0558Fc94c6422423`; bằng chứng deployment này chưa thay thế bằng chứng workflow live ba ví.
 
 ## Repository references
 
 - Recovery: `docs/recovery-runbook.md`
 - Non-deployable manifest schema: `deploy/studionet-manifest.example.json`
 - Verified StudioNet deployment: `deploy/studionet-manifest.json`
+- Verified StudioNet V2 deployment: `deploy/studionet-v2-manifest.json`
 - Live-proof template: `docs/verification/proof-matrix.md`
 - Contract: `contracts/food_guard.py`
