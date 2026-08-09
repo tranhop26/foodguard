@@ -46,8 +46,15 @@ export class TransactionExecutionError extends Error {
 }
 
 export class TransactionTrackingTimeoutError extends Error {
-  constructor(operation: "transaction status" | "order readback") {
-    super(`FoodGuard ${operation} timed out before confirmation`);
+  constructor(
+    operation: "transaction status" | "order readback",
+    attempts?: number,
+  ) {
+    super(
+      attempts === undefined
+        ? `FoodGuard ${operation} timed out before confirmation`
+        : `FoodGuard ${operation} timed out after ${attempts} attempts`,
+    );
     this.name = "TransactionTrackingTimeoutError";
   }
 }
@@ -281,7 +288,5 @@ export async function trackTransaction<T = unknown>(
     }
   }
 
-  throw new Error(
-    `FoodGuard transaction tracking timed out after ${maxAttempts} attempts`,
-  );
+  throw new TransactionTrackingTimeoutError("transaction status", maxAttempts);
 }

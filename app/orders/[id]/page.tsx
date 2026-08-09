@@ -1017,19 +1017,17 @@ export function OrderDetailWorkspace({
   }
 
   async function roleAction(action: RoleAction, currentOrder: OrderDetailView) {
-    if (action.requiresEvidence) {
-      const actionByMethod: Record<string, ActiveEvidenceRequest["action"]> = {
-        submit_claim_evidence: "CUSTOMER_CLAIM",
-        submit_delivery_evidence: "DELIVERED",
-        submit_packed_evidence: "PACKED",
-        submit_pickup_evidence: "PICKED_UP",
-      };
-      const evidenceAction = actionByMethod[action.method];
-      if (!evidenceAction) return currentOrder;
-      setActiveEvidence({ action: evidenceAction, method: action.method });
-      return currentOrder;
-    }
-    return (await runWrite(action.method, [currentOrder.order_id], wallet?.address ?? undefined)) ?? currentOrder;
+    if (!action.requiresEvidence) return currentOrder;
+    const actionByMethod: Record<string, ActiveEvidenceRequest["action"]> = {
+      submit_claim_evidence: "CUSTOMER_CLAIM",
+      submit_delivery_evidence: "DELIVERED",
+      submit_packed_evidence: "PACKED",
+      submit_pickup_evidence: "PICKED_UP",
+    };
+    const evidenceAction = actionByMethod[action.method];
+    if (!evidenceAction) return currentOrder;
+    setActiveEvidence({ action: evidenceAction, method: action.method });
+    return currentOrder;
   }
 
   const proofHref = `/orders/${encodeURIComponent(orderId)}/proof${locale === "en" ? "?locale=en" : ""}`;
@@ -1086,13 +1084,15 @@ export function OrderDetailWorkspace({
             actors={[order.customer, order.restaurant, order.courier]}
             onChange={setWallet}
           />
-          <RoleConsole
+          <RoleConsole<OrderDetailView>
             key={`${order.state}-${order.evidence?.length ?? 0}-${order.resolution_round ?? "0"}`}
             address={wallet?.address}
             clock={clock}
             evidenceWritesEnabled={evidenceWritesEnabled}
             onAction={roleAction}
+            onOrderChange={setOrder}
             order={order}
+            readOrder={readOrder}
             writesEnabled={configuration.writesEnabled && wallet?.status === "READY"}
           />
           <ConsensusPanel

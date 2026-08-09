@@ -150,6 +150,32 @@ describe("authoritative role-action reconciliation", () => {
     state: "PARTIALLY_ACCEPTED",
   };
 
+  it("binds restaurant acceptance without allowing the courier flag to change", () => {
+    const restaurantSubmitted: FoodGuardOrderView = {
+      ...submittedOrder,
+      restaurant_accepted: false,
+      state: "FUNDED",
+    };
+    const accepted: FoodGuardOrderView = {
+      ...restaurantSubmitted,
+      restaurant_accepted: true,
+      state: "PARTIALLY_ACCEPTED",
+    };
+
+    expect(matchesRoleActionReadback(
+      "accept_restaurant",
+      accepted,
+      restaurantSubmitted,
+      RESTAURANT,
+    )).toBe(true);
+    expect(matchesRoleActionReadback(
+      "accept_restaurant",
+      { ...accepted, courier_accepted: true, state: "ACCEPTED" },
+      restaurantSubmitted,
+      RESTAURANT,
+    )).toBe(false);
+  });
+
   it("binds courier acceptance to the expected courier, flag, and resulting state", () => {
     const accepted: FoodGuardOrderView = {
       ...submittedOrder,
@@ -178,6 +204,16 @@ describe("authoritative role-action reconciliation", () => {
     expect(matchesRoleActionReadback(
       "accept_courier",
       { ...accepted, state: "PARTIALLY_ACCEPTED" },
+      submittedOrder,
+      COURIER,
+    )).toBe(false);
+    expect(matchesRoleActionReadback(
+      "accept_courier",
+      {
+        ...accepted,
+        restaurant_accepted: false,
+        state: "PARTIALLY_ACCEPTED",
+      },
       submittedOrder,
       COURIER,
     )).toBe(false);
@@ -248,6 +284,77 @@ describe("authoritative role-action reconciliation", () => {
       submittedOrder,
       undefined,
     )).toBe(true);
+  });
+});
+
+describe("production role-action integration", () => {
+  it("reconciles a non-evidence role action and synchronizes the parent order", async () => {
+    (window as typeof window & { ethereum?: unknown }).ethereum = {
+      request: vi.fn(({ method }: { method: string }) => {
+        if (method === "eth_requestAccounts" || method === "eth_accounts") {
+          return Promise.resolve([RESTAURANT]);
+        }
+        if (method === "eth_chainId") return Promise.resolve("0xf22f");
+        throw new Error(`unexpected wallet method ${method}`);
+      }),
+    };
+    const initialOrder: OrderDetailView = {
+      ...BASE_ORDER,
+      acceptance_deadline: "1893456060",
+      courier_accepted: false,
+      restaurant_accepted: false,
+      state: "FUNDED",
+    };
+    const acceptedOrder: OrderDetailView = {
+      ...initialOrder,
+      restaurant_accepted: true,
+      state: "PARTIALLY_ACCEPTED",
+    };
+    const readOrder = vi.fn()
+      .mockResolvedValueOnce(initialOrder)
+      .mockResolvedValueOnce(acceptedOrder);
+    const legacyTransact = vi.fn().mockResolvedValue({
+      order: acceptedOrder,
+      transactionHash: `0x${"aa".repeat(32)}`,
+    });
+    genlayerMocks.writeFoodGuard.mockRejectedValue(
+      new Error("wallet request failed", {
+        cause: { details: new TypeError("Failed to fetch") },
+      }),
+    );
+
+    renderLocalized(
+      <OrderDetailWorkspace
+        configuration={{
+          contractAddress: "0x4444444444444444444444444444444444444444",
+          chainId: "61999",
+          message: null,
+          readsEnabled: true,
+          status: "READY",
+          writesEnabled: true,
+        }}
+        orderId="fg-mixed"
+        readChainTime={vi.fn().mockResolvedValue(1_893_456_000n)}
+        readOrder={readOrder}
+        transact={legacyTransact}
+      />,
+      "en",
+    );
+
+    expect(await screen.findByText("FUNDED", {
+      selector: "[data-testid='raw-detail-state']",
+    })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: /connect wallet/i }));
+    fireEvent.click(await screen.findByRole("button", {
+      name: /restaurant accepts order/i,
+    }));
+
+    expect(await screen.findByText("PARTIALLY_ACCEPTED", {
+      selector: "[data-testid='raw-detail-state']",
+    })).toBeVisible();
+    expect(legacyTransact).not.toHaveBeenCalled();
+    expect(genlayerMocks.writeFoodGuard).toHaveBeenCalledTimes(1);
+    expect(readOrder).toHaveBeenCalledTimes(2);
   });
 });
 

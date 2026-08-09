@@ -56,12 +56,14 @@ export interface RoleAction {
   requiresEvidence: boolean;
 }
 
-interface RoleConsoleProps {
+interface RoleConsoleProps<TOrder extends FoodGuardOrderView> {
   address?: string | null;
   clock?: AuthoritativeClock | null;
   evidenceWritesEnabled?: boolean;
-  onAction?(action: RoleAction, order: FoodGuardOrderView): Promise<FoodGuardOrderView>;
-  order: FoodGuardOrderView;
+  onAction?(action: RoleAction, order: TOrder): Promise<TOrder>;
+  onOrderChange?(order: TOrder): void;
+  order: TOrder;
+  readOrder?(orderId: string): Promise<TOrder>;
   writesEnabled?: boolean;
 }
 
@@ -86,8 +88,9 @@ export function matchesRoleActionReadback(
       sameActor(submittedOrder.restaurant, expectedActor) &&
       sameActor(candidate.restaurant, expectedActor) &&
       candidate.restaurant_accepted === true &&
+      candidate.courier_accepted === submittedOrder.courier_accepted &&
       candidate.state === (
-        candidate.courier_accepted ? "ACCEPTED" : "PARTIALLY_ACCEPTED"
+        submittedOrder.courier_accepted ? "ACCEPTED" : "PARTIALLY_ACCEPTED"
       )
     );
   }
@@ -96,8 +99,9 @@ export function matchesRoleActionReadback(
       sameActor(submittedOrder.courier, expectedActor) &&
       sameActor(candidate.courier, expectedActor) &&
       candidate.courier_accepted === true &&
+      candidate.restaurant_accepted === submittedOrder.restaurant_accepted &&
       candidate.state === (
-        candidate.restaurant_accepted ? "ACCEPTED" : "PARTIALLY_ACCEPTED"
+        submittedOrder.restaurant_accepted ? "ACCEPTED" : "PARTIALLY_ACCEPTED"
       )
     );
   }
@@ -243,14 +247,16 @@ function actionFor(
   return null;
 }
 
-export function RoleConsole({
+export function RoleConsole<TOrder extends FoodGuardOrderView = FoodGuardOrderView>({
   address,
   clock,
   evidenceWritesEnabled = true,
   onAction,
+  onOrderChange,
   order,
+  readOrder,
   writesEnabled = true,
-}: RoleConsoleProps) {
+}: RoleConsoleProps<TOrder>) {
   const { copy } = useLocale();
   const [authoritativeOrder, setAuthoritativeOrder] = useState(order);
   const [pending, setPending] = useState(false);
@@ -318,18 +324,17 @@ export function RoleConsole({
     const submittedOrder = authoritativeOrder;
     const expectedActor = address ?? undefined;
     try {
-      const readback = onAction
-        ? await onAction(submittedAction, submittedOrder)
-        : await executeFoodGuardOperation<FoodGuardOrderView>({
+      const readback = submittedAction.requiresEvidence
+        ? await onAction!(submittedAction, submittedOrder)
+        : await executeFoodGuardOperation<TOrder>({
             method: submittedAction.method,
             args: [submittedOrder.order_id],
             value: 0n,
             expectedAccount: expectedActor,
             onStage: setStage,
-            readback: () => readFoodGuard<FoodGuardOrderView>(
-              "get_order",
-              [submittedOrder.order_id],
-            ),
+            readback: () => readOrder
+              ? readOrder(submittedOrder.order_id)
+              : readFoodGuard<TOrder>("get_order", [submittedOrder.order_id]),
             matches: (candidate) => matchesRoleActionReadback(
               submittedAction.method,
               candidate,
@@ -338,6 +343,7 @@ export function RoleConsole({
             ),
           });
       setAuthoritativeOrder(readback);
+      if (!submittedAction.requiresEvidence) onOrderChange?.(readback);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "FoodGuard write failed");
     } finally {

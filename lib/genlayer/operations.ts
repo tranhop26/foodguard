@@ -7,7 +7,11 @@ import {
   OutcomeUnknownError,
   withStudioNetBackoff,
 } from "./rpcResilience";
-import { trackTransaction, type TxStageHandler } from "./transactions";
+import {
+  trackTransaction,
+  TransactionTrackingTimeoutError,
+  type TxStageHandler,
+} from "./transactions";
 
 export interface FoodGuardOperation<T> {
   method: string;
@@ -93,22 +97,39 @@ async function reconcileFoodGuardOperation<T>(
 export async function executeFoodGuardOperation<T>(
   input: FoodGuardOperation<T>,
 ): Promise<T> {
-  let trackedReadback: T;
+  let hash: string;
   try {
-    const hash = await writeFoodGuard(
+    hash = await writeFoodGuard(
       input.method,
       input.args,
       input.value,
       input.onStage,
       input.expectedAccount,
     );
-    trackedReadback = await trackTransaction<T>(hash, input.onStage);
   } catch (error: unknown) {
     if (classifyRpcFailure(error).kind === "DEFINITIVE") throw error;
     return reconcileFoodGuardOperation(input, error);
   }
 
-  if (input.matches(trackedReadback)) return trackedReadback;
+  let trackedReadback: T;
+  try {
+    trackedReadback = await trackTransaction<T>(hash, (stage) => {
+      if (stage !== "READBACK_CONFIRMED") input.onStage(stage);
+    });
+  } catch (error: unknown) {
+    if (
+      !(error instanceof TransactionTrackingTimeoutError) &&
+      classifyRpcFailure(error).kind === "DEFINITIVE"
+    ) {
+      throw error;
+    }
+    return reconcileFoodGuardOperation(input, error);
+  }
+
+  if (input.matches(trackedReadback)) {
+    input.onStage("READBACK_CONFIRMED");
+    return trackedReadback;
+  }
   return reconcileFoodGuardOperation(
     input,
     new TypeError("Failed to fetch a matching authoritative readback"),
