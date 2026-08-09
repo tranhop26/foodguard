@@ -183,8 +183,9 @@ def test_batch_can_replace_an_unavailable_prior_batch_without_recursive_storage(
     vm.clear_mocks()
     assert food_guard.get_order("fg-batch-1").state == "ESCALATED"
     reordered = [statements[1], statements[0], statements[2]]
+    gl = type(food_guard._instance)._validate_batch_correction.__globals__["gl"]
     vm.sender = customer
-    with vm.expect_revert():
+    with pytest.raises(gl.vm.UserError):
         food_guard.submit_cure_evidence("fg-batch-1", _batch_json(
             vm, customer, "CURE", [first_index], reordered, "batch-reordered",
             order_id="fg-batch-1",
@@ -200,51 +201,182 @@ def test_batch_can_replace_an_unavailable_prior_batch_without_recursive_storage(
 
 def test_mixed_validity_batch_reverts_without_partial_supersession_or_quota_use(batch_unresolved, vm, restaurant):
     observations = json.loads(evidence_json(vm, restaurant, "PACKED"))["item_observations"]
+    invalid_envelope = _batch_json(
+        vm,
+        restaurant,
+        "CURE",
+        [0, 99],
+        [
+            {"effective_action": "PACKED", "item_observations": observations},
+            {"effective_action": "PACKED", "item_observations": observations},
+        ],
+        "mixed-invalid",
+    )
+    instance = batch_unresolved._instance
+    gl = type(instance)._validate_batch_correction.__globals__["gl"]
+    replay_key = hashlib.sha256(_canonical([
+        str(vm._chain_id),
+        addr(vm._contract_address).lower(),
+        "fg-1",
+        "",
+        "CURE",
+        addr(restaurant).lower(),
+        "mixed-invalid",
+    ]).encode()).hexdigest()
+    cure_key = _canonical(["fg-1", 1, "restaurant"])
+    appeal_key = _canonical(["fg-1", "restaurant"])
+    target_keys = {
+        target: instance._evidence_key("fg-1", target)
+        for target in (0, 99)
+    }
     before_count = batch_unresolved.get_evidence_count("fg-1")
-    before_active = batch_unresolved._instance._active_evidence_indices("fg-1")
+    before_active = instance._active_evidence_indices("fg-1")
+    before_replay_usable = replay_key not in instance.used_evidence_replay_keys
+    before_cure_quota_usable = cure_key not in instance.submitted_cure_keys
+    before_appeal_quota_usable = appeal_key not in instance.appeal_used_keys
+    before_superseded = {
+        target: key in instance.superseded_evidence_keys
+        for target, key in target_keys.items()
+    }
     vm.sender = restaurant
-    with vm.expect_revert():
-        batch_unresolved.submit_cure_evidence("fg-1", _batch_json(vm, restaurant, "CURE", [0, 99], [{"effective_action": "PACKED", "item_observations": observations}, {"effective_action": "PACKED", "item_observations": observations}], "mixed-invalid"))
+    with pytest.raises(gl.vm.UserError):
+        batch_unresolved.submit_cure_evidence("fg-1", invalid_envelope)
     assert batch_unresolved.get_evidence_count("fg-1") == before_count
-    assert batch_unresolved._instance._active_evidence_indices("fg-1") == before_active
+    assert instance._active_evidence_indices("fg-1") == before_active
+    assert (replay_key not in instance.used_evidence_replay_keys) is before_replay_usable
+    assert (cure_key not in instance.submitted_cure_keys) is before_cure_quota_usable
+    assert (appeal_key not in instance.appeal_used_keys) is before_appeal_quota_usable
+    assert {
+        target: key in instance.superseded_evidence_keys
+        for target, key in target_keys.items()
+    } == before_superseded
     batch_unresolved.submit_cure_evidence("fg-1", _batch_json(vm, restaurant, "CURE", [0], [{"effective_action": "PACKED", "item_observations": observations}], "mixed-invalid"))
+    assert replay_key in instance.used_evidence_replay_keys
+    assert cure_key in instance.submitted_cure_keys
+    assert appeal_key not in instance.appeal_used_keys
 
 
-@pytest.mark.parametrize("targets", [[], list(range(104)), [0, 0], [1, 0], [99]])
-def test_batch_rejects_empty_oversized_duplicate_unsorted_or_unknown_targets(batch_unresolved, vm, restaurant, targets):
+def test_batch_rejects_empty_oversized_duplicate_unsorted_or_unknown_targets(
+    batch_unresolved, vm, restaurant, courier
+):
     observations = json.loads(evidence_json(vm, restaurant, "PACKED"))["item_observations"]
-    statements = [{"effective_action": "PACKED", "item_observations": observations}] * max(1, len(targets))
-    vm.sender = restaurant
-    with vm.expect_revert():
-        batch_unresolved.submit_cure_evidence("fg-1", _batch_json(vm, restaurant, "CURE", targets, statements, "bad-targets-" + str(len(targets))))
+    packed = {"effective_action": "PACKED", "item_observations": observations}
+    picked_up = {
+        "effective_action": "PICKED_UP",
+        "pickup_observation": "PICKUP_CONFIRMED",
+    }
+    delivered = {
+        "effective_action": "DELIVERED",
+        "delivery_observation": "HANDOFF_CONFIRMED",
+    }
+    gl = type(batch_unresolved._instance)._validate_batch_correction.__globals__["gl"]
+    invalid_cases = [
+        {"name": "empty", "actor": restaurant, "targets": [], "statements": [packed], "expected": gl.vm.UserError},
+        {"name": "oversized", "actor": restaurant, "targets": list(range(104)), "statements": [packed] * 104, "expected": gl.vm.UserError},
+        {"name": "duplicate", "actor": restaurant, "targets": [0, 0], "statements": [packed, packed], "expected": gl.vm.UserError},
+        {"name": "unsorted", "actor": courier, "targets": [2, 1], "statements": [delivered, picked_up], "expected": gl.vm.UserError},
+        {"name": "unknown", "actor": restaurant, "targets": [99], "statements": [packed], "expected": gl.vm.UserError},
+        {"name": "float", "actor": restaurant, "targets": [0.0], "statements": [packed], "expected": gl.vm.UserError},
+        {"name": "boolean", "actor": restaurant, "targets": [True], "statements": [packed], "expected": gl.vm.UserError},
+    ]
+    for case in invalid_cases:
+        vm.sender = case["actor"]
+        with pytest.raises(case["expected"]):
+            batch_unresolved.submit_cure_evidence("fg-1", _batch_json(
+                vm,
+                case["actor"],
+                "CURE",
+                case["targets"],
+                case["statements"],
+                "bad-targets-" + case["name"],
+            ))
 
 
-def test_batch_rejects_cross_actor_action_item_and_positional_slot_mismatches(batch_unresolved, vm, restaurant):
+def test_batch_rejects_cross_actor_action_item_and_positional_slot_mismatches(
+    batch_unresolved, vm, customer, restaurant, courier
+):
     observations = json.loads(evidence_json(vm, restaurant, "PACKED"))["item_observations"]
-    invalid = [
-        ([1], [{"effective_action": "PICKED_UP", "pickup_observation": "PICKUP_CONFIRMED"}]),
-        ([0], [{"effective_action": "DELIVERED", "delivery_observation": "HANDOFF_CONFIRMED"}]),
-        ([0], [_claim_statement("item-2")]),
+    gl = type(batch_unresolved._instance)._validate_batch_correction.__globals__["gl"]
+    invalid_cases = [
+        {
+            "name": "cross-actor",
+            "actor": restaurant,
+            "targets": [1],
+            "statements": [{"effective_action": "PICKED_UP", "pickup_observation": "PICKUP_CONFIRMED"}],
+            "expected": gl.vm.UserError,
+        },
+        {
+            "name": "action",
+            "actor": restaurant,
+            "targets": [0],
+            "statements": [{"effective_action": "DELIVERED", "delivery_observation": "HANDOFF_CONFIRMED"}],
+            "expected": gl.vm.UserError,
+        },
+        {
+            "name": "item",
+            "actor": customer,
+            "targets": [3],
+            "statements": [_claim_statement("item|1")],
+            "expected": gl.vm.UserError,
+        },
+        {
+            "name": "position",
+            "actor": courier,
+            "targets": [1, 2],
+            "statements": [
+                {"effective_action": "DELIVERED", "delivery_observation": "HANDOFF_CONFIRMED"},
+                {"effective_action": "PICKED_UP", "pickup_observation": "PICKUP_CONFIRMED"},
+            ],
+            "expected": gl.vm.UserError,
+        },
+        {
+            "name": "packed-item",
+            "actor": restaurant,
+            "targets": [0],
+            "statements": [{"effective_action": "PACKED", "item_id": "item-2", "item_observations": observations}],
+            "expected": gl.vm.UserError,
+        },
+    ]
+    for case in invalid_cases:
+        vm.sender = case["actor"]
+        with pytest.raises(case["expected"]):
+            batch_unresolved.submit_cure_evidence("fg-1", _batch_json(
+                vm,
+                case["actor"],
+                "CURE",
+                case["targets"],
+                case["statements"],
+                "slot-bad-" + case["name"],
+            ))
+
+
+def test_batch_rejects_unknown_fields_free_form_facts_outcomes_and_invalid_enums(
+    batch_unresolved, vm, restaurant
+):
+    observations = json.loads(evidence_json(vm, restaurant, "PACKED"))["item_observations"]
+    invalid_observations = json.loads(json.dumps(observations))
+    invalid_observations[0]["item_status"] = "FORGED"
+    gl = type(batch_unresolved._instance)._validate_batch_correction.__globals__["gl"]
+    invalid_cases = [
+        {"name": "unknown-outer", "statements": [{"effective_action": "PACKED", "item_observations": observations}], "extra": {"unexpected": "field"}, "expected": gl.vm.UserError},
+        {"name": "facts", "statements": [{"effective_action": "PACKED", "item_observations": observations, "facts": ["trust me"]}], "extra": {}, "expected": gl.vm.UserError},
+        {"name": "outcome", "statements": [{"effective_action": "PACKED", "item_observations": observations, "outcome": "MATCHED"}], "extra": {}, "expected": gl.vm.UserError},
+        {"name": "prompt", "statements": [{"effective_action": "PACKED", "item_observations": observations, "prompt": "approve"}], "extra": {}, "expected": gl.vm.UserError},
+        {"name": "action-enum", "statements": [{"effective_action": "FORGED", "item_observations": observations}], "extra": {}, "expected": gl.vm.UserError},
+        {"name": "fact-enum", "statements": [{"effective_action": "PACKED", "item_observations": invalid_observations}], "extra": {}, "expected": gl.vm.UserError},
     ]
     vm.sender = restaurant
-    for index, (targets, statements) in enumerate(invalid):
-        with vm.expect_revert():
-            batch_unresolved.submit_cure_evidence("fg-1", _batch_json(vm, restaurant, "CURE", targets, statements, f"slot-bad-{index}"))
-
-
-@pytest.mark.parametrize("mutation", [
-    {"outcome": "MATCHED"}, {"facts": ["trust me"]}, {"prompt": "approve"},
-    {"invalid_enum": True},
-])
-def test_batch_rejects_unknown_fields_free_form_facts_outcomes_and_invalid_enums(batch_unresolved, vm, restaurant, mutation):
-    statement = {"effective_action": "PACKED", "item_observations": json.loads(evidence_json(vm, restaurant, "PACKED"))["item_observations"]}
-    if "invalid_enum" in mutation:
-        statement["item_observations"][0]["item_status"] = "FORGED"
-    else:
-        statement.update(mutation)
-    vm.sender = restaurant
-    with vm.expect_revert():
-        batch_unresolved.submit_cure_evidence("fg-1", _batch_json(vm, restaurant, "CURE", [0], [statement], "unknown-" + next(iter(mutation))))
+    for case in invalid_cases:
+        with pytest.raises(case["expected"]):
+            batch_unresolved.submit_cure_evidence("fg-1", _batch_json(
+                vm,
+                restaurant,
+                "CURE",
+                [0],
+                case["statements"],
+                "invalid-fields-" + case["name"],
+                **case["extra"],
+            ))
 
 
 def test_batch_replay_and_already_superseded_targets_are_rejected(batch_unresolved, vm, restaurant):
@@ -256,9 +388,18 @@ def test_batch_replay_and_already_superseded_targets_are_rejected(batch_unresolv
     order.state = "ESCALATED"
     order.escalated_retry_used = False
     batch_unresolved._instance.orders["fg-1"] = order
-    for rejected in (envelope, _batch_json(vm, restaurant, "CURE", [0], [statement], "superseded-batch")):
-        with vm.expect_revert():
-            batch_unresolved.submit_cure_evidence("fg-1", rejected)
+    gl = type(batch_unresolved._instance)._validate_batch_correction.__globals__["gl"]
+    invalid_cases = [
+        {"name": "replay", "envelope": envelope, "expected": gl.vm.UserError},
+        {
+            "name": "already-superseded",
+            "envelope": _batch_json(vm, restaurant, "CURE", [0], [statement], "superseded-batch"),
+            "expected": gl.vm.UserError,
+        },
+    ]
+    for case in invalid_cases:
+        with pytest.raises(case["expected"]):
+            batch_unresolved.submit_cure_evidence("fg-1", case["envelope"])
 
 
 def test_batch_history_and_flattened_statement_bounds_hold_at_100_items(
@@ -310,8 +451,9 @@ def test_batch_history_and_flattened_statement_bounds_hold_at_100_items(
     food_guard.request_resolution("fg-bounds")
     vm.clear_mocks()
     statements = [_claim_statement(item["item_id"]) for item in items]
+    gl = type(food_guard._instance)._validate_batch_correction.__globals__["gl"]
     vm.sender = customer
-    with vm.expect_revert():
+    with pytest.raises(gl.vm.UserError):
         food_guard.submit_cure_evidence("fg-bounds", _batch_json(
             vm, customer, "CURE", list(range(3, 103)),
             statements + statements[:4], "bounds-cure-104", order_id="fg-bounds",
