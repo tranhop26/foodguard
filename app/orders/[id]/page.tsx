@@ -28,7 +28,7 @@ import { RoleConsole, type RoleAction } from "../../../components/order/RoleCons
 import { TransactionLifecycle } from "../../../components/order/TransactionLifecycle";
 import { WalletButton, type WalletSnapshot } from "../../../components/wallet/WalletButton";
 import type { DeliveryOutcome, EvidenceAction, EvidenceDocument, ItemOutcome, OrderItem, OrderState } from "../../../lib/domain";
-import { canonicalizeEvidenceEnvelope, hashEvidence, validateCorrectionStatement } from "../../../lib/evidence";
+import { canonicalizeEvidenceEnvelope, validateCorrectionStatement, validateEvidenceDocument } from "../../../lib/evidence";
 import { getFoodGuardReadClient, readFoodGuard, writeFoodGuard } from "../../../lib/genlayer/client";
 import {
   FOODGUARD_CHAIN,
@@ -242,12 +242,17 @@ async function evidenceRecord(value: unknown, order: OrderDetailView, evidenceIn
   ) throw new TypeError("Evidence readback binding is malformed");
   if (value.item_id !== undefined && typeof value.item_id !== "string") throw new TypeError("Evidence item binding is malformed");
   if (!isPublicEvidenceUrl(value.source_url as string)) throw new TypeError("Evidence public source binding is malformed");
-  let envelope: unknown;
-  try { envelope = JSON.parse(value.envelope_json as string); } catch { throw new TypeError("Evidence envelope readback is malformed"); }
-  if (!plainObject(envelope) || canonicalJson(envelope) !== value.envelope_json) throw new TypeError("Evidence envelope readback is not canonical");
   const items = authoritativeManifest(order.manifest_json);
+  let envelope: EvidenceDocument;
+  try {
+    const parsed = JSON.parse(value.envelope_json as string);
+    if (!plainObject(parsed) || canonicalJson(parsed) !== value.envelope_json) throw new TypeError();
+    envelope = validateEvidenceDocument(parsed, new Date(), undefined, items);
+  } catch {
+    throw new TypeError("Evidence envelope readback is malformed");
+  }
   let canonicalEnvelope: string;
-  try { canonicalEnvelope = canonicalizeEvidenceEnvelope(envelope as EvidenceDocument, items); } catch { throw new TypeError("Evidence envelope readback is malformed"); }
+  try { canonicalEnvelope = canonicalizeEvidenceEnvelope(envelope, items); } catch { throw new TypeError("Evidence envelope readback is malformed"); }
   if (canonicalEnvelope !== value.envelope_json) throw new TypeError("Evidence envelope readback is not canonical");
   const metadataFields = required.filter((field) => field !== "envelope_json");
   if (metadataFields.some((field) => envelope[field] !== value[field])) throw new TypeError("Evidence record does not match its envelope");
@@ -291,20 +296,51 @@ async function evidenceRecord(value: unknown, order: OrderDetailView, evidenceIn
   if (!(timestamp("observed_at") <= timestamp("submitted_at") && timestamp("submitted_at") <= timestamp("expires_at"))) {
     throw new TypeError("Evidence timestamp binding is malformed");
   }
-  if ((await hashEvidence(envelope as EvidenceDocument)).toLowerCase() !== (value.sha256 as string).toLowerCase()) {
-    throw new TypeError("Evidence digest binding is malformed");
-  }
-  const correction = envelope.action === "CURE" || envelope.action === "APPEAL"
+  const action = envelope.action;
+  const typedFacts = action === "PACKED"
+    ? { item_observations: envelope.item_observations }
+    : action === "PICKED_UP"
+      ? { pickup_observation: envelope.pickup_observation }
+      : action === "DELIVERED"
+        ? { delivery_observation: envelope.delivery_observation }
+        : action === "CUSTOMER_CLAIM"
+          ? {
+              claim_category: envelope.claim_category,
+              criterion_index: envelope.criterion_index,
+              criterion_kind: envelope.criterion_kind,
+            }
+          : {};
+  const correction = action === "CURE" || action === "APPEAL"
     ? {
         effective_action: "BATCH_CORRECTION" as const,
-        statements: envelope.statements as EvidenceRecordView["statements"],
-        supersedes_evidence_indices: envelope.supersedes_evidence_indices as number[],
+        statements: envelope.statements,
+        supersedes_evidence_indices: envelope.supersedes_evidence_indices,
       }
-    : { effective_action: envelope.action as EvidenceRecordView["effective_action"] };
+    : { effective_action: action as EvidenceRecordView["effective_action"] };
   if (typeof value.effective_action === "string" && value.effective_action !== correction.effective_action) {
     throw new TypeError("Evidence effective action binding is malformed");
   }
-  return { ...(value as unknown as EvidenceRecordView), ...correction, evidence_index: evidenceIndex };
+  return {
+    action,
+    actor_wallet: value.actor_wallet as string,
+    chain_id: value.chain_id as string,
+    contract_address: value.contract_address as string,
+    envelope_json: value.envelope_json as string,
+    evidence_index: evidenceIndex,
+    expires_at: value.expires_at as string,
+    issuer_id: value.issuer_id as string,
+    item_id: itemId,
+    nonce: value.nonce as string,
+    observed_at: value.observed_at as string,
+    order_id: value.order_id as string,
+    schema_version: "foodguard-evidence/1",
+    sha256: value.sha256 as string,
+    source_url: value.source_url as string,
+    subject: value.subject as string,
+    submitted_at: value.submitted_at as string,
+    ...typedFacts,
+    ...correction,
+  };
 }
 
 export function deriveActiveEvidenceRecords(

@@ -38,7 +38,7 @@ import { OrderTimeline } from "../../components/order/OrderTimeline";
 import { TransactionLifecycle } from "../../components/order/TransactionLifecycle";
 import { LocaleProvider, type Locale } from "../../lib/i18n";
 import type { EvidenceDocument, OrderItem, OrderState } from "../../lib/domain";
-import { canonicalizeEvidenceEnvelope, hashEvidence } from "../../lib/evidence";
+import { hashEvidence } from "../../lib/evidence";
 import {
   FOODGUARD_CHAIN,
   type FoodGuardDeploymentProofConfiguration,
@@ -176,7 +176,7 @@ async function storedPackedEvidence() {
     submitted_at: "2030-01-01T00:00:00.000Z",
   } satisfies EvidenceDocument;
   const document = { ...preimage, sha256: await hashEvidence(preimage) } satisfies EvidenceDocument;
-  return { ...document, envelope_json: canonicalizeEvidenceEnvelope(document), item_id: "" };
+  return contractGetterRecord(document, "PACKED");
 }
 
 async function sha256Text(value: string): Promise<string> {
@@ -237,12 +237,61 @@ async function storedContractEvidence(
   };
   const sha256 = await sha256Text(canonicalTestJson(preimage));
   const document = { ...preimage, sha256 } as EvidenceDocument;
+  return { document, getter: contractGetterRecord(document, action) };
+}
+
+function contractGetterRecord(
+  document: EvidenceDocument,
+  effectiveAction: EvidenceRecordView["effective_action"],
+) {
   return {
-    ...document,
-    effective_action: action,
+    action: document.action,
+    actor_wallet: document.actor_wallet,
+    chain_id: document.chain_id,
+    contract_address: document.contract_address,
+    effective_action: effectiveAction,
     envelope_json: canonicalTestJson(document),
-    item_id: itemId,
+    expires_at: document.expires_at,
+    issuer_id: document.issuer_id,
+    item_id: document.item_id ?? "",
+    nonce: document.nonce,
+    observed_at: document.observed_at,
+    order_id: document.order_id,
+    schema_version: document.schema_version,
+    sha256: document.sha256,
+    source_url: document.source_url,
+    subject: document.subject,
+    submitted_at: document.submitted_at,
   };
+}
+
+async function storedContractBatchEvidence() {
+  const preimage = {
+    action: "CURE",
+    actor_wallet: CUSTOMER,
+    chain_id: "61999",
+    contract_address: "0x4444444444444444444444444444444444444444",
+    expires_at: "2030-01-02T02:00:00.000Z",
+    issuer_id: "foodguard-web",
+    nonce: "contract-readback-cure",
+    observed_at: "2030-01-01T00:00:00.000Z",
+    order_id: "fg-mixed",
+    schema_version: "foodguard-evidence/1",
+    source_url: "https://evidence.foodguard.vn/contract-readback-cure.json",
+    statements: [{
+      claim_category: "ABSENT_AT_RECEIPT",
+      criterion_index: 0,
+      criterion_kind: "ITEM",
+      effective_action: "CUSTOMER_CLAIM",
+      item_id: "item-1",
+    }],
+    subject: "order:fg-mixed",
+    submitted_at: "2030-01-01T00:00:00.000Z",
+    supersedes_evidence_indices: [3],
+  };
+  const sha256 = await sha256Text(canonicalTestJson(preimage));
+  const document = { ...preimage, sha256 } as EvidenceDocument;
+  return { document, getter: contractGetterRecord(document, "BATCH_CORRECTION") };
 }
 
 afterEach(() => {
@@ -1074,22 +1123,92 @@ describe("permissionless consensus", () => {
 
 describe("order detail readback orchestration", () => {
   it.each(["PACKED", "PICKED_UP", "DELIVERED", "CUSTOMER_CLAIM"] as const)(
-    "accepts contract-valid stored %s evidence in authoritative readback",
+    "normalizes typed %s facts from a real contract getter record",
     async (action) => {
-      const evidence = await storedContractEvidence(action);
+      const { document, getter } = await storedContractEvidence(action);
       genlayerMocks.readFoodGuard.mockImplementation((method: string) => {
         if (method === "get_order") return Promise.resolve({ ...BASE_ORDER, state: "ACCEPTED" });
         if (method === "get_evidence_count") return Promise.resolve("1");
-        if (method === "get_evidence") return Promise.resolve(evidence);
+        if (method === "get_evidence") return Promise.resolve(getter);
         if (method === "get_round") return Promise.resolve("0");
         throw new Error(`unexpected method ${method}`);
       });
 
       const result = await readAuthoritativeOrder("fg-mixed");
+      const normalized = result.evidence?.[0] as EvidenceRecordView;
 
-      expect(result.evidence).toEqual([{ ...evidence, evidence_index: 0 }]);
+      expect(normalized.effective_action).toBe(action);
+      if (action === "PACKED") expect(normalized.item_observations).toEqual(document.item_observations);
+      if (action === "PICKED_UP") expect(normalized.pickup_observation).toBe("UNKNOWN");
+      if (action === "DELIVERED") expect(normalized.delivery_observation).toBe("UNKNOWN");
+      if (action === "CUSTOMER_CLAIM") {
+        expect(normalized).toMatchObject({
+          claim_category: "NOT_AS_ORDERED",
+          criterion_index: 0,
+          criterion_kind: "CONDITION",
+        });
+      }
+      expect(deriveActiveEvidenceRecords([normalized], JSON.parse(BASE_ORDER.manifest_json).items)).toHaveLength(1);
     },
   );
+
+  it("normalizes a real getter history and preserves canonical batch facts in the active set", async () => {
+    const baseRecords = await Promise.all(
+      (["PACKED", "PICKED_UP", "DELIVERED", "CUSTOMER_CLAIM"] as const).map(storedContractEvidence),
+    );
+    const batch = await storedContractBatchEvidence();
+    const getters = [...baseRecords.map(({ getter }) => getter), batch.getter];
+    genlayerMocks.readFoodGuard.mockImplementation((method: string, args: unknown[]) => {
+      if (method === "get_order") return Promise.resolve({ ...BASE_ORDER, state: "ACCEPTED" });
+      if (method === "get_evidence_count") return Promise.resolve(String(getters.length));
+      if (method === "get_evidence") return Promise.resolve(getters[Number(args[1])]);
+      if (method === "get_round") return Promise.resolve("0");
+      throw new Error(`unexpected method ${method}`);
+    });
+
+    const result = await readAuthoritativeOrder("fg-mixed");
+    const active = deriveActiveEvidenceRecords(result.evidence ?? [], JSON.parse(BASE_ORDER.manifest_json).items);
+
+    expect(active.map((record) => record.evidence_index)).toEqual([0, 1, 2, 4]);
+    expect(active[3]).toMatchObject({
+      effective_action: "BATCH_CORRECTION",
+      statements: batch.document.statements,
+      supersedes_evidence_indices: [3],
+    });
+  });
+
+  it("ignores a forged top-level typed duplicate and uses the canonical envelope fact", async () => {
+    const { getter } = await storedContractEvidence("PICKED_UP");
+    genlayerMocks.readFoodGuard.mockImplementation((method: string) => {
+      if (method === "get_order") return Promise.resolve({ ...BASE_ORDER, state: "ACCEPTED" });
+      if (method === "get_evidence_count") return Promise.resolve("1");
+      if (method === "get_evidence") return Promise.resolve({ ...getter, pickup_observation: "PICKUP_FAILED" });
+      if (method === "get_round") return Promise.resolve("0");
+      throw new Error(`unexpected method ${method}`);
+    });
+
+    const result = await readAuthoritativeOrder("fg-mixed");
+
+    expect(result.evidence?.[0].pickup_observation).toBe("UNKNOWN");
+  });
+
+  it.each([
+    ["provenance", (getter: Record<string, unknown>) => ({ ...getter, source_url: "https://evidence.foodguard.vn/forged.json" })],
+    ["action", (getter: Record<string, unknown>) => ({ ...getter, action: "PICKED_UP" })],
+    ["item", (getter: Record<string, unknown>) => ({ ...getter, item_id: "item-1" })],
+    ["hash", (getter: Record<string, unknown>) => ({ ...getter, sha256: `0x${"ff".repeat(32)}` })],
+  ])("rejects a getter/envelope %s disagreement", async (_name, mutate) => {
+    const { getter } = await storedContractEvidence("DELIVERED");
+    genlayerMocks.readFoodGuard.mockImplementation((method: string) => {
+      if (method === "get_order") return Promise.resolve({ ...BASE_ORDER, state: "ACCEPTED" });
+      if (method === "get_evidence_count") return Promise.resolve("1");
+      if (method === "get_evidence") return Promise.resolve(mutate(getter));
+      if (method === "get_round") return Promise.resolve("0");
+      throw new Error(`unexpected method ${method}`);
+    });
+
+    await expect(readAuthoritativeOrder("fg-mixed")).rejects.toThrow(/evidence/i);
+  });
 
   it("shows completion only after finalized execution and fresh active batch readback", async () => {
     (window as typeof window & { ethereum?: unknown }).ethereum = {
@@ -1204,7 +1323,7 @@ describe("order detail readback orchestration", () => {
       delivery_observation: "HANDOFF_CONFIRMED",
     } satisfies EvidenceDocument;
     const evidenceDocument = { ...evidencePreimage, sha256: await hashEvidence(evidencePreimage) } satisfies EvidenceDocument;
-    const evidence = { ...evidenceDocument, envelope_json: canonicalizeEvidenceEnvelope(evidenceDocument) };
+    const evidence = contractGetterRecord(evidenceDocument, "DELIVERED");
     const resolvedOrder = {
       ...MIXED_OUTCOME_ORDER,
       resolution: { ...MIXED_OUTCOME_ORDER.resolution!, evidence_hashes: [evidence.sha256] },
@@ -1221,7 +1340,7 @@ describe("order detail readback orchestration", () => {
     const result = await readAuthoritativeOrder("fg-mixed");
 
     expect(result.resolution?.items[0].outcome).toBe("MATCHED");
-    expect(result.evidence).toEqual([{ ...evidence, effective_action: "DELIVERED", evidence_index: 0 }]);
+    expect(result.evidence).toEqual([{ ...evidence, delivery_observation: "HANDOFF_CONFIRMED", evidence_index: 0 }]);
     expect(result.resolution_round).toBe("2");
   });
 
