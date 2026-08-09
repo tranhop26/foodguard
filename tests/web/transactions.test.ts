@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 
 import { abi } from "genlayer-js";
 import { studionet } from "genlayer-js/chains";
@@ -13,6 +14,7 @@ import {
 const sdk = vi.hoisted(() => ({
   createClient: vi.fn(),
   getTransaction: vi.fn(),
+  getContractCode: vi.fn(),
   readContract: vi.fn(),
   writeContract: vi.fn(),
 }));
@@ -24,11 +26,13 @@ vi.mock("genlayer-js", async (importOriginal) => {
 
 import {
   getFoodGuardConfiguration,
+  getFoodGuardDeploymentProofConfiguration,
   FoodGuardDeploymentRequiredError,
 } from "../../lib/genlayer/config";
 import {
   readFoodGuard,
   reconcileOrder,
+  verifyFoodGuardDeploymentProof,
   writeFoodGuard,
 } from "../../lib/genlayer/client";
 import {
@@ -40,6 +44,8 @@ import {
 const ADDRESS = "0x2222222222222222222222222222222222222222";
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const HASH = `0x${"a".repeat(64)}` as TransactionHash;
+const SOURCE_HASH = `0x${"b".repeat(64)}`;
+const DEPLOYMENT_HASH = `0x${"c".repeat(64)}` as TransactionHash;
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
 
 function mockReceipt(
@@ -83,6 +89,77 @@ describe("FoodGuard StudioNet configuration", () => {
       },
     });
   });
+
+  it("keeps a complete public deployment record reviewed until runtime verification", () => {
+    expect(getFoodGuardDeploymentProofConfiguration({
+      address: ADDRESS,
+      deploymentAddress: ADDRESS,
+      deploymentChainId: "61999",
+      sourceHash: SOURCE_HASH,
+      transactionHash: DEPLOYMENT_HASH,
+      finality: "FINALIZED",
+      execution: "EXECUTION_SUCCESS",
+      readback: "READBACK_CONFIRMED",
+      sourceHashMatch: "true",
+    })).toMatchObject({
+      address: ADDRESS,
+      sourceHash: SOURCE_HASH,
+      status: "REVIEWED",
+      transactionHash: DEPLOYMENT_HASH,
+      runtimeVerification: { status: "NOT_CHECKED" },
+    });
+  });
+
+  it("keeps malformed deployment proof hashes unavailable", () => {
+    expect(getFoodGuardDeploymentProofConfiguration({
+      address: ADDRESS,
+      deploymentAddress: ADDRESS,
+      deploymentChainId: "61999",
+      sourceHash: "0xnot-a-sha256",
+      transactionHash: DEPLOYMENT_HASH,
+      finality: "FINALIZED",
+      execution: "EXECUTION_SUCCESS",
+      readback: "READBACK_CONFIRMED",
+      sourceHashMatch: "true",
+    })).toMatchObject({
+      reason: "SOURCE_HASH_INVALID",
+      status: "UNAVAILABLE",
+    });
+  });
+
+  it("keeps deployment provenance bound to the configured contract address", () => {
+    expect(getFoodGuardDeploymentProofConfiguration({
+      address: ADDRESS,
+      deploymentAddress: "0x3333333333333333333333333333333333333333",
+      deploymentChainId: "61999",
+      sourceHash: SOURCE_HASH,
+      transactionHash: DEPLOYMENT_HASH,
+      finality: "FINALIZED",
+      execution: "EXECUTION_SUCCESS",
+      readback: "READBACK_CONFIRMED",
+      sourceHashMatch: "true",
+    })).toMatchObject({
+      reason: "DEPLOYMENT_ADDRESS_MISMATCH",
+      status: "UNAVAILABLE",
+    });
+  });
+
+  it("rejects deployment metadata for a different chain", () => {
+    expect(getFoodGuardDeploymentProofConfiguration({
+      address: ADDRESS,
+      deploymentAddress: ADDRESS,
+      deploymentChainId: "1",
+      sourceHash: SOURCE_HASH,
+      transactionHash: DEPLOYMENT_HASH,
+      finality: "FINALIZED",
+      execution: "EXECUTION_SUCCESS",
+      readback: "READBACK_CONFIRMED",
+      sourceHashMatch: "true",
+    })).toMatchObject({
+      reason: "DEPLOYMENT_CHAIN_MISMATCH",
+      status: "UNAVAILABLE",
+    });
+  });
 });
 
 describe("FoodGuard StudioNet client", () => {
@@ -94,6 +171,7 @@ describe("FoodGuard StudioNet client", () => {
     vi.stubEnv("NEXT_PUBLIC_FOODGUARD_ADDRESS", ADDRESS);
     sdk.createClient.mockReset();
     sdk.getTransaction.mockReset();
+    sdk.getContractCode.mockReset();
     sdk.readContract.mockReset();
     sdk.writeContract.mockReset();
     walletProvider.request.mockReset();
@@ -103,6 +181,7 @@ describe("FoodGuard StudioNet client", () => {
     );
     sdk.createClient.mockReturnValue({
       getTransaction: sdk.getTransaction,
+      getContractCode: sdk.getContractCode,
       readContract: sdk.readContract,
       writeContract: sdk.writeContract,
     });
@@ -136,6 +215,92 @@ describe("FoodGuard StudioNet client", () => {
       args: ["fg-1"],
       transactionHashVariant: TransactionHashVariant.LATEST_FINAL,
     });
+  });
+
+  it("only marks deployment metadata verified after finalized deploy, code, hash, and order readback checks", async () => {
+    const deployedCode = "0x666f6f646775617264" as `0x${string}`;
+    const deployedSourceHash = `0x${createHash("sha256")
+      .update(Buffer.from(deployedCode.slice(2), "hex"))
+      .digest("hex")}`;
+    const configured = getFoodGuardDeploymentProofConfiguration({
+      address: ADDRESS,
+      deploymentAddress: ADDRESS,
+      deploymentChainId: "61999",
+      sourceHash: deployedSourceHash,
+      transactionHash: DEPLOYMENT_HASH,
+      finality: "FINALIZED",
+      execution: "EXECUTION_SUCCESS",
+      readback: "READBACK_CONFIRMED",
+      sourceHashMatch: "true",
+    });
+    expect(configured.status).toBe("REVIEWED");
+    sdk.getTransaction.mockResolvedValue({
+      hash: DEPLOYMENT_HASH,
+      statusName: TransactionStatus.FINALIZED,
+      txExecutionResultName: ExecutionResult.FINISHED_WITH_RETURN,
+      txDataDecoded: {
+        type: "deploy",
+        contractAddress: ADDRESS,
+        code: deployedCode,
+      },
+    } satisfies GenLayerTransaction);
+    sdk.getContractCode.mockResolvedValue(deployedCode);
+    sdk.readContract.mockResolvedValue({ order_id: "fg-1", state: "SETTLED" });
+
+    await expect(verifyFoodGuardDeploymentProof(configured, "fg-1")).resolves.toMatchObject({
+      address: ADDRESS,
+      status: "VERIFIED",
+      runtimeVerification: { status: "VERIFIED" },
+      sourceHash: deployedSourceHash,
+      transactionHash: DEPLOYMENT_HASH,
+    });
+    expect(sdk.createClient).toHaveBeenCalledWith({ chain: studionet });
+    expect(sdk.getTransaction).toHaveBeenCalledWith({ hash: DEPLOYMENT_HASH });
+    expect(sdk.getContractCode).toHaveBeenCalledWith(ADDRESS);
+    expect(sdk.readContract).toHaveBeenCalledWith({
+      address: ADDRESS,
+      functionName: "get_order",
+      args: ["fg-1"],
+      transactionHashVariant: TransactionHashVariant.LATEST_FINAL,
+    });
+  });
+
+  it("keeps review metadata unverified when current code does not match the deploy transaction", async () => {
+    const deployedCode = "0x666f6f646775617264" as `0x${string}`;
+    const deployedSourceHash = `0x${createHash("sha256")
+      .update(Buffer.from(deployedCode.slice(2), "hex"))
+      .digest("hex")}`;
+    const configured = getFoodGuardDeploymentProofConfiguration({
+      address: ADDRESS,
+      deploymentAddress: ADDRESS,
+      deploymentChainId: "61999",
+      sourceHash: deployedSourceHash,
+      transactionHash: DEPLOYMENT_HASH,
+      finality: "FINALIZED",
+      execution: "EXECUTION_SUCCESS",
+      readback: "READBACK_CONFIRMED",
+      sourceHashMatch: "true",
+    });
+    sdk.getTransaction.mockResolvedValue({
+      hash: DEPLOYMENT_HASH,
+      statusName: TransactionStatus.FINALIZED,
+      txExecutionResultName: ExecutionResult.FINISHED_WITH_RETURN,
+      txDataDecoded: {
+        type: "deploy",
+        contractAddress: ADDRESS,
+        code: deployedCode,
+      },
+    } satisfies GenLayerTransaction);
+    sdk.getContractCode.mockResolvedValue("0x646966666572656e74");
+
+    await expect(verifyFoodGuardDeploymentProof(configured, "fg-1")).resolves.toMatchObject({
+      status: "REVIEWED",
+      runtimeVerification: {
+        status: "FAILED",
+        reason: "DEPLOYED_CODE_MISMATCH",
+      },
+    });
+    expect(sdk.readContract).not.toHaveBeenCalled();
   });
 
   it("uses the connected EIP-1193 wallet and preserves an exact payable value", async () => {

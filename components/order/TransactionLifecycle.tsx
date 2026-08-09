@@ -33,7 +33,12 @@ export function TransactionLifecycle({
   const permissionlessRetry = operation === "request_resolution" || operation === "execute_settlement";
 
   return (
-    <section className="transaction-lifecycle" aria-live="polite" aria-labelledby="transaction-title">
+    <section
+      className="transaction-lifecycle"
+      data-stage={stage}
+      aria-live="polite"
+      aria-labelledby="transaction-title"
+    >
       <h2 id="transaction-title">{copy.detail.transactionLifecycle}</h2>
       <ol>
         <li data-complete={walletConfirmed || undefined}>

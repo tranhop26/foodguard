@@ -11,7 +11,8 @@ export type OrderState =
   | "APPEALED"
   | "ESCALATED"
   | "SETTLED"
-  | "CANCELLED_REFUNDED";
+  | "CANCELLED_REFUNDED"
+  | "FULFILLMENT_TIMEOUT_REFUNDED";
 
 export type ItemOutcome =
   | "MATCHED"

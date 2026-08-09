@@ -135,7 +135,9 @@ beforeEach(() => {
   window.localStorage.clear();
   installWallet();
   mocks.writeFoodGuard.mockResolvedValue(HASH);
-  mocks.readFoodGuard.mockResolvedValue(READY_FOR_PICKUP_ORDER);
+  mocks.readFoodGuard.mockImplementation((method: string) => Promise.resolve(
+    method === "get_creation_paused" ? false : READY_FOR_PICKUP_ORDER,
+  ));
   mocks.trackTransaction.mockResolvedValue({
     ...READY_FOR_PICKUP_ORDER,
     state: "FUNDED",
@@ -158,6 +160,19 @@ afterEach(() => {
 });
 
 describe("FoodGuard order builder", () => {
+  it("reads the authoritative creation pause and locks only new-order funding when paused", async () => {
+    mocks.readFoodGuard.mockImplementation((method: string) => (
+      method === "get_creation_paused"
+        ? Promise.resolve(true)
+        : Promise.resolve(READY_FOR_PICKUP_ORDER)
+    ));
+    renderBuilder();
+
+    await waitFor(() => expect(mocks.readFoodGuard).toHaveBeenCalledWith("get_creation_paused", []));
+    expect(document.querySelector(".order-builder__submit")).toBeDisabled();
+    expect(await screen.findByText("CREATION_PAUSED")).toBeVisible();
+  });
+
   it("blocks creation until three valid, nonzero, distinct wallets are present", () => {
     renderBuilder({ initialActors: [CUSTOMER, RESTAURANT, RESTAURANT] });
 
@@ -175,6 +190,28 @@ describe("FoodGuard order builder", () => {
       expect(screen.getByTestId("manifest-digest")).toHaveTextContent(/^0x[0-9a-f]{64}$/),
     );
     expect(mocks.writeFoodGuard).not.toHaveBeenCalled();
+  });
+
+  it("labels the manifest evidence envelope and digest as local previews until a contract commits them", async () => {
+    render(
+      <LocaleProvider hasExplicitLocale initialLocale="en">
+        <OrderBuilder
+          configuration={READY_CONFIGURATION}
+          initialActors={[CUSTOMER, RESTAURANT, COURIER]}
+          item={ITEM}
+          orderId="fg-preview"
+          publicAppConfiguration={{
+            createOrderSourceUrl: "https://app.foodguard.vn/create",
+            origin: "https://app.foodguard.vn",
+            status: "READY",
+            writesEnabled: true,
+          }}
+        />
+      </LocaleProvider>,
+    );
+
+    expect(await screen.findByRole("heading", { name: /local order manifest preview/i })).toBeVisible();
+    expect(screen.getByRole("heading", { name: /local SHA-256 preview/i })).toBeVisible();
   });
 
   it("keeps visible contract deadlines fresh while the preview is idle", async () => {
@@ -637,6 +674,32 @@ describe("FoodGuard role console", () => {
       await vi.advanceTimersByTimeAsync(1_000);
     });
     expect(screen.getByRole("button")).toBeEnabled();
+  });
+
+  it("offers an outsider the exact-deadline fulfillment timeout refund without a read-only notice", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2030-01-01T00:00:00.000Z"));
+    render(
+      <LocaleProvider hasExplicitLocale initialLocale="en">
+        <RoleConsole
+          address={OUTSIDER}
+          clock={testClock(1_893_456_000n)}
+          order={{
+            ...READY_FOR_PICKUP_ORDER,
+            packing_deadline: 1_893_456_001n,
+            state: "ACCEPTED",
+          }}
+        />
+      </LocaleProvider>,
+    );
+
+    expect(screen.queryByRole("button", { name: /refund stalled fulfillment/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/read only/i)).toBeVisible();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(screen.getByRole("button", { name: /refund stalled fulfillment/i })).toBeEnabled();
+    expect(screen.queryByText(/read only/i)).not.toBeInTheDocument();
   });
 
   it.each([undefined, "not-a-deadline"])(

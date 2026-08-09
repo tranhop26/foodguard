@@ -18,6 +18,7 @@ export interface ResolutionItemView {
 export interface ResolutionView {
   delivery_outcome: DeliveryOutcome;
   evidence_hashes: string[];
+  evidence_indices: number[];
   items: ResolutionItemView[];
 }
 
@@ -64,7 +65,35 @@ export interface MutualSettlementView {
   }>;
   proposal_json: string;
   proposal_nonce: string;
+  proposal_version: string;
+  resolution_round: string;
+  active_evidence_digest: string;
   restaurant_signed: true;
+  restaurant_wei: string;
+}
+
+export interface SettlementProposalView {
+  active_evidence_digest: string;
+  courier_signed: boolean;
+  courier_wei: string;
+  customer_signed: boolean;
+  customer_wei: string;
+  delivery_allocation: {
+    courier_wei: string;
+    customer_wei: string;
+  };
+  digest: string;
+  item_allocations: Array<{
+    customer_wei: string;
+    item_id: string;
+    restaurant_wei: string;
+  }>;
+  is_current: boolean;
+  proposal_json: string;
+  proposal_nonce: string;
+  proposal_version: string;
+  resolution_round: string;
+  restaurant_signed: boolean;
   restaurant_wei: string;
 }
 
@@ -81,6 +110,7 @@ export interface OrderDetailView {
   items_settled?: boolean;
   manifest_json: string;
   mutual_settlement?: MutualSettlementView | null;
+  settlement_proposals?: SettlementProposalView[];
   order_id: string;
   packing_deadline?: bigint | number | string;
   restaurant: string;
@@ -244,7 +274,10 @@ export function ItemOutcomeTable({ order }: { order: OrderDetailView }) {
     ? order.mutual_settlement
     : null;
   const malformedMutualSettlement = order.mutual_settlement != null && mutualSettlement === null;
-  const cancelled = order.state === "CANCELLED_REFUNDED";
+  const cancelled = (
+    order.state === "CANCELLED_REFUNDED" ||
+    order.state === "FULFILLMENT_TIMEOUT_REFUNDED"
+  );
   const lockedBeforeResolution = (
     order.resolution == null &&
     !cancelled &&
@@ -292,7 +325,7 @@ export function ItemOutcomeTable({ order }: { order: OrderDetailView }) {
                     {result ? (
                       <><span>{copy.outcomes[result.outcome]}</span><code>{result.outcome}</code></>
                     ) : cancelled ? (
-                      <><span>{copy.detail.cancelledOutcome}</span><code>CANCELLED_REFUNDED</code></>
+                      <><span>{copy.detail.cancelledOutcome}</span><code>{order.state}</code></>
                     ) : (
                       <span>{unavailable ? copy.detail.consequenceUnavailable : copy.detail.noStoredOutcome}</span>
                     )}
@@ -316,7 +349,7 @@ export function ItemOutcomeTable({ order }: { order: OrderDetailView }) {
                 {resolution ? (
                   <><span>{copy.detail.deliveryOutcomes[resolution.delivery_outcome]}</span><code>{resolution.delivery_outcome}</code></>
                 ) : cancelled ? (
-                  <><span>{copy.detail.cancelledOutcome}</span><code>CANCELLED_REFUNDED</code></>
+                  <><span>{copy.detail.cancelledOutcome}</span><code>{order.state}</code></>
                 ) : (
                   <span>{unavailable ? copy.detail.consequenceUnavailable : copy.detail.noStoredOutcome}</span>
                 )}

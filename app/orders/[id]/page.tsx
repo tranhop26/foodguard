@@ -12,9 +12,11 @@ import {
   type MutualSettlementView,
   type OrderDetailView,
   type ResolutionView,
+  type SettlementProposalView,
   type SettlementView,
 } from "../../../components/order/ItemOutcomeTable";
 import { OrderTimeline } from "../../../components/order/OrderTimeline";
+import { MutualSettlementPanel } from "../../../components/order/MutualSettlementPanel";
 import {
   authoritativeNowMs,
   MAX_AUTHORITATIVE_CHAIN_SECONDS,
@@ -39,12 +41,14 @@ import { LocaleProvider, type Locale, useLocale, WorkflowShell } from "../../../
 const orderStates = new Set<OrderState>([
   "FUNDED", "PARTIALLY_ACCEPTED", "ACCEPTED", "READY_FOR_PICKUP", "IN_TRANSIT",
   "REVIEW_WINDOW", "RESOLVING", "EVIDENCE_CURE", "RESOLVED", "APPEALED",
-  "ESCALATED", "SETTLED", "CANCELLED_REFUNDED",
+  "ESCALATED", "SETTLED", "CANCELLED_REFUNDED", "FULFILLMENT_TIMEOUT_REFUNDED",
 ]);
 const evidenceActions = new Set<EvidenceAction>([
   "PACKED", "PICKED_UP", "DELIVERED", "CUSTOMER_CLAIM", "CURE", "APPEAL",
 ]);
 const MAX_U64 = (1n << 64n) - 1n;
+const MAX_EVIDENCE_HISTORY = 112n;
+const MAX_SETTLEMENT_PROPOSALS = 96n;
 const resolutionStates = new Set<OrderState>([
   "EVIDENCE_CURE", "RESOLVED", "APPEALED", "ESCALATED", "SETTLED",
 ]);
@@ -175,7 +179,11 @@ function authoritativeBase(value: unknown, expectedOrderId: string): OrderDetail
   if (deadlines.some((deadline, index) => deadline > MAX_U64 || (index > 0 && deadline <= deadlines[index - 1]))) {
     throw new TypeError("Order deadlines are malformed");
   }
-  const finalState = value.state === "SETTLED" || value.state === "CANCELLED_REFUNDED";
+  const refunded = (
+    value.state === "CANCELLED_REFUNDED" ||
+    value.state === "FULFILLMENT_TIMEOUT_REFUNDED"
+  );
+  const finalState = value.state === "SETTLED" || refunded;
   if (Boolean(value.items_settled) !== finalState || Boolean(value.delivery_settled) !== finalState) {
     throw new TypeError("Order settlement flags are inconsistent with its state");
   }
@@ -188,7 +196,7 @@ function authoritativeBase(value: unknown, expectedOrderId: string): OrderDetail
   if (!acceptanceIsConsistent) {
     throw new TypeError("Order acceptance flags are inconsistent with its state or cancellation");
   }
-  if (Boolean(value.refund_emitted) !== cancelled) {
+  if (Boolean(value.refund_emitted) !== refunded) {
     throw new TypeError("Order refund and cancellation flags are inconsistent with its state");
   }
   const base = {
@@ -296,19 +304,29 @@ function parseResolution(value: unknown, manifestJson: string): ResolutionView {
   }
   if (
     !plainObject(parsed) ||
-    Object.keys(parsed).sort().join(",") !== "delivery_outcome,evidence_hashes,items" ||
+    Object.keys(parsed).sort().join(",") !== "delivery_outcome,evidence_hashes,evidence_indices,items" ||
     !Array.isArray(parsed.items) ||
-    !Array.isArray(parsed.evidence_hashes)
+    !Array.isArray(parsed.evidence_hashes) ||
+    !Array.isArray(parsed.evidence_indices)
   ) {
     throw new TypeError("Resolution readback is malformed");
   }
+  const evidenceHashes = parsed.evidence_hashes as unknown[];
+  const evidenceIndices = parsed.evidence_indices as unknown[];
   const manifest = JSON.parse(manifestJson) as { items: Array<{ item_id: string }> };
   const itemOutcomes = new Set(["MATCHED", "MISSING", "MISMATCHED", "DELIVERY_FAILED", "UNRESOLVED"]);
   const deliveryOutcomes = new Set(["DELIVERED", "DELIVERY_FAILED", "UNRESOLVED"]);
   if (
     parsed.items.length !== manifest.items.length ||
     !deliveryOutcomes.has(parsed.delivery_outcome as string) ||
-    !parsed.evidence_hashes.every((hash) => typeof hash === "string" && /^0x[0-9a-f]{64}$/i.test(hash))
+    !evidenceHashes.every((hash) => typeof hash === "string" && /^0x[0-9a-f]{64}$/i.test(hash)) ||
+    evidenceIndices.length !== evidenceHashes.length ||
+    !evidenceIndices.every((index, position) => (
+      typeof index === "number" &&
+      Number.isSafeInteger(index) &&
+      index >= 0 &&
+      (position === 0 || index > (evidenceIndices[position - 1] as number))
+    ))
   ) throw new TypeError("Resolution readback is malformed");
   const items: ResolutionView["items"] = parsed.items.map((item, index) => {
     if (
@@ -324,7 +342,8 @@ function parseResolution(value: unknown, manifestJson: string): ResolutionView {
   });
   return {
     delivery_outcome: parsed.delivery_outcome as DeliveryOutcome,
-    evidence_hashes: parsed.evidence_hashes as string[],
+    evidence_hashes: evidenceHashes as string[],
+    evidence_indices: evidenceIndices as number[],
     items,
   };
 }
@@ -375,32 +394,39 @@ function parseSettlement(value: unknown): SettlementView {
   };
 }
 
-async function parseMutualSettlement(
+async function parseSettlementProposal(
   value: unknown,
   order: OrderDetailView,
-  settlement: SettlementView,
-): Promise<MutualSettlementView> {
+): Promise<SettlementProposalView> {
   if (!plainObject(value)) throw new TypeError("Mutual settlement proposal readback is malformed");
-  const stringFields = ["proposal_json", "digest", "proposal_nonce"] as const;
+  const stringFields = ["proposal_json", "digest", "proposal_nonce", "active_evidence_digest"] as const;
   const signatureFields = ["customer_signed", "restaurant_signed", "courier_signed"] as const;
   if (
-    Object.keys(value).sort().join(",") !== "courier_signed,courier_wei,customer_signed,customer_wei,digest,proposal_json,proposal_nonce,restaurant_signed,restaurant_wei" ||
+    Object.keys(value).sort().join(",") !== "active_evidence_digest,courier_signed,courier_wei,customer_signed,customer_wei,digest,proposal_json,proposal_nonce,proposal_version,resolution_round,restaurant_signed,restaurant_wei" ||
     stringFields.some((field) => typeof value[field] !== "string" || !(value[field] as string).trim()) ||
-    signatureFields.some((field) => value[field] !== true) ||
-    !/^0x[0-9a-f]{64}$/i.test(value.digest as string)
+    signatureFields.some((field) => typeof value[field] !== "boolean") ||
+    !/^0x[0-9a-f]{64}$/i.test(value.digest as string) ||
+    !/^0x[0-9a-f]{64}$/i.test(value.active_evidence_digest as string)
   ) throw new TypeError("Mutual settlement proposal readback is malformed");
   const customerTotal = unsignedRaw(value.customer_wei, "mutual customer_wei");
   const restaurantTotal = unsignedRaw(value.restaurant_wei, "mutual restaurant_wei");
   const courierTotal = unsignedRaw(value.courier_wei, "mutual courier_wei");
+  const proposalVersion = unsignedRaw(value.proposal_version, "mutual proposal_version");
+  const resolutionRound = unsignedRaw(value.resolution_round, "mutual resolution_round");
   let proposal: unknown;
   try { proposal = JSON.parse(value.proposal_json as string); } catch { throw new TypeError("Mutual settlement proposal JSON is malformed"); }
   if (
     !plainObject(proposal) ||
-    Object.keys(proposal).sort().join(",") !== "chain_id,contract_address,delivery_allocation,item_allocations,order_id,proposal_nonce" ||
+    Object.keys(proposal).sort().join(",") !== "active_evidence_digest,chain_id,contract_address,delivery_allocation,item_allocations,order_id,proposal_nonce,proposal_version,resolution_round" ||
     canonicalJson(proposal) !== value.proposal_json ||
     proposal.chain_id !== String(FOODGUARD_CHAIN.id) ||
     proposal.order_id !== order.order_id ||
     proposal.proposal_nonce !== value.proposal_nonce ||
+    !Number.isSafeInteger(proposal.proposal_version) ||
+    !Number.isSafeInteger(proposal.resolution_round) ||
+    proposal.proposal_version !== Number(proposalVersion) ||
+    proposal.resolution_round !== Number(resolutionRound) ||
+    proposal.active_evidence_digest !== value.active_evidence_digest ||
     !plainObject(proposal.delivery_allocation) ||
     Object.keys(proposal.delivery_allocation).sort().join(",") !== "courier_wei,customer_wei" ||
     !Array.isArray(proposal.item_allocations)
@@ -440,24 +466,112 @@ async function parseMutualSettlement(
   if (
     expectedCustomer !== BigInt(customerTotal) ||
     expectedRestaurant !== BigInt(restaurantTotal) ||
-    BigInt(deliveryCourier) !== BigInt(courierTotal) ||
-    customerTotal !== String(settlement.customer_wei) ||
-    restaurantTotal !== String(settlement.restaurant_wei) ||
-    courierTotal !== String(settlement.courier_wei)
-  ) throw new TypeError("Mutual settlement totals do not match final settlement readback");
+    BigInt(deliveryCourier) !== BigInt(courierTotal)
+  ) throw new TypeError("Mutual settlement proposal totals are malformed");
   return {
-    courier_signed: true,
+    active_evidence_digest: value.active_evidence_digest as string,
+    courier_signed: value.courier_signed as boolean,
     courier_wei: courierTotal,
-    customer_signed: true,
+    customer_signed: value.customer_signed as boolean,
     customer_wei: customerTotal,
     delivery_allocation: { courier_wei: deliveryCourier, customer_wei: deliveryCustomer },
     digest: value.digest as string,
     item_allocations: itemAllocations,
+    is_current: false,
     proposal_json: value.proposal_json as string,
     proposal_nonce: value.proposal_nonce as string,
-    restaurant_signed: true,
+    proposal_version: proposalVersion,
+    resolution_round: resolutionRound,
+    restaurant_signed: value.restaurant_signed as boolean,
     restaurant_wei: restaurantTotal,
   };
+}
+
+function parseMutualSettlement(
+  proposal: SettlementProposalView,
+  settlement: SettlementView,
+): MutualSettlementView {
+  if (
+    !proposal.customer_signed ||
+    !proposal.restaurant_signed ||
+    !proposal.courier_signed ||
+    proposal.customer_wei !== String(settlement.customer_wei) ||
+    proposal.restaurant_wei !== String(settlement.restaurant_wei) ||
+    proposal.courier_wei !== String(settlement.courier_wei)
+  ) throw new TypeError("Mutual settlement totals do not match final settlement readback");
+  return {
+    ...proposal,
+    courier_signed: true,
+    customer_signed: true,
+    restaurant_signed: true,
+  };
+}
+
+async function activeEvidenceDigest(
+  evidence: EvidenceRecordView[],
+  resolution: ResolutionView,
+): Promise<string> {
+  const bindings = resolution.evidence_indices.map((index) => {
+    if (index >= evidence.length) throw new TypeError("Resolution evidence index is outside append-only history");
+    return [index, evidence[index].sha256.toLowerCase()];
+  });
+  return sha256Text(canonicalJson(bindings));
+}
+
+async function readSettlementProposals(
+  orderId: string,
+  order: OrderDetailView,
+  resolution: ResolutionView,
+  round: string,
+  evidence: EvidenceRecordView[],
+): Promise<SettlementProposalView[]> {
+  const count = BigInt(unsignedRaw(
+    await readFoodGuard<unknown>("get_settlement_proposal_count", [orderId]),
+    "settlement_proposal_count",
+  ));
+  if (count > MAX_SETTLEMENT_PROPOSALS) {
+    throw new TypeError("Settlement proposal count exceeds the safe readback limit");
+  }
+  const digests = await Promise.all(
+    Array.from({ length: Number(count) }, (_, index) =>
+      readFoodGuard<unknown>("get_settlement_proposal_digest", [orderId, BigInt(index)]),
+    ),
+  );
+  if (
+    digests.some((digest) => typeof digest !== "string" || !/^0x[0-9a-f]{64}$/i.test(digest)) ||
+    new Set(digests.map((digest) => (digest as string).toLowerCase())).size !== digests.length
+  ) throw new TypeError("Settlement proposal digest index is malformed");
+  const typedDigests = digests as string[];
+  const resolvedActiveDigest = await activeEvidenceDigest(evidence, resolution);
+  const proposals = await Promise.all(
+    typedDigests.map((digest) => readFoodGuard<unknown>("get_settlement_proposal", [orderId, digest])
+      .then((value) => parseSettlementProposal(value, order))),
+  );
+  return proposals.map((proposal) => ({
+    ...proposal,
+    is_current: (
+      proposal.resolution_round === round &&
+      proposal.active_evidence_digest.toLowerCase() === resolvedActiveDigest.toLowerCase()
+    ),
+  }));
+}
+
+async function expectedSettlementId(
+  orderId: string,
+  contractAddress: string,
+  basis: string,
+  settlement: SettlementView,
+): Promise<string> {
+  return sha256Text(canonicalJson({
+    basis,
+    chain_id: String(FOODGUARD_CHAIN.id),
+    contract_address: contractAddress.toLowerCase(),
+    courier_wei: String(settlement.courier_wei),
+    customer_wei: String(settlement.customer_wei),
+    order_id: orderId,
+    restaurant_wei: String(settlement.restaurant_wei),
+    schema_version: "foodguard-settlement-v1",
+  }));
 }
 
 export async function readAuthoritativeOrder(orderId: string): Promise<OrderDetailView> {
@@ -472,7 +586,7 @@ export async function readAuthoritativeOrder(orderId: string): Promise<OrderDeta
     "evidence_count",
   );
   const count = BigInt(countRaw);
-  if (count > 256n) throw new TypeError("Evidence count exceeds the safe readback limit");
+  if (count > MAX_EVIDENCE_HISTORY) throw new TypeError("Evidence count exceeds the safe readback limit");
   const evidence = await Promise.all(
     Array.from({ length: Number(count) }, (_, index) =>
       readFoodGuard<unknown>("get_evidence", [normalizedOrderId, BigInt(index)])
@@ -490,7 +604,10 @@ export async function readAuthoritativeOrder(orderId: string): Promise<OrderDeta
       )
     : null;
   if (resolution) {
-    const readbackDigests = evidence.map((record) => record.sha256);
+    const boundDigests = resolution.evidence_indices.map((index) => {
+      if (index >= evidence.length) throw new TypeError("Resolution evidence index is outside append-only history");
+      return evidence[index].sha256;
+    });
     const fullyUnresolved = (
       resolution.delivery_outcome === "UNRESOLVED" &&
       resolution.items.every((item) => item.outcome === "UNRESOLVED")
@@ -499,17 +616,27 @@ export async function readAuthoritativeOrder(orderId: string): Promise<OrderDeta
     if (
       !failClosedWithoutDigests && (
         resolution.evidence_hashes.length === 0 ||
-        resolution.evidence_hashes.length !== readbackDigests.length ||
-        resolution.evidence_hashes.some((digest, index) => digest !== readbackDigests[index])
+        resolution.evidence_hashes.some((digest, index) => digest !== boundDigests[index])
       )
-    ) throw new TypeError("Resolution evidence digests do not match append-only evidence");
+    ) throw new TypeError("Resolution evidence digests do not match its ordered active evidence set");
   }
   assertStateResolutionConsistency(order, round, resolution);
-  const settlement = order.state === "SETTLED" || order.state === "CANCELLED_REFUNDED"
+  const settlement = (
+    order.state === "SETTLED" ||
+    order.state === "CANCELLED_REFUNDED" ||
+    order.state === "FULFILLMENT_TIMEOUT_REFUNDED"
+  )
     ? parseSettlement(await readFoodGuard<unknown>("get_order_settlement", [normalizedOrderId]))
     : null;
+  const needsProposalRead = resolution !== null && (
+    order.state === "ESCALATED" ||
+    (order.state === "SETTLED" && hasUnresolvedOutcome(resolution))
+  );
+  const settlementProposals = needsProposalRead && resolution
+    ? await readSettlementProposals(normalizedOrderId, order, resolution, round, evidence)
+    : [];
   let mutualSettlement: MutualSettlementView | null = null;
-  let settlementBasis: string | null = null;
+  let settlementBases: string[] = [];
   if (settlement) {
     const customer = BigInt(settlement.customer_wei);
     const restaurant = BigInt(settlement.restaurant_wei);
@@ -517,21 +644,51 @@ export async function readAuthoritativeOrder(orderId: string): Promise<OrderDeta
     if (customer + restaurant + courier !== BigInt(order.total_value)) {
       throw new TypeError("Settlement allocations do not conserve the order value");
     }
-    if (order.state === "CANCELLED_REFUNDED" && (customer !== BigInt(order.total_value) || restaurant !== 0n || courier !== 0n)) {
+    const fullRefund = (
+      order.state === "CANCELLED_REFUNDED" ||
+      order.state === "FULFILLMENT_TIMEOUT_REFUNDED"
+    );
+    if (fullRefund && (customer !== BigInt(order.total_value) || restaurant !== 0n || courier !== 0n)) {
       throw new TypeError("Cancellation settlement allocation is malformed");
     }
-    if (order.state === "CANCELLED_REFUNDED") settlementBasis = "unaccepted-cancellation";
+    if (order.state === "CANCELLED_REFUNDED") settlementBases = ["unaccepted-cancellation"];
+    if (order.state === "FULFILLMENT_TIMEOUT_REFUNDED") {
+      settlementBases = [
+        "fulfillment-timeout:ACCEPTED",
+        "fulfillment-timeout:READY_FOR_PICKUP",
+        "fulfillment-timeout:IN_TRANSIT",
+      ];
+    }
     if (order.state === "SETTLED") {
       if (!resolution) throw new TypeError("Settled order resolution is missing");
       const items = authoritativeManifest(order.manifest_json);
       const hasUnresolved = hasUnresolvedOutcome(resolution);
       if (hasUnresolved) {
-        mutualSettlement = await parseMutualSettlement(
-          await readFoodGuard<unknown>("get_settlement_proposal", [normalizedOrderId]),
-          order,
-          settlement,
+        const matchingProposals = await Promise.all(
+          settlementProposals
+            .filter((proposal) => (
+              proposal.is_current &&
+              proposal.customer_signed &&
+              proposal.restaurant_signed &&
+              proposal.courier_signed &&
+              proposal.customer_wei === String(settlement.customer_wei) &&
+              proposal.restaurant_wei === String(settlement.restaurant_wei) &&
+              proposal.courier_wei === String(settlement.courier_wei)
+            ))
+            .map(async (proposal) => {
+              const stored = JSON.parse(proposal.proposal_json) as { contract_address: string };
+              const expected = await expectedSettlementId(
+                normalizedOrderId,
+                stored.contract_address,
+                `mutual:${proposal.digest}`,
+                settlement,
+              );
+              return expected.toLowerCase() === settlement.settlement_id.toLowerCase() ? proposal : null;
+            }),
         );
-        settlementBasis = `mutual:${mutualSettlement.digest}`;
+        const matches = matchingProposals.filter((proposal): proposal is SettlementProposalView => proposal !== null);
+        if (matches.length !== 1) throw new TypeError("Settlement ID does not bind one current mutual proposal");
+        mutualSettlement = parseMutualSettlement(matches[0], settlement);
       } else {
       let expectedCustomer = 0n;
       let expectedRestaurant = 0n;
@@ -547,29 +704,31 @@ export async function readAuthoritativeOrder(orderId: string): Promise<OrderDeta
       if (customer !== expectedCustomer || restaurant !== expectedRestaurant || courier !== expectedCourier) {
         throw new TypeError("Settlement allocations do not match the authoritative resolution");
       }
-        settlementBasis = `resolution:${await sha256Text(canonicalJson(resolution))}`;
+        settlementBases = [`resolution:${await sha256Text(canonicalJson(resolution))}`];
       }
     }
     const configuration = getFoodGuardConfiguration();
-    const mutualProposal = mutualSettlement ? JSON.parse(mutualSettlement.proposal_json) as { contract_address: string } : null;
-    const settlementContract = mutualProposal?.contract_address ?? (configuration.status === "READY" ? configuration.address : null);
-    if (settlementBasis && settlementContract) {
-      const expectedSettlementId = await sha256Text(canonicalJson({
-        basis: settlementBasis,
-        chain_id: String(FOODGUARD_CHAIN.id),
-        contract_address: settlementContract.toLowerCase(),
-        courier_wei: String(settlement.courier_wei),
-        customer_wei: String(settlement.customer_wei),
-        order_id: normalizedOrderId,
-        restaurant_wei: String(settlement.restaurant_wei),
-        schema_version: "foodguard-settlement-v1",
-      }));
-      if (expectedSettlementId.toLowerCase() !== settlement.settlement_id.toLowerCase()) {
+    if (settlementBases.length && configuration.status === "READY") {
+      const expectedIds = await Promise.all(settlementBases.map((basis) => expectedSettlementId(
+        normalizedOrderId,
+        configuration.address,
+        basis,
+        settlement,
+      )));
+      if (!expectedIds.some((expected) => expected.toLowerCase() === settlement.settlement_id.toLowerCase())) {
         throw new TypeError("Settlement ID does not bind the authoritative allocation");
       }
     }
   }
-  return { ...order, evidence, mutual_settlement: mutualSettlement, resolution, resolution_round: round, settlement };
+  return {
+    ...order,
+    evidence,
+    mutual_settlement: mutualSettlement,
+    resolution,
+    resolution_round: round,
+    settlement,
+    settlement_proposals: settlementProposals,
+  };
 }
 
 export async function readAuthoritativeChainTime(): Promise<bigint> {
@@ -808,6 +967,34 @@ export function OrderDetailWorkspace({
             onCure={() => setActiveEvidence({ action: "CURE", method: "submit_cure_evidence" })}
             order={order}
           />
+          {(order.state === "ESCALATED" || (order.settlement_proposals?.length ?? 0) > 0) && (
+            <MutualSettlementPanel
+              address={wallet?.address}
+              configuration={{
+                chainId: configuration.chainId,
+                contractAddress: configuration.contractAddress,
+                writesEnabled: configuration.writesEnabled && wallet?.status === "READY",
+              }}
+              disabled={pending || !configuration.writesEnabled}
+              nowSeconds={chainNowMs === null ? null : chainNowMs / 1_000n}
+              onPropose={async (allocationJson) => {
+                await runWrite(
+                  "propose_mutual_settlement",
+                  [order.order_id, allocationJson],
+                  wallet?.address ?? undefined,
+                );
+              }}
+              onSign={async (digest) => {
+                await runWrite(
+                  "sign_mutual_settlement",
+                  [order.order_id, digest],
+                  wallet?.address ?? undefined,
+                );
+              }}
+              order={order}
+              proposals={order.settlement_proposals ?? []}
+            />
+          )}
           {activeEvidence && wallet?.address && configuration.contractAddress && clock && chainNowMs !== null && (
             <EvidenceDrawer
               action={activeEvidence.action}

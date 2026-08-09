@@ -40,7 +40,7 @@ def evidence_json(
         "observed_at": observed_at,
         "order_id": order_id,
         "schema_version": "foodguard-evidence/1",
-        "source_url": "https://evidence.example/" + action.lower() + ".json",
+        "source_url": "https://evidence.foodguard.app/" + action.lower() + ".json",
         "subject": subject or (
             f"order:{order_id}/item:{item_id}" if item_id else f"order:{order_id}"
         ),
@@ -48,6 +48,33 @@ def evidence_json(
     }
     if item_id is not None:
         envelope["item_id"] = item_id
+    if action == "PACKED":
+        envelope["item_observations"] = [
+            {
+                "condition_statuses": [
+                    {"condition_index": 0, "status": "MET"}
+                ],
+                "item_id": "item|1",
+                "item_status": "AS_ORDERED",
+                "quantity_status": "EXACT",
+                "substitution_index": -1,
+            },
+            {
+                "condition_statuses": [],
+                "item_id": "item-2",
+                "item_status": "AS_ORDERED",
+                "quantity_status": "EXACT",
+                "substitution_index": -1,
+            },
+        ]
+    elif action == "PICKED_UP":
+        envelope["pickup_observation"] = "PICKUP_CONFIRMED"
+    elif action == "DELIVERED":
+        envelope["delivery_observation"] = "HANDOFF_CONFIRMED"
+    elif action == "CUSTOMER_CLAIM":
+        envelope["claim_category"] = "ABSENT_AT_RECEIPT"
+        envelope["criterion_index"] = 0
+        envelope["criterion_kind"] = "ITEM"
     envelope["sha256"] = "0x" + hashlib.sha256(
         _canonical_json(envelope).encode("utf-8")
     ).hexdigest()
@@ -369,7 +396,7 @@ def test_rejects_a_digest_that_does_not_bind_the_canonical_envelope(
 ):
     vm.sender = restaurant
     envelope = json.loads(evidence_json(vm, restaurant, "PACKED"))
-    envelope["source_url"] = "https://attacker.example/replaced.json"
+    envelope["source_url"] = "https://attacker.foodguard.app/replaced.json"
 
     with vm.expect_revert("evidence digest mismatch"):
         accepted_order.submit_packed_evidence("fg-1", _canonical_json(envelope))
@@ -500,3 +527,38 @@ def test_claim_submission_is_strictly_before_the_review_deadline(
         )
 
     assert review_order.get_evidence_count("fg-1") == 3
+
+
+@pytest.mark.parametrize(
+    "source_url",
+    [
+        "http://public.example.org/evidence.json",
+        "https://localhost/evidence.json",
+        "https://127.0.0.1/evidence.json",
+        "https://10.0.0.1/evidence.json",
+        "https://user:password@public.example.org/evidence.json",
+        "https://public.example.org/evidence.json#ambiguous-fragment",
+        "https://public.example.org\\@127.0.0.1/evidence.json",
+    ],
+)
+def test_contract_rejects_nonpublic_source_before_history_or_state_changes(
+    source_url,
+    accepted_order,
+    vm,
+    restaurant,
+):
+    envelope = json.loads(
+        evidence_json(vm, restaurant, "PACKED", nonce="source-policy")
+    )
+    envelope.pop("sha256")
+    envelope["source_url"] = source_url
+    envelope["sha256"] = "0x" + hashlib.sha256(
+        _canonical_json(envelope).encode("utf-8")
+    ).hexdigest()
+    vm.sender = restaurant
+
+    with vm.expect_revert("public HTTPS evidence source required"):
+        accepted_order.submit_packed_evidence("fg-1", _canonical_json(envelope))
+
+    assert accepted_order.get_order("fg-1").state == "ACCEPTED"
+    assert accepted_order.get_evidence_count("fg-1") == 0

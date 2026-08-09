@@ -5,7 +5,7 @@ import { isAddress, zeroAddress } from "viem";
 
 import type { EvidenceDocument, HexDigest, OrderItem } from "../../lib/domain";
 import { canonicalizeEvidence, hashEvidence } from "../../lib/evidence";
-import { writeFoodGuard } from "../../lib/genlayer/client";
+import { readFoodGuard, writeFoodGuard } from "../../lib/genlayer/client";
 import {
   getFoodGuardConfiguration,
   getFoodGuardPublicAppOriginConfiguration,
@@ -181,6 +181,8 @@ export function OrderBuilder({
   const [pending, setPending] = useState(false);
   const [stage, setStage] = useState<TxStage | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [creationPaused, setCreationPaused] = useState<boolean | null>(null);
+  const [creationPauseUnavailable, setCreationPauseUnavailable] = useState(false);
   const [authoritativeOrder, setAuthoritativeOrder] = useState<FoodGuardOrderView | null>(null);
   const [frozenCommitment, setFrozenCommitment] = useState<FrozenCommitment | null>(null);
 
@@ -268,6 +270,34 @@ export function OrderBuilder({
     return () => window.clearInterval(timer);
   }, [pending]);
 
+  useEffect(() => {
+    let active = true;
+    if (configuration.status !== "READY") {
+      setCreationPaused(false);
+      setCreationPauseUnavailable(false);
+      return () => { active = false; };
+    }
+    setCreationPaused(null);
+    setCreationPauseUnavailable(false);
+    void readFoodGuard<unknown>("get_creation_paused", []).then(
+      (value) => {
+        if (!active) return;
+        if (typeof value !== "boolean") throw new TypeError("Creation pause readback is malformed");
+        setCreationPaused(value);
+      },
+      () => {
+        if (!active) return;
+        setCreationPaused(null);
+        setCreationPauseUnavailable(true);
+      },
+    ).catch(() => {
+      if (!active) return;
+      setCreationPaused(null);
+      setCreationPauseUnavailable(true);
+    });
+    return () => { active = false; };
+  }, [configuration.address, configuration.status]);
+
   const handleWalletChange = useCallback((nextWallet: WalletSnapshot) => {
     setWallet(nextWallet);
     if (nextWallet.status === "READY" && !pending) setDeadlineBaseMs(Date.now());
@@ -276,6 +306,7 @@ export function OrderBuilder({
   const customerConnected = sameAddress(wallet.address, actors[0]);
   const canCreate =
     configuration.writesEnabled &&
+    creationPaused === false &&
     publicAppConfiguration.writesEnabled &&
     validation === "VALID" &&
     wallet.status === "READY" &&
@@ -418,6 +449,18 @@ export function OrderBuilder({
             <span>{copy.order.deploymentRequired}</span>
           </div>
         )}
+        {configuration.status === "READY" && creationPaused === true && (
+          <div className="deployment-note" role="status">
+            <strong>CREATION_PAUSED</strong>
+            <span>{copy.order.creationPaused}</span>
+          </div>
+        )}
+        {configuration.status === "READY" && creationPauseUnavailable && (
+          <div className="deployment-note" role="status">
+            <strong>CREATION_PAUSE_READBACK_REQUIRED</strong>
+            <span>{copy.order.creationPauseUnavailable}</span>
+          </div>
+        )}
         {publicAppConfiguration.status === "PUBLIC_APP_ORIGIN_REQUIRED" && (
           <div className="deployment-note" role="status">
             <strong>PUBLIC_APP_ORIGIN_REQUIRED</strong>
@@ -439,7 +482,11 @@ export function OrderBuilder({
           {copy.order.create}
         </button>
         {pending && <p className="form-notice" role="status">{copy.order.writing}</p>}
-        {stage && <p className="transaction-stage"><code>{stage}</code></p>}
+        {stage && (
+          <p className={`transaction-stage${stage === "CONSENSUS_FAILED" || stage === "EXECUTION_ERROR" ? " transaction-stage--failure" : ""}`}>
+            <code>{stage}</code>
+          </p>
+        )}
         {error && <p className="form-notice form-notice--error" role="alert">{error}</p>}
       </section>
 

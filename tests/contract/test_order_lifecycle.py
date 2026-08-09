@@ -497,10 +497,12 @@ def test_intentionally_frozen_public_abi_has_no_privileged_escape_hatch(food_gua
     assert set(schema["methods"]) == {
         "accept_courier",
         "accept_restaurant",
+        "cancel_fulfillment_timeout",
         "cancel_unaccepted",
         "create_order",
         "execute_settlement",
         "get_accounting",
+        "get_creation_paused",
         "get_evidence",
         "get_evidence_count",
         "get_item",
@@ -509,7 +511,10 @@ def test_intentionally_frozen_public_abi_has_no_privileged_escape_hatch(food_gua
         "get_resolution",
         "get_round",
         "get_settlement_proposal",
+        "get_settlement_proposal_count",
+        "get_settlement_proposal_digest",
         "appeal",
+        "escalate_cure_timeout",
         "propose_mutual_settlement",
         "request_resolution",
         "set_creation_paused",
@@ -602,6 +607,162 @@ def test_rejects_a_zero_actor_wallet(
             "zero-" + zero_role,
             addr(restaurant_arg),
             addr(courier_arg),
+            MANIFEST,
+            30,
+            DEADLINES,
+        )
+
+    assert food_guard.get_accounting().total_inflows == 0
+
+
+def test_fully_accepted_unpacked_order_refunds_at_exact_packing_deadline(
+    created_order,
+    emitted_messages,
+    vm,
+    restaurant,
+    courier,
+    outsider,
+    customer,
+):
+    vm.sender = restaurant
+    created_order.accept_restaurant("fg-1")
+    vm.sender = courier
+    created_order.accept_courier("fg-1")
+    vm.warp("2026-08-08T00:20:00Z")
+    vm.sender = outsider
+
+    settlement_id = created_order.cancel_fulfillment_timeout("fg-1")
+
+    order = created_order.get_order("fg-1")
+    settlement = created_order.get_order_settlement("fg-1")
+    accounting = created_order.get_accounting()
+    assert settlement_id == settlement.settlement_id
+    assert order.state == "FULFILLMENT_TIMEOUT_REFUNDED"
+    assert (settlement.customer_wei, settlement.restaurant_wei, settlement.courier_wei) == (
+        130,
+        0,
+        0,
+    )
+    assert accounting.reserved_items == 0
+    assert accounting.reserved_delivery == 0
+    assert accounting.customer_refunds_emitted == 130
+    assert [
+        (addr(message["address"]).lower(), message["value"], message["on"])
+        for message in emitted_messages
+    ] == [(addr(customer).lower(), 130, "finalized")]
+
+    assert created_order.cancel_fulfillment_timeout("fg-1") == settlement_id
+    assert len(emitted_messages) == 1
+
+
+@pytest.mark.parametrize("stage", ["READY_FOR_PICKUP", "IN_TRANSIT"])
+def test_delivery_timeout_refunds_a_stalled_accepted_order_at_the_exact_deadline(
+    stage,
+    created_order,
+    emitted_messages,
+    vm,
+    customer,
+    restaurant,
+    courier,
+    outsider,
+):
+    from test_evidence import evidence_json
+
+    vm.sender = restaurant
+    created_order.accept_restaurant("fg-1")
+    vm.sender = courier
+    created_order.accept_courier("fg-1")
+    vm.sender = restaurant
+    created_order.submit_packed_evidence(
+        "fg-1", evidence_json(vm, restaurant, "PACKED")
+    )
+    if stage == "IN_TRANSIT":
+        vm.sender = courier
+        created_order.submit_pickup_evidence(
+            "fg-1", evidence_json(vm, courier, "PICKED_UP")
+        )
+    assert created_order.get_order("fg-1").state == stage
+
+    vm.warp("2026-08-08T00:30:00Z")
+    vm.sender = outsider
+    settlement_id = created_order.cancel_fulfillment_timeout("fg-1")
+
+    settlement = created_order.get_order_settlement("fg-1")
+    assert created_order.get_order("fg-1").state == "FULFILLMENT_TIMEOUT_REFUNDED"
+    assert settlement.settlement_id == settlement_id
+    assert (settlement.customer_wei, settlement.restaurant_wei, settlement.courier_wei) == (
+        130,
+        0,
+        0,
+    )
+    assert [
+        (addr(message["address"]).lower(), message["value"], message["on"])
+        for message in emitted_messages
+    ] == [(addr(customer).lower(), 130, "finalized")]
+
+
+def test_fulfillment_submissions_are_strictly_before_their_deadlines(
+    created_order,
+    vm,
+    restaurant,
+    courier,
+):
+    from test_evidence import evidence_json
+
+    vm.sender = restaurant
+    created_order.accept_restaurant("fg-1")
+    vm.sender = courier
+    created_order.accept_courier("fg-1")
+    vm.warp("2026-08-08T00:20:00Z")
+    vm.sender = restaurant
+
+    with vm.expect_revert("packing deadline passed"):
+        created_order.submit_packed_evidence(
+            "fg-1",
+            evidence_json(
+                vm,
+                restaurant,
+                "PACKED",
+                submitted_at="2026-08-08T00:20:00.000Z",
+                observed_at="2026-08-08T00:19:00.000Z",
+            ),
+        )
+
+    assert created_order.get_order("fg-1").state == "ACCEPTED"
+    assert created_order.get_evidence_count("fg-1") == 0
+
+
+def test_creation_pause_has_authoritative_readback(food_guard, vm, deployer):
+    assert food_guard.get_creation_paused() is False
+
+    vm.sender = deployer
+    food_guard.set_creation_paused(True)
+
+    assert food_guard.get_creation_paused() is True
+
+
+@pytest.mark.parametrize("field", ["restaurant", "courier"])
+def test_malformed_provider_addresses_are_expected_user_errors(
+    field,
+    food_guard,
+    vm,
+    customer,
+    restaurant,
+    courier,
+):
+    vm.sender = customer
+    vm.value = 130
+    actors = {
+        "restaurant": addr(restaurant),
+        "courier": addr(courier),
+    }
+    actors[field] = "not-an-address"
+
+    with vm.expect_revert("invalid wallet address"):
+        food_guard.create_order(
+            "malformed-" + field,
+            actors["restaurant"],
+            actors["courier"],
             MANIFEST,
             30,
             DEADLINES,

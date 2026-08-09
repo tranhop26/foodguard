@@ -65,6 +65,60 @@ def _allocation(
     )
 
 
+def _corrective_evidence(
+    vm,
+    actor,
+    action,
+    *,
+    effective_action,
+    supersedes_evidence_index,
+    nonce,
+    item_id=None,
+):
+    envelope = json.loads(
+        evidence_json(
+            vm,
+            actor,
+            action,
+            item_id=item_id,
+            nonce=nonce,
+            expires_at="2026-08-08T02:00:00.000Z",
+        )
+    )
+    envelope.pop("sha256")
+    envelope["effective_action"] = effective_action
+    envelope["supersedes_evidence_index"] = supersedes_evidence_index
+    if effective_action == "PACKED":
+        envelope["item_observations"] = [
+            {
+                "condition_statuses": [{"condition_index": 0, "status": "MET"}],
+                "item_id": "item|1",
+                "item_status": "AS_ORDERED",
+                "quantity_status": "EXACT",
+                "substitution_index": -1,
+            },
+            {
+                "condition_statuses": [],
+                "item_id": "item-2",
+                "item_status": "AS_ORDERED",
+                "quantity_status": "EXACT",
+                "substitution_index": -1,
+            },
+        ]
+    elif effective_action == "PICKED_UP":
+        envelope["pickup_observation"] = "PICKUP_CONFIRMED"
+    elif effective_action == "DELIVERED":
+        envelope["delivery_observation"] = "HANDOFF_CONFIRMED"
+    elif effective_action == "CUSTOMER_CLAIM":
+        envelope["claim_category"] = "ABSENT_AT_RECEIPT"
+        envelope["criterion_index"] = 0
+        envelope["criterion_kind"] = "ITEM"
+    envelope["sha256"] = "0x" + hashlib.sha256(
+        _canonical_json(envelope).encode("utf-8")
+    ).hexdigest()
+    return _canonical_json(envelope)
+
+
 def _resolve(contract, vm, caller, result):
     _mock_sources(vm, _committed_sources(contract))
     _mock_resolution(vm, result)
@@ -102,8 +156,16 @@ def escalated_order(unresolved_order, vm, restaurant, outsider):
     vm.sender = restaurant
     unresolved_order.submit_cure_evidence(
         "fg-1",
-        evidence_json(vm, restaurant, "CURE", nonce="cure-escalation-1"),
+        _corrective_evidence(
+            vm,
+            restaurant,
+            "CURE",
+            effective_action="PACKED",
+            supersedes_evidence_index=0,
+            nonce="cure-escalation-1",
+        ),
     )
+    vm.warp("2026-08-08T00:45:00Z")
     _resolve(unresolved_order, vm, outsider, UNRESOLVED_RESULT)
     return unresolved_order
 
@@ -136,13 +198,21 @@ def test_cure_uses_append_only_bound_evidence_and_permissionless_retry_can_resol
     vm.sender = restaurant
     unresolved_order.submit_cure_evidence(
         "fg-1",
-        evidence_json(vm, restaurant, "CURE", nonce="cure-1"),
+        _corrective_evidence(
+            vm,
+            restaurant,
+            "CURE",
+            effective_action="PACKED",
+            supersedes_evidence_index=0,
+            nonce="cure-1",
+        ),
     )
 
     assert int(unresolved_order.get_evidence_count("fg-1")) == before_count + 1
     assert unresolved_order.get_evidence("fg-1", before_count).nonce == "cure-1"
     assert unresolved_order.get_resolution("fg-1") == first_resolution
 
+    vm.warp("2026-08-08T00:45:00Z")
     second_resolution = _resolve(unresolved_order, vm, outsider, MATCH_ALL_RESULT)
 
     assert unresolved_order.get_order("fg-1").state == "RESOLVED"
@@ -167,16 +237,39 @@ def test_cure_rejects_outsiders_repeats_and_invalid_digests(
         )
 
     vm.sender = restaurant
-    envelope = evidence_json(vm, restaurant, "CURE", nonce="restaurant-cure")
+    envelope = _corrective_evidence(
+        vm,
+        restaurant,
+        "CURE",
+        effective_action="PACKED",
+        supersedes_evidence_index=0,
+        nonce="restaurant-cure",
+    )
     unresolved_order.submit_cure_evidence("fg-1", envelope)
     with vm.expect_revert("cure already submitted"):
         unresolved_order.submit_cure_evidence(
             "fg-1",
-            evidence_json(vm, restaurant, "CURE", nonce="restaurant-cure-2"),
+            _corrective_evidence(
+                vm,
+                restaurant,
+                "CURE",
+                effective_action="PACKED",
+                supersedes_evidence_index=0,
+                nonce="restaurant-cure-2",
+            ),
         )
 
-    tampered = json.loads(evidence_json(vm, restaurant, "CURE", nonce="bad-digest"))
-    tampered["source_url"] = "https://attacker.example/rebound.json"
+    tampered = json.loads(
+        _corrective_evidence(
+            vm,
+            restaurant,
+            "CURE",
+            effective_action="PACKED",
+            supersedes_evidence_index=0,
+            nonce="bad-digest",
+        )
+    )
+    tampered["source_url"] = "https://attacker.foodguard.app/rebound.json"
     with vm.expect_revert("cure already submitted"):
         unresolved_order.submit_cure_evidence(
             "fg-1",
@@ -191,8 +284,17 @@ def test_cure_digest_binding_is_checked_before_storage(
     courier,
 ):
     before_count = unresolved_order.get_evidence_count("fg-1")
-    tampered = json.loads(evidence_json(vm, courier, "CURE", nonce="bad-digest"))
-    tampered["source_url"] = "https://attacker.example/rebound.json"
+    tampered = json.loads(
+        _corrective_evidence(
+            vm,
+            courier,
+            "CURE",
+            effective_action="DELIVERED",
+            supersedes_evidence_index=2,
+            nonce="bad-digest",
+        )
+    )
+    tampered["source_url"] = "https://attacker.foodguard.app/rebound.json"
     vm.sender = courier
 
     with vm.expect_revert("evidence digest mismatch"):
@@ -211,10 +313,12 @@ def test_affected_actor_can_appeal_once_and_prior_decision_is_preserved(
     vm.sender = customer
     resolved_order.appeal(
         "fg-1",
-        evidence_json(
+        _corrective_evidence(
             vm,
             customer,
             "APPEAL",
+            effective_action="CUSTOMER_CLAIM",
+            supersedes_evidence_index=3,
             item_id="item-2",
             nonce="appeal-1",
         ),
@@ -226,10 +330,12 @@ def test_affected_actor_can_appeal_once_and_prior_decision_is_preserved(
     with vm.expect_revert("appeal already used"):
         resolved_order.appeal(
             "fg-1",
-            evidence_json(
+            _corrective_evidence(
                 vm,
                 customer,
                 "APPEAL",
+                effective_action="CUSTOMER_CLAIM",
+                supersedes_evidence_index=3,
                 item_id="item-2",
                 nonce="appeal-2",
             ),
@@ -246,19 +352,27 @@ def test_each_affected_role_can_append_one_appeal_without_replacing_the_decision
     first_resolution = resolved_order.get_resolution("fg-1")
     before_count = int(resolved_order.get_evidence_count("fg-1"))
     appeals = [
-        (customer, "item-2", "customer-appeal-1"),
-        (restaurant, "item-2", "restaurant-appeal-1"),
-        (courier, None, "courier-appeal-1"),
+        (customer, "item-2", "CUSTOMER_CLAIM", 3, "customer-appeal-1"),
+        (restaurant, None, "PACKED", 0, "restaurant-appeal-1"),
+        (courier, None, "DELIVERED", 2, "courier-appeal-1"),
     ]
 
-    for appeal_index, (actor, item_id, nonce) in enumerate(appeals, start=1):
+    for appeal_index, (
+        actor,
+        item_id,
+        effective_action,
+        supersedes_evidence_index,
+        nonce,
+    ) in enumerate(appeals, start=1):
         vm.sender = actor
         resolved_order.appeal(
             "fg-1",
-            evidence_json(
+            _corrective_evidence(
                 vm,
                 actor,
                 "APPEAL",
+                effective_action=effective_action,
+                supersedes_evidence_index=supersedes_evidence_index,
                 item_id=item_id,
                 nonce=nonce,
             ),
@@ -270,15 +384,17 @@ def test_each_affected_role_can_append_one_appeal_without_replacing_the_decision
             before_count + appeal_index
         )
 
-    for actor, item_id, nonce in appeals:
+    for actor, item_id, effective_action, supersedes_evidence_index, nonce in appeals:
         vm.sender = actor
         with vm.expect_revert("appeal already used"):
             resolved_order.appeal(
                 "fg-1",
-                evidence_json(
+                _corrective_evidence(
                     vm,
                     actor,
                     "APPEAL",
+                    effective_action=effective_action,
+                    supersedes_evidence_index=supersedes_evidence_index,
                     item_id=item_id,
                     nonce=nonce + "-replay",
                 ),
@@ -294,7 +410,7 @@ def test_each_affected_role_can_append_one_appeal_without_replacing_the_decision
         "APPEAL",
     ]
     assert [evidence.nonce for evidence in stored_appeals] == [
-        nonce for _actor, _item_id, nonce in appeals
+        nonce for _actor, _item_id, _action, _index, nonce in appeals
     ]
 
 
@@ -342,7 +458,15 @@ def test_appeal_rejects_outsider_and_resolution_waits_for_appeal_deadline(
     vm.sender = customer
     resolved_order.appeal(
         "fg-1",
-        evidence_json(vm, customer, "APPEAL", nonce="customer-appeal"),
+        _corrective_evidence(
+            vm,
+            customer,
+            "APPEAL",
+            effective_action="CUSTOMER_CLAIM",
+            supersedes_evidence_index=3,
+            item_id="item-2",
+            nonce="customer-appeal",
+        ),
     )
     _mock_sources(vm, _committed_sources(resolved_order))
     _mock_resolution(vm, MATCH_ALL_RESULT)
@@ -386,17 +510,31 @@ def test_mutual_proposal_digest_uses_trusted_order_chain_and_contract_bindings(
     allocation = json.loads(allocation_json)
     expected_preimage = {
         **allocation,
+        "active_evidence_digest": "0x" + hashlib.sha256(
+            _canonical_json(
+                [
+                    [index, mutual_order.get_evidence("fg-1", index).sha256.lower()]
+                    for index in json.loads(
+                        mutual_order.get_resolution("fg-1")
+                    )["evidence_indices"]
+                ]
+            ).encode("utf-8")
+        ).hexdigest(),
         "chain_id": str(vm._chain_id),
         "contract_address": addr(vm._contract_address).lower(),
         "order_id": "fg-1",
+        "proposal_version": 1,
+        "resolution_round": 2,
     }
     expected_digest = "0x" + hashlib.sha256(
         _canonical_json(expected_preimage).encode("utf-8")
     ).hexdigest()
-    proposal = mutual_order.get_settlement_proposal("fg-1")
+    proposal = mutual_order.get_settlement_proposal("fg-1", digest)
     assert digest == expected_digest
     assert proposal.digest == expected_digest
     assert proposal.proposal_json == _canonical_json(expected_preimage)
+    assert mutual_order.get_settlement_proposal_count("fg-1") == 1
+    assert mutual_order.get_settlement_proposal_digest("fg-1", 0) == digest
 
 
 @pytest.mark.parametrize(
@@ -451,18 +589,19 @@ def test_mutual_proposal_rejects_outsider_changed_allocations_and_reused_nonce(
     digest = mutual_order.propose_mutual_settlement("fg-1", _allocation())
     with vm.expect_revert("proposal nonce already used"):
         mutual_order.propose_mutual_settlement("fg-1", _allocation())
-    with vm.expect_revert("settlement proposal already exists"):
-        mutual_order.propose_mutual_settlement(
-            "fg-1",
-            _allocation(
-                nonce="mutual-2",
-                item_2_customer="19",
-                item_2_restaurant="1",
-            ),
-        )
+    replacement = mutual_order.propose_mutual_settlement(
+        "fg-1",
+        _allocation(
+            nonce="mutual-2",
+            item_2_customer="19",
+            item_2_restaurant="1",
+        ),
+    )
 
-    proposal = mutual_order.get_settlement_proposal("fg-1")
+    proposal = mutual_order.get_settlement_proposal("fg-1", digest)
     assert proposal.digest == digest
+    assert replacement != digest
+    assert mutual_order.get_settlement_proposal_count("fg-1") == 2
 
 
 def test_mutual_settlement_requires_distinct_three_party_signatures_and_emits_once(
@@ -484,7 +623,7 @@ def test_mutual_settlement_requires_distinct_three_party_signatures_and_emits_on
     with vm.expect_revert("affected actor required"):
         mutual_order.sign_mutual_settlement("fg-1", digest)
     vm.sender = restaurant
-    with vm.expect_revert("settlement proposal digest mismatch"):
+    with vm.expect_revert("settlement proposal not found"):
         mutual_order.sign_mutual_settlement("fg-1", "0x" + "00" * 32)
     mutual_order.sign_mutual_settlement("fg-1", digest)
 
@@ -526,3 +665,145 @@ def test_mutual_proposal_waits_for_appeal_deadline(
 
     assert escalated_order.get_order("fg-1").state == "ESCALATED"
     assert emitted_messages == []
+
+
+def test_cure_window_blocks_immediate_outsider_reresolution(
+    unresolved_order,
+    vm,
+    restaurant,
+    outsider,
+):
+    order = unresolved_order.get_order("fg-1")
+    assert order.cure_deadline == 1_786_149_900
+    vm.sender = restaurant
+    unresolved_order.submit_cure_evidence(
+        "fg-1",
+        _corrective_evidence(
+            vm,
+            restaurant,
+            "CURE",
+            effective_action="PACKED",
+            supersedes_evidence_index=0,
+            nonce="bounded-cure-1",
+        ),
+    )
+    _mock_sources(vm, _committed_sources(unresolved_order))
+    _mock_resolution(vm, MATCH_ALL_RESULT)
+    vm.sender = outsider
+
+    with vm.expect_revert("cure deadline not reached"):
+        unresolved_order.request_resolution("fg-1")
+
+    assert unresolved_order.get_round("fg-1") == 1
+    assert unresolved_order.get_order("fg-1").state == "EVIDENCE_CURE"
+
+
+def test_cure_requires_typed_same_actor_supersession(unresolved_order, vm, restaurant):
+    before_count = unresolved_order.get_evidence_count("fg-1")
+    vm.sender = restaurant
+
+    with vm.expect_revert("typed corrective evidence required"):
+        unresolved_order.submit_cure_evidence(
+            "fg-1",
+            evidence_json(vm, restaurant, "CURE", nonce="untyped-cure"),
+        )
+
+    assert unresolved_order.get_evidence_count("fg-1") == before_count
+
+
+def test_superseded_source_stays_in_history_but_not_in_the_next_round_active_set(
+    unresolved_order,
+    vm,
+    restaurant,
+    outsider,
+):
+    superseded = unresolved_order.get_evidence("fg-1", 0)
+    vm.sender = restaurant
+    unresolved_order.submit_cure_evidence(
+        "fg-1",
+        _corrective_evidence(
+            vm,
+            restaurant,
+            "CURE",
+            effective_action="PACKED",
+            supersedes_evidence_index=0,
+            nonce="supersede-packed-1",
+        ),
+    )
+    assert unresolved_order.get_evidence("fg-1", 0).sha256 == superseded.sha256
+    sources = _committed_sources(unresolved_order)
+    sources.pop(superseded.source_url)
+    _mock_sources(vm, sources)
+    vm.mock_web(
+        superseded.source_url,
+        {"status": 503, "body": ""},
+    )
+    _mock_resolution(vm, MATCH_ALL_RESULT)
+    vm.warp("2026-08-08T00:50:00Z")
+    vm.sender = outsider
+
+    returned = json.loads(unresolved_order.request_resolution("fg-1"))
+
+    assert unresolved_order.get_order("fg-1").state == "RESOLVED"
+    assert returned["evidence_indices"] == [1, 2, 3, 4]
+    assert returned["evidence_hashes"] == [
+        unresolved_order.get_evidence("fg-1", index).sha256
+        for index in returned["evidence_indices"]
+    ]
+
+
+def test_escalated_order_accepts_one_bounded_retry_round(
+    escalated_order,
+    vm,
+    restaurant,
+    outsider,
+):
+    before_count = int(escalated_order.get_evidence_count("fg-1"))
+    retry_deadline = int(escalated_order.get_order("fg-1").cure_deadline)
+    vm.sender = restaurant
+    escalated_order.submit_cure_evidence(
+        "fg-1",
+        _corrective_evidence(
+            vm,
+            restaurant,
+            "CURE",
+            effective_action="PACKED",
+            supersedes_evidence_index=before_count - 1,
+            nonce="escalated-retry-1",
+        ),
+    )
+    assert int(escalated_order.get_evidence_count("fg-1")) == before_count + 1
+
+    vm.warp("2026-08-08T01:00:00Z")
+    assert int(escalated_order.get_order("fg-1").cure_deadline) <= retry_deadline
+    _resolve(escalated_order, vm, outsider, MATCH_ALL_RESULT)
+
+    assert escalated_order.get_order("fg-1").state == "RESOLVED"
+    assert escalated_order.get_round("fg-1") == 3
+
+
+def test_mutual_settlement_supports_concurrent_versioned_proposal_digests(
+    mutual_order,
+    vm,
+    customer,
+    restaurant,
+):
+    vm.sender = customer
+    first = mutual_order.propose_mutual_settlement(
+        "fg-1",
+        _allocation(nonce="customer-v1"),
+    )
+    vm.sender = restaurant
+    second = mutual_order.propose_mutual_settlement(
+        "fg-1",
+        _allocation(
+            nonce="restaurant-v1",
+            item_2_customer="19",
+            item_2_restaurant="1",
+        ),
+    )
+
+    assert first != second
+    assert mutual_order.get_settlement_proposal_count("fg-1") == 2
+    assert mutual_order.get_settlement_proposal("fg-1", first).digest == first
+    assert mutual_order.get_settlement_proposal("fg-1", second).digest == second

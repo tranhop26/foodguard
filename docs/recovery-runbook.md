@@ -23,9 +23,9 @@ Before calling `set_creation_paused(true)`, display:
 - deployer wallet currently connected;
 - method and argument `set_creation_paused(true)`;
 - expected consequence: new `create_order` calls fail; existing order actions remain available;
-- recovery/readback command.
+- authoritative recovery readback: `get_creation_paused()` must return `true`.
 
-Obtain explicit action-time confirmation. Submit with the deployer wallet, then require `FINALIZED`, `EXECUTION_SUCCESS`, and an authoritative readback showing `creation_paused = true`. If consensus fails, state is unchanged; reconcile the hash and retry only the same reviewed operation.
+Obtain explicit action-time confirmation. Submit with the deployer wallet, then require `FINALIZED`, `EXECUTION_SUCCESS`, and an authoritative `get_creation_paused()` readback returning `true`. The new-order surface must fail closed whenever that getter is unavailable or malformed; this blocks only new funding and does not suspend active-order readback or safe lifecycle actions. If consensus fails, state is unchanged; reconcile the hash and retry only the same reviewed operation.
 
 ## 3. Audit every active V1 order
 

@@ -38,6 +38,7 @@ FUNDED → PARTIALLY_ACCEPTED → ACCEPTED → READY_FOR_PICKUP → IN_TRANSIT
                               └→ EVIDENCE_CURE → RESOLVING
                                                 └→ ESCALATED
 FUNDED / PARTIALLY_ACCEPTED → CANCELLED_REFUNDED when strict cancellation rules allow
+ACCEPTED / READY_FOR_PICKUP / IN_TRANSIT → FULFILLMENT_TIMEOUT_REFUNDED at the exact stalled-workflow deadline (full customer refund)
 ```
 
 The contract validates the exact transition; the diagram is explanatory, not an authorization substitute.
@@ -83,7 +84,7 @@ The secret scan reads tracked worktree content, staged index content, and untrac
 
 ### Frozen V1 classification and known limits
 
-FoodGuard V1's exact contract classification is `INTENTIONALLY_FROZEN`: it is a frozen, non-upgradeable contract design. The deployer can pause **new order creation only**; there is no upgrade proxy, arbitrary admin rewrite, custody sweep, or automatic migration of active orders. A defect therefore requires pausing creation, auditing every active V1 order, exporting public evidence, deploying reviewed V2 source after confirmation, routing only new orders to V2, and preserving V1 readback/action access until its orders are terminal. See `docs/recovery-runbook.md`.
+FoodGuard V1's exact contract classification is `INTENTIONALLY_FROZEN`: it is a frozen, non-upgradeable contract design. The deployer can pause **new order creation only**; the UI reads `get_creation_paused()` and fails closed for new funding if that authoritative read is unavailable. There is no upgrade proxy, arbitrary admin rewrite, custody sweep, or automatic migration of active orders. A defect therefore requires pausing creation, auditing every active V1 order, exporting public evidence, deploying reviewed V2 source after confirmation, routing only new orders to V2, and preserving V1 readback/action access until its orders are terminal. See `docs/recovery-runbook.md`.
 
 Known limits: StudioNet and Simulated GEN are non-production; evidence availability and truth remain external assumptions; a digest proves integrity, not physical correctness; browser tests use local doubles; no live contract address, transaction, explorer record, or production URL is asserted by this repository; and unresolved/escalated funds may require cure or a fully signed mutual settlement.
 

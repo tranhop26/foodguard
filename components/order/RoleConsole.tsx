@@ -19,7 +19,9 @@ export interface FoodGuardOrderView {
   courier: string;
   courier_accepted: boolean;
   customer: string;
+  delivery_deadline?: bigint | number | string;
   order_id: string;
+  packing_deadline?: bigint | number | string;
   restaurant: string;
   restaurant_accepted: boolean;
   review_deadline?: bigint | number | string;
@@ -34,7 +36,8 @@ export type RoleActionId =
   | "pickup"
   | "deliver"
   | "claim"
-  | "cancel";
+  | "cancel"
+  | "cancelFulfillmentTimeout";
 
 export interface RoleAction {
   id: RoleActionId;
@@ -45,7 +48,8 @@ export interface RoleAction {
     | "submit_pickup_evidence"
     | "submit_delivery_evidence"
     | "submit_claim_evidence"
-    | "cancel_unaccepted";
+    | "cancel_unaccepted"
+    | "cancel_fulfillment_timeout";
   requiresEvidence: boolean;
 }
 
@@ -100,6 +104,18 @@ function actionFor(
   nowSeconds: bigint | null,
 ): RoleAction | null {
   const acceptancePhase = deadlinePhase(order.acceptance_deadline, nowSeconds);
+  const fulfillmentDeadline = order.state === "ACCEPTED"
+    ? order.packing_deadline
+    : order.state === "READY_FOR_PICKUP" || order.state === "IN_TRANSIT"
+      ? order.delivery_deadline
+      : undefined;
+  if (deadlinePhase(fulfillmentDeadline, nowSeconds) === "EXPIRED") {
+    return {
+      id: "cancelFulfillmentTimeout",
+      method: "cancel_fulfillment_timeout",
+      requiresEvidence: false,
+    };
+  }
   if (role === "RESTAURANT") {
     if (
       acceptedState(order.state) &&
@@ -193,6 +209,8 @@ export function RoleConsole({
 
       const nextDeadline = [
         parseDeadline(authoritativeOrder.acceptance_deadline),
+        parseDeadline(authoritativeOrder.packing_deadline),
+        parseDeadline(authoritativeOrder.delivery_deadline),
         parseDeadline(authoritativeOrder.review_deadline),
       ].reduce<bigint | null>((next, deadline) => {
         if (deadline === null || deadline <= currentSeconds) return next;
@@ -266,7 +284,7 @@ export function RoleConsole({
       </dl>
 
       {!address && <p className="form-notice">{copy.console.connect}</p>}
-      {role === "OUTSIDER" && <p className="form-notice">{copy.console.readOnly}</p>}
+      {role === "OUTSIDER" && !action && <p className="form-notice">{copy.console.readOnly}</p>}
       {role && role !== "OUTSIDER" && !action && (
         <p className="form-notice">{copy.console.noAction}</p>
       )}
@@ -281,7 +299,11 @@ export function RoleConsole({
         </button>
       )}
       {pending && <p className="form-notice" role="status">{copy.console.pending}</p>}
-      {stage && <p className="transaction-stage"><code>{stage}</code></p>}
+      {stage && (
+        <p className={`transaction-stage${stage === "CONSENSUS_FAILED" || stage === "EXECUTION_ERROR" ? " transaction-stage--failure" : ""}`}>
+          <code>{stage}</code>
+        </p>
+      )}
       {notice && <p className="form-notice" role="status">{notice}</p>}
       {error && <p className="form-notice form-notice--error" role="alert">{error}</p>}
     </section>

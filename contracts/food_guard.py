@@ -16,6 +16,11 @@ ITEM_OUTCOMES = (
     "UNRESOLVED",
 )
 DELIVERY_OUTCOMES = ("DELIVERED", "DELIVERY_FAILED", "UNRESOLVED")
+MAX_ITEMS = 100
+MAX_ACTIVE_EVIDENCE = 103
+MAX_EVIDENCE_HISTORY = 112
+CURE_WINDOW_SECONDS = 300
+MAX_SETTLEMENT_PROPOSALS = 32
 EVIDENCE_ACTION_CODES = {
     "PACKED": 1,
     "PICKED_UP": 2,
@@ -24,20 +29,94 @@ EVIDENCE_ACTION_CODES = {
     "CURE": 5,
     "APPEAL": 6,
 }
-PACKED_ITEM_OBSERVATION_CODES = {
-    "PACKED_AS_ORDERED": 1,
-    "NOT_PACKED": 2,
-    "PACKED_DIFFERENT": 3,
+PACKED_ITEM_STATUS_CODES = {
+    "AS_ORDERED": 1,
+    "PERMITTED_SUBSTITUTION": 2,
+    "ABSENT": 3,
+    "DIFFERENT": 4,
+    "UNKNOWN": 5,
+}
+QUANTITY_STATUS_CODES = {"EXACT": 1, "SHORT": 2, "EXCESS": 3, "UNKNOWN": 4}
+CONDITION_STATUS_CODES = {"MET": 1, "NOT_MET": 2, "UNKNOWN": 3}
+PICKUP_OBSERVATION_CODES = {
+    "PICKUP_CONFIRMED": 1,
+    "PICKUP_FAILED": 2,
+    "UNKNOWN": 3,
 }
 DELIVERY_OBSERVATION_CODES = {
     "HANDOFF_CONFIRMED": 1,
     "HANDOFF_FAILED": 2,
+    "UNKNOWN": 3,
 }
 CLAIM_CATEGORY_CODES = {
     "ABSENT_AT_RECEIPT": 1,
     "NOT_AS_ORDERED": 2,
     "HANDOFF_NOT_RECEIVED": 3,
 }
+CLAIM_CRITERION_KIND_CODES = {
+    "ITEM": 1,
+    "SUBSTITUTION": 2,
+    "CONDITION": 3,
+    "QUANTITY": 4,
+    "DELIVERY": 5,
+}
+
+
+def _is_public_https_url(value: str) -> bool:
+    if (
+        type(value) is not str
+        or not value.startswith("https://")
+        or len(value.encode("utf-8")) > 2048
+        or any(ord(character) <= 32 or ord(character) == 127 for character in value)
+        or "\\" in value
+        or "#" in value
+    ):
+        return False
+    remainder = value[8:]
+    authority = remainder
+    for separator in ("/", "?"):
+        if separator in authority:
+            authority = authority.split(separator, 1)[0]
+    if not authority or "@" in authority or ":" in authority or authority.endswith("."):
+        return False
+    host = authority.lower()
+    if (
+        "." not in host
+        or host.startswith(".")
+        or host.endswith(".")
+        or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789-." for character in host)
+    ):
+        return False
+    labels = host.split(".")
+    if any(
+        not label
+        or label.startswith("-")
+        or label.endswith("-")
+        for label in labels
+    ):
+        return False
+    if all(character in "0123456789." for character in host):
+        return False
+    reserved_suffixes = (
+        ".localhost",
+        ".local",
+        ".internal",
+        ".example",
+        ".invalid",
+        ".test",
+        ".arpa",
+        ".onion",
+    )
+    if host in ("localhost", "example.com", "example.net", "example.org"):
+        return False
+    if host.endswith(reserved_suffixes):
+        return False
+    if any(
+        host == domain or host.endswith("." + domain)
+        for domain in ("example.com", "example.net", "example.org")
+    ):
+        return False
+    return True
 
 
 class _DuplicateJsonKey(Exception):
@@ -98,7 +177,7 @@ def _parse_resolution_timestamp(value: str) -> int:
     )
 
 
-def _unresolved_resolution(item_ids, reason: str):
+def _unresolved_resolution(item_ids, reason: str, evidence_indices, evidence_hashes):
     return {
         "items": [
             {
@@ -109,7 +188,8 @@ def _unresolved_resolution(item_ids, reason: str):
             for item_id in item_ids
         ],
         "delivery_outcome": "UNRESOLVED",
-        "evidence_hashes": [],
+        "evidence_hashes": evidence_hashes,
+        "evidence_indices": evidence_indices,
     }
 
 
@@ -117,18 +197,30 @@ def _resolution_stable_fields(value, item_ids):
     if type(value) is not dict or set(value.keys()) != {
         "delivery_outcome",
         "evidence_hashes",
+        "evidence_indices",
         "items",
     }:
         return None
     items = value["items"]
     hashes = value["evidence_hashes"]
+    indices = value["evidence_indices"]
     if (
         type(items) is not list
         or len(items) != len(item_ids)
         or type(hashes) is not list
-        or len(hashes) > 107
+        or type(indices) is not list
+        or len(hashes) != len(indices)
+        or len(hashes) > MAX_ACTIVE_EVIDENCE
         or type(value["delivery_outcome"]) is not str
         or value["delivery_outcome"] not in DELIVERY_OUTCOMES
+    ):
+        return None
+    if any(
+        type(index) is not int
+        or index < 0
+        or index >= MAX_EVIDENCE_HISTORY
+        or (position > 0 and index <= indices[position - 1])
+        for position, index in enumerate(indices)
     ):
         return None
     for digest in hashes:
@@ -168,12 +260,13 @@ def _resolution_stable_fields(value, item_ids):
         {
             "delivery_outcome": value["delivery_outcome"],
             "evidence_hashes": hashes,
+            "evidence_indices": indices,
             "items": stable_items,
         }
     )
 
 
-def _normalize_model_resolution(value, item_ids, verified_hashes):
+def _normalize_model_resolution(value, item_ids, verified_indices, verified_hashes):
     if not _valid_model_resolution(value, len(item_ids)):
         raise RuntimeError("invalid model resolution")
     return {
@@ -187,6 +280,7 @@ def _normalize_model_resolution(value, item_ids, verified_hashes):
         ],
         "delivery_outcome": value["delivery_outcome"],
         "evidence_hashes": verified_hashes,
+        "evidence_indices": verified_indices,
     }
 
 
@@ -231,7 +325,8 @@ def _valid_model_resolution(value, item_count: int) -> bool:
 
 def _derive_resolution(manifest_json, item_ids, evidence_inputs, resolution_time):
     invalid_reason = "Public evidence was unavailable, invalid, or insufficient."
-    verified_hashes = []
+    verified_indices = [record["history_index"] for record in evidence_inputs]
+    verified_hashes = [record["sha256"] for record in evidence_inputs]
     evidence_events = []
     actions = set()
     manifest = _load_json_without_duplicate_keys(manifest_json)
@@ -253,8 +348,19 @@ def _derive_resolution(manifest_json, item_ids, evidence_inputs, resolution_time
         item_index_by_id[item_ids[item_index]] = item_index
         typed_manifest.append(
             {
+                "condition_count": len(item["conditions"]),
+                "condition_set_commitment": "0x" + hashlib.sha256(
+                    _canonical_json_value(item["conditions"]).encode("utf-8")
+                ).hexdigest(),
+                "item_identity_commitment": "0x" + hashlib.sha256(
+                    item["name"].encode("utf-8")
+                ).hexdigest(),
                 "item_index": item_index,
                 "quantity": item["quantity"],
+                "substitution_count": len(item["permitted_substitutions"]),
+                "substitution_set_commitment": "0x" + hashlib.sha256(
+                    _canonical_json_value(item["permitted_substitutions"]).encode("utf-8")
+                ).hexdigest(),
             }
         )
 
@@ -263,11 +369,7 @@ def _derive_resolution(manifest_json, item_ids, evidence_inputs, resolution_time
             raise _EvidenceResolutionFailure("missing evidence")
         for record in evidence_inputs:
             source_url = record["source_url"]
-            if (
-                type(source_url) is not str
-                or not source_url.startswith("https://")
-                or len(source_url.encode("utf-8")) > 2048
-            ):
+            if not _is_public_https_url(source_url):
                 raise _EvidenceResolutionFailure("invalid evidence URL")
 
             response = gl.nondet.web.get(source_url)
@@ -309,10 +411,11 @@ def _derive_resolution(manifest_json, item_ids, evidence_inputs, resolution_time
             ):
                 raise _EvidenceResolutionFailure("stale evidence")
 
-            action = record["action"]
-            if action not in EVIDENCE_ACTION_CODES:
+            record_action = record["action"]
+            action = record["effective_action"]
+            if record_action not in EVIDENCE_ACTION_CODES or action not in EVIDENCE_ACTION_CODES:
                 raise RuntimeError("invalid stored evidence action")
-            if document.get("action") != action:
+            if document.get("action") != record_action:
                 raise RuntimeError("stored evidence action mismatch")
             item_id = record["item_id"]
             if document.get("item_id", "") != item_id:
@@ -325,7 +428,10 @@ def _derive_resolution(manifest_json, item_ids, evidence_inputs, resolution_time
                 item_index = -1
 
             claim_code = 0
+            claim_criterion_index = -1
+            claim_criterion_kind_code = 0
             delivery_code = 0
+            pickup_code = 0
             item_observations = []
             if action == "PACKED":
                 observations = document.get("item_observations")
@@ -334,25 +440,82 @@ def _derive_resolution(manifest_json, item_ids, evidence_inputs, resolution_time
                         "missing packed item observations"
                     )
                 for expected_index, observation in enumerate(observations):
+                    manifest_item = manifest["items"][expected_index]
                     if (
                         type(observation) is not dict
-                        or set(observation.keys()) != {"item_id", "observation"}
+                        or set(observation.keys())
+                        != {
+                            "condition_statuses",
+                            "item_id",
+                            "item_status",
+                            "quantity_status",
+                            "substitution_index",
+                        }
                         or observation["item_id"] != item_ids[expected_index]
-                        or type(observation["observation"]) is not str
-                        or observation["observation"]
-                        not in PACKED_ITEM_OBSERVATION_CODES
+                        or type(observation["item_status"]) is not str
+                        or observation["item_status"] not in PACKED_ITEM_STATUS_CODES
+                        or type(observation["quantity_status"]) is not str
+                        or observation["quantity_status"] not in QUANTITY_STATUS_CODES
+                        or type(observation["substitution_index"]) is not int
                     ):
                         raise _EvidenceResolutionFailure(
                             "invalid packed item observations"
                         )
+                    substitution_index = observation["substitution_index"]
+                    if (
+                        observation["item_status"] == "PERMITTED_SUBSTITUTION"
+                        and not (
+                            0
+                            <= substitution_index
+                            < len(manifest_item["permitted_substitutions"])
+                        )
+                    ) or (
+                        observation["item_status"] != "PERMITTED_SUBSTITUTION"
+                        and substitution_index != -1
+                    ):
+                        raise _EvidenceResolutionFailure(
+                            "invalid packed substitution index"
+                        )
+                    condition_statuses = observation["condition_statuses"]
+                    if (
+                        type(condition_statuses) is not list
+                        or len(condition_statuses) != len(manifest_item["conditions"])
+                    ):
+                        raise _EvidenceResolutionFailure(
+                            "invalid packed condition statuses"
+                        )
+                    typed_conditions = []
+                    for condition_index, condition in enumerate(condition_statuses):
+                        if (
+                            type(condition) is not dict
+                            or set(condition.keys()) != {"condition_index", "status"}
+                            or condition["condition_index"] != condition_index
+                            or type(condition["status"]) is not str
+                            or condition["status"] not in CONDITION_STATUS_CODES
+                        ):
+                            raise _EvidenceResolutionFailure(
+                                "invalid packed condition statuses"
+                            )
+                        typed_conditions.append(
+                            [condition_index, CONDITION_STATUS_CODES[condition["status"]]]
+                        )
                     item_observations.append(
                         [
                             expected_index,
-                            PACKED_ITEM_OBSERVATION_CODES[
-                                observation["observation"]
-                            ],
+                            PACKED_ITEM_STATUS_CODES[observation["item_status"]],
+                            QUANTITY_STATUS_CODES[observation["quantity_status"]],
+                            substitution_index,
+                            typed_conditions,
                         ]
                     )
+            elif action == "PICKED_UP":
+                pickup_observation = document.get("pickup_observation")
+                if (
+                    type(pickup_observation) is not str
+                    or pickup_observation not in PICKUP_OBSERVATION_CODES
+                ):
+                    raise _EvidenceResolutionFailure("invalid pickup observation")
+                pickup_code = PICKUP_OBSERVATION_CODES[pickup_observation]
             elif action == "DELIVERED":
                 delivery_observation = document.get("delivery_observation")
                 if (
@@ -373,22 +536,53 @@ def _derive_resolution(manifest_json, item_ids, evidence_inputs, resolution_time
                 ):
                     raise _EvidenceResolutionFailure("invalid claim category")
                 claim_code = CLAIM_CATEGORY_CODES[claim_category]
+                criterion_kind = document.get("criterion_kind")
+                criterion_index = document.get("criterion_index")
+                if (
+                    type(criterion_kind) is not str
+                    or criterion_kind not in CLAIM_CRITERION_KIND_CODES
+                    or type(criterion_index) is not int
+                ):
+                    raise _EvidenceResolutionFailure("invalid claim criterion")
+                manifest_item = manifest["items"][item_index]
+                criterion_limit = {
+                    "ITEM": 1,
+                    "SUBSTITUTION": len(manifest_item["permitted_substitutions"]),
+                    "CONDITION": len(manifest_item["conditions"]),
+                    "QUANTITY": 1,
+                    "DELIVERY": 0,
+                }[criterion_kind]
+                if criterion_kind == "DELIVERY":
+                    if criterion_index != -1:
+                        raise _EvidenceResolutionFailure("invalid claim criterion")
+                elif criterion_index < 0 or criterion_index >= criterion_limit:
+                    raise _EvidenceResolutionFailure("invalid claim criterion")
+                claim_criterion_kind_code = CLAIM_CRITERION_KIND_CODES[criterion_kind]
+                claim_criterion_index = criterion_index
             actions.add(action)
             evidence_events.append(
                 {
                     "action_code": EVIDENCE_ACTION_CODES[action],
                     "claim_code": claim_code,
+                    "claim_criterion_index": claim_criterion_index,
+                    "claim_criterion_kind_code": claim_criterion_kind_code,
                     "delivery_code": delivery_code,
                     "item_index": item_index,
                     "item_observations": item_observations,
                     "observed_at_us": observed_at,
+                    "pickup_code": pickup_code,
+                    "record_action_code": EVIDENCE_ACTION_CODES[record_action],
                 }
             )
-            verified_hashes.append(record["sha256"])
         if not {"PACKED", "PICKED_UP", "DELIVERED"}.issubset(actions):
             raise _EvidenceResolutionFailure("insufficient evidence actions")
     except _EvidenceResolutionFailure:
-        return _unresolved_resolution(item_ids, invalid_reason)
+        return _unresolved_resolution(
+            item_ids,
+            invalid_reason,
+            verified_indices,
+            verified_hashes,
+        )
 
     prompt = (
         "FOODGUARD_RESOLUTION_V1\n"
@@ -396,11 +590,15 @@ def _derive_resolution(manifest_json, item_ids, evidence_inputs, resolution_time
         "The payload contains no participant prose. action_code meanings are "
         "1=PACKED, 2=PICKED_UP, 3=DELIVERED, 4=CUSTOMER_CLAIM, "
         "5=CURE, 6=APPEAL. "
-        "Packed item observation codes mean 1=affirmed as ordered, "
-        "2=reported absent while packing, 3=reported different while packing. "
-        "Delivery observation codes mean 1=handoff affirmed, 2=handoff failed. "
-        "Claim codes mean 1=item absent at receipt, 2=item not as ordered, "
-        "3=delivery not received.\n"
+        "Packed item status codes mean 1=as ordered, 2=permitted substitution, "
+        "3=absent, 4=different, 5=unknown. Quantity codes mean 1=exact, 2=short, "
+        "3=excess, 4=unknown. Condition codes mean 1=met, 2=not met, 3=unknown. "
+        "Pickup codes mean 1=confirmed, 2=failed, 3=unknown. Delivery codes mean "
+        "1=handoff confirmed, 2=handoff failed, 3=unknown. Claim codes mean "
+        "1=item absent at receipt, 2=item not as ordered, 3=delivery not received. "
+        "Claim criterion kind codes mean 1=item, 2=substitution, 3=condition, "
+        "4=quantity, 5=delivery. All indices bind the corresponding manifest "
+        "commitments and contain no participant prose.\n"
         "Return JSON only with exactly these keys: items, delivery_outcome. Return "
         "every manifest item exactly once and in item_index order. Each item has "
         "exactly item_index, outcome, facts. Allowed item outcomes: "
@@ -417,7 +615,12 @@ def _derive_resolution(manifest_json, item_ids, evidence_inputs, resolution_time
         )
     )
     model_result = gl.nondet.exec_prompt(prompt, response_format="json")
-    return _normalize_model_resolution(model_result, item_ids, verified_hashes)
+    return _normalize_model_resolution(
+        model_result,
+        item_ids,
+        verified_indices,
+        verified_hashes,
+    )
 
 
 @allow_storage
@@ -436,12 +639,14 @@ class Order:
     delivery_deadline: u64
     review_deadline: u64
     appeal_deadline: u64
+    cure_deadline: u64
     state: str
     restaurant_accepted: bool
     courier_accepted: bool
     items_settled: bool
     delivery_settled: bool
     refund_emitted: bool
+    escalated_retry_used: bool
 
 
 @dataclass
@@ -473,6 +678,9 @@ class Evidence:
     contract_address: str
     nonce: str
     envelope_json: str
+    effective_action: str
+    has_supersedes: bool
+    supersedes_index: u256
 
 
 @allow_storage
@@ -487,6 +695,9 @@ class SettlementProposal:
     customer_signed: bool
     restaurant_signed: bool
     courier_signed: bool
+    proposal_version: u256
+    resolution_round: u256
+    active_evidence_digest: str
 
 
 @allow_storage
@@ -510,8 +721,13 @@ class FoodGuard(gl.Contract):
     resolution_round_by_order: TreeMap[str, u256]
     unresolved_count_by_order: TreeMap[str, u256]
     submitted_cure_keys: TreeMap[str, bool]
+    superseded_evidence_keys: TreeMap[str, bool]
+    last_resolution_active_digest_by_order: TreeMap[str, str]
     appeal_used_keys: TreeMap[str, bool]
-    settlement_proposal_by_order: TreeMap[str, SettlementProposal]
+    settlement_proposal_by_key: TreeMap[str, SettlementProposal]
+    settlement_proposal_count_by_order: TreeMap[str, u256]
+    settlement_proposal_count_by_order_role: TreeMap[str, u256]
+    settlement_proposal_digest_by_index: TreeMap[str, str]
     settlement_by_order: TreeMap[str, Settlement]
     used_settlement_nonce_keys: TreeMap[str, bool]
     deployer: Address
@@ -545,6 +761,42 @@ class FoodGuard(gl.Contract):
     def _resolution_key(self, order_id: str, resolution_round: int) -> str:
         return self._canonical_json([order_id, resolution_round])
 
+    def _proposal_key(self, order_id: str, digest: str) -> str:
+        return self._canonical_json([order_id, digest])
+
+    def _proposal_index_key(self, order_id: str, proposal_index: int) -> str:
+        return self._canonical_json([order_id, proposal_index])
+
+    def _proposal_role_key(self, order_id: str, role: str) -> str:
+        return self._canonical_json([order_id, role])
+
+    def _active_evidence_indices(self, order_id: str):
+        evidence_count = (
+            int(self.evidence_count_by_order[order_id])
+            if order_id in self.evidence_count_by_order
+            else 0
+        )
+        if evidence_count > MAX_EVIDENCE_HISTORY:
+            raise gl.vm.UserError("[EXPECTED] evidence history limit exceeded")
+        active = []
+        for evidence_index in range(evidence_count):
+            if self._evidence_key(order_id, evidence_index) not in self.superseded_evidence_keys:
+                active.append(evidence_index)
+        if len(active) > MAX_ACTIVE_EVIDENCE:
+            raise gl.vm.UserError("[EXPECTED] active evidence limit exceeded")
+        return active
+
+    def _active_evidence_digest(self, order_id: str, active_indices) -> str:
+        bindings = []
+        for evidence_index in active_indices:
+            evidence = self.evidence_by_key[
+                self._evidence_key(order_id, evidence_index)
+            ]
+            bindings.append([evidence_index, evidence.sha256.lower()])
+        return "0x" + hashlib.sha256(
+            self._canonical_json(bindings).encode("utf-8")
+        ).hexdigest()
+
     def _address_hex(self, address: Address) -> str:
         return address.as_hex.lower()
 
@@ -573,7 +825,13 @@ class FoodGuard(gl.Contract):
         except Exception:
             raise gl.vm.UserError("[EXPECTED] invalid settlement proposal")
 
-    def _parse_mutual_allocation(self, order_id: str, allocation_json: str):
+    def _parse_mutual_allocation(
+        self,
+        order_id: str,
+        allocation_json: str,
+        proposal_version: int,
+        resolution_round: int,
+    ):
         try:
             allocation = json.loads(allocation_json)
         except Exception:
@@ -668,6 +926,16 @@ class FoodGuard(gl.Contract):
             gl.message.contract_address
         )
         bound_proposal["order_id"] = order_id
+        bound_proposal["proposal_version"] = proposal_version
+        bound_proposal["resolution_round"] = resolution_round
+        bound_proposal["active_evidence_digest"] = (
+            self.last_resolution_active_digest_by_order[order_id]
+            if order_id in self.last_resolution_active_digest_by_order
+            else self._active_evidence_digest(
+                order_id,
+                self._active_evidence_indices(order_id),
+            )
+        )
         proposal_json = self._canonical_json(bound_proposal)
         digest = "0x" + hashlib.sha256(
             proposal_json.encode("utf-8")
@@ -720,6 +988,189 @@ class FoodGuard(gl.Contract):
             return
         raise gl.vm.UserError("[EXPECTED] invalid evidence")
 
+    def _validate_typed_evidence_facts(
+        self,
+        order_id: str,
+        envelope,
+        expected_action: str,
+        expected_actor: Address,
+        item_id: str,
+    ):
+        common_fields = {
+            "action",
+            "actor_wallet",
+            "chain_id",
+            "contract_address",
+            "expires_at",
+            "issuer_id",
+            "nonce",
+            "observed_at",
+            "order_id",
+            "schema_version",
+            "sha256",
+            "source_url",
+            "subject",
+            "submitted_at",
+        }
+        if item_id:
+            common_fields.add("item_id")
+
+        effective_action = expected_action
+        has_supersedes = False
+        supersedes_index = 0
+        correction_fields = set()
+        if expected_action in ("CURE", "APPEAL"):
+            correction_fields = {"effective_action", "supersedes_evidence_index"}
+            effective_action = envelope.get("effective_action")
+            raw_supersedes = envelope.get("supersedes_evidence_index")
+            if (
+                effective_action not in (
+                    "PACKED",
+                    "PICKED_UP",
+                    "DELIVERED",
+                    "CUSTOMER_CLAIM",
+                )
+                or type(raw_supersedes) is not int
+                or raw_supersedes < 0
+            ):
+                raise gl.vm.UserError("[EXPECTED] typed corrective evidence required")
+            evidence_count = (
+                int(self.evidence_count_by_order[order_id])
+                if order_id in self.evidence_count_by_order
+                else 0
+            )
+            if raw_supersedes >= evidence_count:
+                raise gl.vm.UserError("[EXPECTED] typed corrective evidence required")
+            supersedes_key = self._evidence_key(order_id, raw_supersedes)
+            if supersedes_key in self.superseded_evidence_keys:
+                raise gl.vm.UserError("[EXPECTED] typed corrective evidence required")
+            superseded = self.evidence_by_key[supersedes_key]
+            try:
+                superseded_actor = Address(superseded.actor_wallet)
+            except Exception:
+                raise gl.vm.UserError("[EXPECTED] typed corrective evidence required")
+            if (
+                superseded_actor != expected_actor
+                or superseded.effective_action != effective_action
+                or superseded.item_id != item_id
+            ):
+                raise gl.vm.UserError("[EXPECTED] typed corrective evidence required")
+            supersedes_index = raw_supersedes
+            has_supersedes = True
+
+        manifest = json.loads(self.orders[order_id].manifest_json)
+        typed_fields = set()
+        if effective_action == "PACKED":
+            typed_fields = {"item_observations"}
+            observations = envelope.get("item_observations")
+            if type(observations) is not list or len(observations) != len(
+                manifest["items"]
+            ):
+                raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+            for item_index, (manifest_item, observation) in enumerate(
+                zip(manifest["items"], observations)
+            ):
+                if (
+                    type(observation) is not dict
+                    or set(observation.keys())
+                    != {
+                        "condition_statuses",
+                        "item_id",
+                        "item_status",
+                        "quantity_status",
+                        "substitution_index",
+                    }
+                    or observation.get("item_id") != manifest_item["item_id"]
+                    or type(observation.get("item_status")) is not str
+                    or observation.get("item_status") not in PACKED_ITEM_STATUS_CODES
+                    or type(observation.get("quantity_status")) is not str
+                    or observation.get("quantity_status") not in QUANTITY_STATUS_CODES
+                    or type(observation.get("substitution_index")) is not int
+                ):
+                    raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+                substitution_index = observation["substitution_index"]
+                if observation["item_status"] == "PERMITTED_SUBSTITUTION":
+                    if not (
+                        0
+                        <= substitution_index
+                        < len(manifest_item["permitted_substitutions"])
+                    ):
+                        raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+                elif substitution_index != -1:
+                    raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+                statuses = observation.get("condition_statuses")
+                if type(statuses) is not list or len(statuses) != len(
+                    manifest_item["conditions"]
+                ):
+                    raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+                for condition_index, status in enumerate(statuses):
+                    if (
+                        type(status) is not dict
+                        or set(status.keys()) != {"condition_index", "status"}
+                        or status.get("condition_index") != condition_index
+                        or type(status.get("status")) is not str
+                        or status.get("status") not in CONDITION_STATUS_CODES
+                    ):
+                        raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+            if item_id:
+                raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+        elif effective_action == "PICKED_UP":
+            typed_fields = {"pickup_observation"}
+            if (
+                type(envelope.get("pickup_observation")) is not str
+                or envelope.get("pickup_observation") not in PICKUP_OBSERVATION_CODES
+                or item_id
+            ):
+                raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+        elif effective_action == "DELIVERED":
+            typed_fields = {"delivery_observation"}
+            if (
+                type(envelope.get("delivery_observation")) is not str
+                or envelope.get("delivery_observation") not in DELIVERY_OBSERVATION_CODES
+                or item_id
+            ):
+                raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+        elif effective_action == "CUSTOMER_CLAIM":
+            typed_fields = {"claim_category", "criterion_index", "criterion_kind"}
+            category = envelope.get("claim_category")
+            kind = envelope.get("criterion_kind")
+            criterion_index = envelope.get("criterion_index")
+            if (
+                not item_id
+                or type(category) is not str
+                or category not in CLAIM_CATEGORY_CODES
+                or type(kind) is not str
+                or kind not in CLAIM_CRITERION_KIND_CODES
+                or type(criterion_index) is not int
+            ):
+                raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+            manifest_item = None
+            for candidate in manifest["items"]:
+                if candidate["item_id"] == item_id:
+                    manifest_item = candidate
+                    break
+            if manifest_item is None:
+                raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+            criterion_limit = {
+                "ITEM": 1,
+                "SUBSTITUTION": len(manifest_item["permitted_substitutions"]),
+                "CONDITION": len(manifest_item["conditions"]),
+                "QUANTITY": 1,
+                "DELIVERY": 0,
+            }[kind]
+            if kind == "DELIVERY":
+                valid_index = criterion_index == -1
+            else:
+                valid_index = 0 <= criterion_index < criterion_limit
+            if not valid_index:
+                raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+        else:
+            raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+
+        if set(envelope.keys()) != common_fields | correction_fields | typed_fields:
+            raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+        return effective_action, has_supersedes, supersedes_index
+
     def _append_evidence(
         self,
         order_id: str,
@@ -765,6 +1216,10 @@ class FoodGuard(gl.Contract):
             raise gl.vm.UserError("[EXPECTED] evidence order mismatch")
         if envelope["action"] != expected_action:
             raise gl.vm.UserError("[EXPECTED] evidence action mismatch")
+        if not _is_public_https_url(envelope["source_url"]):
+            raise gl.vm.UserError(
+                "[EXPECTED] public HTTPS evidence source required"
+            )
 
         item_id = envelope.get("item_id", "")
         if type(item_id) is not str or ("item_id" in envelope and not item_id):
@@ -822,6 +1277,18 @@ class FoodGuard(gl.Contract):
         if digest.lower() != calculated_digest:
             raise gl.vm.UserError("[EXPECTED] evidence digest mismatch")
 
+        (
+            effective_action,
+            has_supersedes,
+            supersedes_index,
+        ) = self._validate_typed_evidence_facts(
+            order_id,
+            envelope,
+            expected_action,
+            expected_actor,
+            item_id,
+        )
+
         canonical_chain_id = str(int(gl.message.chain_id))
         canonical_contract = self._address_hex(gl.message.contract_address)
         canonical_actor = self._address_hex(expected_actor)
@@ -864,14 +1331,23 @@ class FoodGuard(gl.Contract):
             contract_address=envelope["contract_address"],
             nonce=envelope["nonce"],
             envelope_json=envelope_json,
+            effective_action=effective_action,
+            has_supersedes=has_supersedes,
+            supersedes_index=u256(supersedes_index),
         )
         evidence_count = (
             int(self.evidence_count_by_order[order_id])
             if order_id in self.evidence_count_by_order
             else 0
         )
+        if evidence_count >= MAX_EVIDENCE_HISTORY:
+            raise gl.vm.UserError("[EXPECTED] evidence history limit exceeded")
         self.evidence_by_key[self._evidence_key(order_id, evidence_count)] = evidence
         self.evidence_count_by_order[order_id] = u256(evidence_count + 1)
+        if has_supersedes:
+            self.superseded_evidence_keys[
+                self._evidence_key(order_id, supersedes_index)
+            ] = True
         self.used_evidence_replay_keys[replay_key] = True
         if expected_action == "CUSTOMER_CLAIM":
             self.submitted_claim_keys[claim_key] = True
@@ -1091,10 +1567,14 @@ class FoodGuard(gl.Contract):
         order.items_settled = True
         order.delivery_settled = True
         order.state = terminal_state
+        if terminal_state in (
+            "CANCELLED_REFUNDED",
+            "FULFILLMENT_TIMEOUT_REFUNDED",
+        ):
+            order.refund_emitted = True
         if terminal_state == "CANCELLED_REFUNDED":
             order.restaurant_accepted = False
             order.courier_accepted = False
-            order.refund_emitted = True
         self.orders[order_id] = order
         self.settlement_by_order[order_id] = Settlement(
             settlement_id=settlement_id,
@@ -1160,8 +1640,11 @@ class FoodGuard(gl.Contract):
         if gl.message.value != u256(total_value):
             raise gl.vm.UserError("[EXPECTED] exact order value required")
         customer_address = gl.message.sender_address
-        restaurant_address = Address(restaurant)
-        courier_address = Address(courier)
+        try:
+            restaurant_address = Address(restaurant)
+            courier_address = Address(courier)
+        except Exception:
+            raise gl.vm.UserError("[EXPECTED] invalid wallet address")
         zero_address = Address(bytes(20))
         if (
             customer_address == zero_address
@@ -1190,12 +1673,14 @@ class FoodGuard(gl.Contract):
             delivery_deadline=u64(deadlines["delivery_deadline"]),
             review_deadline=u64(deadlines["review_deadline"]),
             appeal_deadline=u64(deadlines["appeal_deadline"]),
+            cure_deadline=u64(0),
             state="FUNDED",
             restaurant_accepted=False,
             courier_accepted=False,
             items_settled=False,
             delivery_settled=False,
             refund_emitted=False,
+            escalated_retry_used=False,
         )
         for item in manifest["items"]:
             self.item_json_by_key[self._item_key(order_id, item["item_id"])] = (
@@ -1252,6 +1737,8 @@ class FoodGuard(gl.Contract):
             raise gl.vm.UserError("[EXPECTED] invalid evidence transition")
         if gl.message.sender_address != order.restaurant:
             raise gl.vm.UserError("[EXPECTED] restaurant wallet required")
+        if self._now() >= int(order.packing_deadline):
+            raise gl.vm.UserError("[EXPECTED] packing deadline passed")
         self._append_evidence(order_id, "PACKED", envelope_json, order.restaurant)
         order.state = "READY_FOR_PICKUP"
         self.orders[order_id] = order
@@ -1265,6 +1752,8 @@ class FoodGuard(gl.Contract):
             raise gl.vm.UserError("[EXPECTED] invalid evidence transition")
         if gl.message.sender_address != order.courier:
             raise gl.vm.UserError("[EXPECTED] courier wallet required")
+        if self._now() >= int(order.delivery_deadline):
+            raise gl.vm.UserError("[EXPECTED] delivery deadline passed")
         self._append_evidence(order_id, "PICKED_UP", envelope_json, order.courier)
         order.state = "IN_TRANSIT"
         self.orders[order_id] = order
@@ -1278,6 +1767,8 @@ class FoodGuard(gl.Contract):
             raise gl.vm.UserError("[EXPECTED] invalid evidence transition")
         if gl.message.sender_address != order.courier:
             raise gl.vm.UserError("[EXPECTED] courier wallet required")
+        if self._now() >= int(order.delivery_deadline):
+            raise gl.vm.UserError("[EXPECTED] delivery deadline passed")
         self._append_evidence(order_id, "DELIVERED", envelope_json, order.courier)
         order.state = "REVIEW_WINDOW"
         self.orders[order_id] = order
@@ -1305,17 +1796,47 @@ class FoodGuard(gl.Contract):
         if order_id not in self.orders:
             raise gl.vm.UserError("[EXPECTED] order not found")
         order = self.orders[order_id]
-        if order.state != "EVIDENCE_CURE":
+        if order.state not in ("EVIDENCE_CURE", "ESCALATED"):
             raise gl.vm.UserError("[EXPECTED] invalid cure transition")
+        if order.state == "ESCALATED" and order.escalated_retry_used:
+            raise gl.vm.UserError("[EXPECTED] escalated retry already used")
+        if self._now() >= int(order.cure_deadline):
+            raise gl.vm.UserError("[EXPECTED] cure deadline passed")
         actor = gl.message.sender_address
         role = self._participant_role(order, actor)
         if not role:
             raise gl.vm.UserError("[EXPECTED] affected actor required")
-        cure_key = self._canonical_json([order_id, role])
+        resolution_round = (
+            int(self.resolution_round_by_order[order_id])
+            if order_id in self.resolution_round_by_order
+            else 0
+        )
+        cure_key = self._canonical_json([order_id, resolution_round, role])
         if cure_key in self.submitted_cure_keys:
             raise gl.vm.UserError("[EXPECTED] cure already submitted")
         self._append_evidence(order_id, "CURE", envelope_json, actor)
         self.submitted_cure_keys[cure_key] = True
+
+    @gl.public.write
+    def escalate_cure_timeout(self, order_id: str) -> None:
+        if order_id not in self.orders:
+            raise gl.vm.UserError("[EXPECTED] order not found")
+        order = self.orders[order_id]
+        if order.state != "EVIDENCE_CURE":
+            raise gl.vm.UserError("[EXPECTED] invalid cure transition")
+        if self._now() < int(order.cure_deadline):
+            raise gl.vm.UserError("[EXPECTED] cure deadline not reached")
+        active_indices = self._active_evidence_indices(order_id)
+        active_digest = self._active_evidence_digest(order_id, active_indices)
+        if (
+            order_id not in self.last_resolution_active_digest_by_order
+            or active_digest != self.last_resolution_active_digest_by_order[order_id]
+        ):
+            raise gl.vm.UserError("[EXPECTED] changed evidence requires resolution")
+        order.state = "ESCALATED"
+        order.cure_deadline = u64(self._now() + CURE_WINDOW_SECONDS)
+        order.escalated_retry_used = False
+        self.orders[order_id] = order
 
     @gl.public.write
     def appeal(self, order_id: str, envelope_json: str) -> None:
@@ -1343,32 +1864,48 @@ class FoodGuard(gl.Contract):
         if order_id not in self.orders:
             raise gl.vm.UserError("[EXPECTED] order not found")
         order = self.orders[order_id]
-        if order.state not in ("REVIEW_WINDOW", "EVIDENCE_CURE", "APPEALED"):
+        if order.state not in (
+            "REVIEW_WINDOW",
+            "EVIDENCE_CURE",
+            "APPEALED",
+            "ESCALATED",
+        ):
             raise gl.vm.UserError("[EXPECTED] invalid resolution transition")
+        now = self._now()
         if (
             order.state == "REVIEW_WINDOW"
-            and self._now() < int(order.review_deadline)
+            and now < int(order.review_deadline)
         ):
             raise gl.vm.UserError("[EXPECTED] review deadline not reached")
-        if order.state == "APPEALED" and self._now() < int(order.appeal_deadline):
+        if order.state == "APPEALED" and now < int(order.appeal_deadline):
             raise gl.vm.UserError("[EXPECTED] appeal deadline not reached")
+        if order.state in ("EVIDENCE_CURE", "ESCALATED"):
+            if now < int(order.cure_deadline):
+                raise gl.vm.UserError("[EXPECTED] cure deadline not reached")
+            if order.state == "ESCALATED" and order.escalated_retry_used:
+                raise gl.vm.UserError("[EXPECTED] escalated retry already used")
 
         manifest = json.loads(order.manifest_json)
         item_ids = [item["item_id"] for item in manifest["items"]]
-        evidence_count = (
-            int(self.evidence_count_by_order[order_id])
-            if order_id in self.evidence_count_by_order
-            else 0
-        )
+        active_indices = self._active_evidence_indices(order_id)
+        active_digest = self._active_evidence_digest(order_id, active_indices)
+        if order.state in ("EVIDENCE_CURE", "APPEALED", "ESCALATED") and (
+            order_id in self.last_resolution_active_digest_by_order
+            and active_digest
+            == self.last_resolution_active_digest_by_order[order_id]
+        ):
+            raise gl.vm.UserError("[EXPECTED] new active evidence required")
         evidence_inputs = []
-        for evidence_index in range(evidence_count):
+        for evidence_index in active_indices:
             evidence = self.evidence_by_key[
                 self._evidence_key(order_id, evidence_index)
             ]
             evidence_inputs.append(
                 {
                     "action": evidence.action,
+                    "effective_action": evidence.effective_action,
                     "envelope_json": evidence.envelope_json,
+                    "history_index": evidence_index,
                     "issuer_id": evidence.issuer_id,
                     "item_id": evidence.item_id,
                     "observed_at": evidence.observed_at,
@@ -1378,7 +1915,7 @@ class FoodGuard(gl.Contract):
                 }
             )
         manifest_json = order.manifest_json
-        resolution_time = self._now() * 1_000_000
+        resolution_time = now * 1_000_000
 
         def derive_resolution():
             return _derive_resolution(
@@ -1425,6 +1962,7 @@ class FoodGuard(gl.Contract):
         ] = resolution_json
         self.resolution_json_by_order[order_id] = resolution_json
         self.resolution_round_by_order[order_id] = u256(resolution_round)
+        self.last_resolution_active_digest_by_order[order_id] = active_digest
         has_unresolved_item = any(
             item["outcome"] == "UNRESOLVED" for item in result["items"]
         )
@@ -1432,6 +1970,7 @@ class FoodGuard(gl.Contract):
             has_unresolved_item
             or result["delivery_outcome"] == "UNRESOLVED"
         )
+        was_escalated = order.state == "ESCALATED"
         if is_unresolved:
             unresolved_count = (
                 int(self.unresolved_count_by_order[order_id]) + 1
@@ -1439,9 +1978,20 @@ class FoodGuard(gl.Contract):
                 else 1
             )
             self.unresolved_count_by_order[order_id] = u256(unresolved_count)
-            order.state = "ESCALATED" if unresolved_count >= 2 else "EVIDENCE_CURE"
+            if unresolved_count == 1:
+                order.state = "EVIDENCE_CURE"
+                order.cure_deadline = u64(now + CURE_WINDOW_SECONDS)
+            else:
+                order.state = "ESCALATED"
+                if was_escalated:
+                    order.escalated_retry_used = True
+                else:
+                    order.escalated_retry_used = False
+                    order.cure_deadline = u64(now + CURE_WINDOW_SECONDS)
         else:
             order.state = "RESOLVED"
+            if was_escalated:
+                order.escalated_retry_used = True
         self.orders[order_id] = order
         return resolution_json
 
@@ -1468,9 +2018,17 @@ class FoodGuard(gl.Contract):
         if (
             type(resolution) is not dict
             or set(resolution.keys())
-            != {"delivery_outcome", "evidence_hashes", "items"}
+            != {
+                "delivery_outcome",
+                "evidence_hashes",
+                "evidence_indices",
+                "items",
+            }
             or type(resolution["items"]) is not list
             or len(resolution["items"]) != len(manifest["items"])
+            or type(resolution["evidence_indices"]) is not list
+            or len(resolution["evidence_indices"])
+            != len(resolution["evidence_hashes"])
         ):
             raise gl.vm.UserError("[EXPECTED] invalid final decision")
 
@@ -1535,8 +2093,29 @@ class FoodGuard(gl.Contract):
             raise gl.vm.UserError("[EXPECTED] invalid settlement transition")
         if self._now() < int(order.appeal_deadline):
             raise gl.vm.UserError("[EXPECTED] appeal deadline not reached")
-        if not self._participant_role(order, gl.message.sender_address):
+        role = self._participant_role(order, gl.message.sender_address)
+        if not role:
             raise gl.vm.UserError("[EXPECTED] affected actor required")
+
+        proposal_count = (
+            int(self.settlement_proposal_count_by_order[order_id])
+            if order_id in self.settlement_proposal_count_by_order
+            else 0
+        )
+        role_key = self._proposal_role_key(order_id, role)
+        role_proposal_count = (
+            int(self.settlement_proposal_count_by_order_role[role_key])
+            if role_key in self.settlement_proposal_count_by_order_role
+            else 0
+        )
+        if role_proposal_count >= MAX_SETTLEMENT_PROPOSALS:
+            raise gl.vm.UserError("[EXPECTED] settlement proposal limit reached")
+        proposal_version = proposal_count + 1
+        resolution_round = (
+            int(self.resolution_round_by_order[order_id])
+            if order_id in self.resolution_round_by_order
+            else 0
+        )
 
         (
             proposal_nonce,
@@ -1545,7 +2124,12 @@ class FoodGuard(gl.Contract):
             customer_total,
             restaurant_total,
             courier_total,
-        ) = self._parse_mutual_allocation(order_id, allocation_json)
+        ) = self._parse_mutual_allocation(
+            order_id,
+            allocation_json,
+            proposal_version,
+            resolution_round,
+        )
         nonce_key = self._canonical_json(
             [
                 str(int(gl.message.chain_id)),
@@ -1556,10 +2140,18 @@ class FoodGuard(gl.Contract):
         )
         if nonce_key in self.used_settlement_nonce_keys:
             raise gl.vm.UserError("[EXPECTED] proposal nonce already used")
-        if order_id in self.settlement_proposal_by_order:
+        proposal_key = self._proposal_key(order_id, digest)
+        if proposal_key in self.settlement_proposal_by_key:
             raise gl.vm.UserError("[EXPECTED] settlement proposal already exists")
-
-        self.settlement_proposal_by_order[order_id] = SettlementProposal(
+        active_evidence_digest = (
+            self.last_resolution_active_digest_by_order[order_id]
+            if order_id in self.last_resolution_active_digest_by_order
+            else self._active_evidence_digest(
+                order_id,
+                self._active_evidence_indices(order_id),
+            )
+        )
+        self.settlement_proposal_by_key[proposal_key] = SettlementProposal(
             proposal_json=proposal_json,
             digest=digest,
             proposal_nonce=proposal_nonce,
@@ -1569,6 +2161,18 @@ class FoodGuard(gl.Contract):
             customer_signed=False,
             restaurant_signed=False,
             courier_signed=False,
+            proposal_version=u256(proposal_version),
+            resolution_round=u256(resolution_round),
+            active_evidence_digest=active_evidence_digest,
+        )
+        self.settlement_proposal_digest_by_index[
+            self._proposal_index_key(order_id, proposal_count)
+        ] = digest
+        self.settlement_proposal_count_by_order[order_id] = u256(
+            proposal_count + 1
+        )
+        self.settlement_proposal_count_by_order_role[role_key] = u256(
+            role_proposal_count + 1
         )
         self.used_settlement_nonce_keys[nonce_key] = True
         return digest
@@ -1594,17 +2198,14 @@ class FoodGuard(gl.Contract):
     def sign_mutual_settlement(self, order_id: str, digest: str) -> None:
         if order_id not in self.orders:
             raise gl.vm.UserError("[EXPECTED] order not found")
-        if order_id not in self.settlement_proposal_by_order:
+        proposal_key = self._proposal_key(order_id, digest)
+        if proposal_key not in self.settlement_proposal_by_key:
             raise gl.vm.UserError("[EXPECTED] settlement proposal not found")
         order = self.orders[order_id]
         role = self._participant_role(order, gl.message.sender_address)
         if not role:
             raise gl.vm.UserError("[EXPECTED] affected actor required")
-        proposal = self.settlement_proposal_by_order[order_id]
-        if digest != proposal.digest:
-            raise gl.vm.UserError(
-                "[EXPECTED] settlement proposal digest mismatch"
-            )
+        proposal = self.settlement_proposal_by_key[proposal_key]
         if (
             (role == "customer" and proposal.customer_signed)
             or (role == "restaurant" and proposal.restaurant_signed)
@@ -1615,6 +2216,26 @@ class FoodGuard(gl.Contract):
             )
         if order.state != "ESCALATED":
             raise gl.vm.UserError("[EXPECTED] invalid settlement transition")
+        current_round = (
+            int(self.resolution_round_by_order[order_id])
+            if order_id in self.resolution_round_by_order
+            else 0
+        )
+        current_active_digest = self._active_evidence_digest(
+            order_id,
+            self._active_evidence_indices(order_id),
+        )
+        resolved_active_digest = (
+            self.last_resolution_active_digest_by_order[order_id]
+            if order_id in self.last_resolution_active_digest_by_order
+            else current_active_digest
+        )
+        if (
+            int(proposal.resolution_round) != current_round
+            or proposal.active_evidence_digest != resolved_active_digest
+            or proposal.active_evidence_digest != current_active_digest
+        ):
+            raise gl.vm.UserError("[EXPECTED] settlement proposal is stale")
 
         completes_settlement = (
             (
@@ -1650,7 +2271,7 @@ class FoodGuard(gl.Contract):
             proposal.restaurant_signed = True
         else:
             proposal.courier_signed = True
-        self.settlement_proposal_by_order[order_id] = proposal
+        self.settlement_proposal_by_key[proposal_key] = proposal
         if completes_settlement:
             self._complete_mutual_settlement(
                 order_id,
@@ -1664,6 +2285,31 @@ class FoodGuard(gl.Contract):
         if gl.message.sender_address != self.deployer:
             raise gl.vm.UserError("[EXPECTED] only deployer may pause creation")
         self.creation_paused = paused
+
+    @gl.public.write
+    def cancel_fulfillment_timeout(self, order_id: str) -> str:
+        if order_id not in self.orders:
+            raise gl.vm.UserError("[EXPECTED] order not found")
+        if order_id in self.settlement_by_order:
+            return self.settlement_by_order[order_id].settlement_id
+        order = self.orders[order_id]
+        if order.state == "ACCEPTED":
+            deadline = int(order.packing_deadline)
+        elif order.state in ("READY_FOR_PICKUP", "IN_TRANSIT"):
+            deadline = int(order.delivery_deadline)
+        else:
+            raise gl.vm.UserError("[EXPECTED] order cannot be timeout refunded")
+        if self._now() < deadline:
+            raise gl.vm.UserError("[EXPECTED] fulfillment deadline not reached")
+        return self._allocate_once(
+            order_id,
+            order,
+            "fulfillment-timeout:" + order.state,
+            int(order.total_value),
+            0,
+            0,
+            "FULFILLMENT_TIMEOUT_REFUNDED",
+        )
 
     @gl.public.write
     def cancel_unaccepted(self, order_id: str) -> None:
@@ -1704,6 +2350,10 @@ class FoodGuard(gl.Contract):
         return self.orders[order_id]
 
     @gl.public.view
+    def get_creation_paused(self) -> bool:
+        return self.creation_paused
+
+    @gl.public.view
     def get_evidence(self, order_id: str, evidence_index: u256) -> Evidence:
         return self.evidence_by_key[
             self._evidence_key(order_id, int(evidence_index))
@@ -1738,12 +2388,41 @@ class FoodGuard(gl.Contract):
         return self.resolution_round_by_order[order_id]
 
     @gl.public.view
-    def get_settlement_proposal(self, order_id: str) -> SettlementProposal:
+    def get_settlement_proposal(
+        self, order_id: str, digest: str
+    ) -> SettlementProposal:
         if order_id not in self.orders:
             raise gl.vm.UserError("[EXPECTED] order not found")
-        if order_id not in self.settlement_proposal_by_order:
+        proposal_key = self._proposal_key(order_id, digest)
+        if proposal_key not in self.settlement_proposal_by_key:
             raise gl.vm.UserError("[EXPECTED] settlement proposal not found")
-        return self.settlement_proposal_by_order[order_id]
+        return self.settlement_proposal_by_key[proposal_key]
+
+    @gl.public.view
+    def get_settlement_proposal_count(self, order_id: str) -> u256:
+        if order_id not in self.orders:
+            raise gl.vm.UserError("[EXPECTED] order not found")
+        if order_id not in self.settlement_proposal_count_by_order:
+            return u256(0)
+        return self.settlement_proposal_count_by_order[order_id]
+
+    @gl.public.view
+    def get_settlement_proposal_digest(
+        self, order_id: str, proposal_index: u256
+    ) -> str:
+        if order_id not in self.orders:
+            raise gl.vm.UserError("[EXPECTED] order not found")
+        count = (
+            int(self.settlement_proposal_count_by_order[order_id])
+            if order_id in self.settlement_proposal_count_by_order
+            else 0
+        )
+        index = int(proposal_index)
+        if index < 0 or index >= count:
+            raise gl.vm.UserError("[EXPECTED] settlement proposal not found")
+        return self.settlement_proposal_digest_by_index[
+            self._proposal_index_key(order_id, index)
+        ]
 
     @gl.public.view
     def get_order_settlement(self, order_id: str) -> Settlement:

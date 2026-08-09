@@ -3,8 +3,7 @@ import json
 import pytest
 
 from conftest import addr
-from test_appeal import UNRESOLVED_RESULT, _allocation, _resolve
-from test_evidence import evidence_json
+from test_appeal import UNRESOLVED_RESULT, _allocation, _corrective_evidence, _resolve
 from test_resolution import (
     MIXED_RESULT,
     _advance_to_resolution,
@@ -61,8 +60,16 @@ def mutual_order(created_order, vm, customer, restaurant, courier, outsider):
     vm.sender = restaurant
     contract.submit_cure_evidence(
         "fg-1",
-        evidence_json(vm, restaurant, "CURE", nonce="accounting-cure"),
+        _corrective_evidence(
+            vm,
+            restaurant,
+            "CURE",
+            effective_action="PACKED",
+            supersedes_evidence_index=0,
+            nonce="accounting-cure",
+        ),
     )
+    vm.warp("2026-08-08T00:45:00Z")
     _resolve(contract, vm, outsider, UNRESOLVED_RESULT)
     vm.warp("2026-08-08T00:50:00Z")
     vm.deal(vm._contract_address, 130)
@@ -302,7 +309,9 @@ def test_final_mutual_signature_preflights_insolvency_before_persisting(
     final_signature_at_balance_check = []
 
     def observe_balance_check():
-        stored = instance.settlement_proposal_by_order["fg-1"]
+        stored = instance.settlement_proposal_by_key[
+            instance._proposal_key("fg-1", digest)
+        ]
         final_signature_at_balance_check.append(stored.courier_signed)
         return original_get_self_balance()
 
@@ -317,7 +326,7 @@ def test_final_mutual_signature_preflights_insolvency_before_persisting(
     with vm.expect_revert("insufficient contract balance"):
         mutual_order.sign_mutual_settlement("fg-1", digest)
 
-    stored = mutual_order.get_settlement_proposal("fg-1")
+    stored = mutual_order.get_settlement_proposal("fg-1", digest)
     assert final_signature_at_balance_check == [False]
     assert stored.customer_signed is True
     assert stored.restaurant_signed is True

@@ -7,11 +7,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const genlayerMocks = vi.hoisted(() => ({
   readFoodGuard: vi.fn(),
   trackTransaction: vi.fn(),
+  verifyFoodGuardDeploymentProof: vi.fn(),
   writeFoodGuard: vi.fn(),
 }));
 
 vi.mock("../../lib/genlayer/client", () => ({
   readFoodGuard: genlayerMocks.readFoodGuard,
+  verifyFoodGuardDeploymentProof: genlayerMocks.verifyFoodGuardDeploymentProof,
   writeFoodGuard: genlayerMocks.writeFoodGuard,
 }));
 vi.mock("../../lib/genlayer/transactions", () => ({
@@ -33,6 +35,10 @@ import { TransactionLifecycle } from "../../components/order/TransactionLifecycl
 import { LocaleProvider, type Locale } from "../../lib/i18n";
 import type { EvidenceDocument, OrderState } from "../../lib/domain";
 import { canonicalizeEvidenceEnvelope, hashEvidence } from "../../lib/evidence";
+import {
+  FOODGUARD_CHAIN,
+  type FoodGuardDeploymentProofConfiguration,
+} from "../../lib/genlayer/config";
 import {
   OrderDetailWorkspace,
   readAuthoritativeOrder,
@@ -91,6 +97,7 @@ const MIXED_OUTCOME_ORDER: OrderDetailView = {
   resolution: {
     delivery_outcome: "DELIVERY_FAILED",
     evidence_hashes: ["0x" + "ab".repeat(32)],
+    evidence_indices: [0],
     items: [
       { facts: ["sealed package"], item_id: "item-1", outcome: "MATCHED" },
       { facts: ["not received"], item_id: "item-2", outcome: "MISSING" },
@@ -103,6 +110,7 @@ const UNRESOLVED_ORDER: OrderDetailView = {
   resolution: {
     delivery_outcome: "UNRESOLVED",
     evidence_hashes: [],
+    evidence_indices: [],
     items: [
       { facts: ["insufficient evidence"], item_id: "item-1", outcome: "UNRESOLVED" },
       { facts: [], item_id: "item-2", outcome: "UNRESOLVED" },
@@ -796,6 +804,7 @@ describe("order detail readback orchestration", () => {
     const mixedFirstUnresolved = {
       delivery_outcome: "UNRESOLVED",
       evidence_hashes: [evidence.sha256],
+      evidence_indices: [0],
       items: [
         { facts: ["matched"], item_id: "item-1", outcome: "MATCHED" },
         { facts: ["insufficient"], item_id: "item-2", outcome: "UNRESOLVED" },
@@ -817,6 +826,32 @@ describe("order detail readback orchestration", () => {
     });
   });
 
+  it("accepts a resolution bound to its earlier ordered evidence set after a cure appends history", async () => {
+    const evidence = await storedPackedEvidence();
+    const resolution = {
+      delivery_outcome: "DELIVERY_FAILED",
+      evidence_hashes: [evidence.sha256],
+      evidence_indices: [0],
+      items: [
+        { facts: ["matched"], item_id: "item-1", outcome: "MATCHED" },
+        { facts: ["missing"], item_id: "item-2", outcome: "MISSING" },
+      ],
+    };
+    genlayerMocks.readFoodGuard.mockImplementation((method: string) => {
+      if (method === "get_order") return Promise.resolve({ ...MIXED_OUTCOME_ORDER, resolution });
+      if (method === "get_evidence_count") return Promise.resolve("2");
+      if (method === "get_evidence") return Promise.resolve(evidence);
+      if (method === "get_resolution") return Promise.resolve(JSON.stringify(resolution));
+      if (method === "get_round") return Promise.resolve("1");
+      throw new Error(`unexpected method ${method}`);
+    });
+
+    await expect(readAuthoritativeOrder("fg-mixed")).resolves.toMatchObject({
+      resolution: { evidence_hashes: [evidence.sha256], evidence_indices: [0] },
+      state: "RESOLVED",
+    });
+  });
+
   it("rejects a resolution digest that is absent from append-only evidence", async () => {
     genlayerMocks.readFoodGuard.mockImplementation((method: string) => {
       if (method === "get_order") return Promise.resolve(MIXED_OUTCOME_ORDER);
@@ -832,7 +867,7 @@ describe("order detail readback orchestration", () => {
   it("rejects an empty digest list for a non-fail-closed resolution", async () => {
     const resolvedWithoutDigests = {
       ...MIXED_OUTCOME_ORDER,
-      resolution: { ...MIXED_OUTCOME_ORDER.resolution!, evidence_hashes: [] },
+      resolution: { ...MIXED_OUTCOME_ORDER.resolution!, evidence_hashes: [], evidence_indices: [] },
     };
     genlayerMocks.readFoodGuard.mockImplementation((method: string) => {
       if (method === "get_order") return Promise.resolve(resolvedWithoutDigests);
@@ -858,21 +893,24 @@ describe("order detail readback orchestration", () => {
 
     await expect(readAuthoritativeOrder("fg-mixed")).resolves.toMatchObject({
       state: "EVIDENCE_CURE",
-      resolution: { delivery_outcome: "UNRESOLVED", evidence_hashes: [] },
+      resolution: { delivery_outcome: "UNRESOLVED", evidence_hashes: [], evidence_indices: [] },
     });
   });
 
   it("reads a unanimously signed mutual settlement for unresolved outcomes", async () => {
     const evidence = await storedPackedEvidence();
+    const activeEvidenceDigest = await sha256Text(canonicalTestJson([[0, evidence.sha256.toLowerCase()]]));
     const mixedUnresolvedResolution: NonNullable<OrderDetailView["resolution"]> = {
       delivery_outcome: "UNRESOLVED",
       evidence_hashes: [evidence.sha256],
+      evidence_indices: [0],
       items: [
         { facts: ["matched"], item_id: "item-1", outcome: "MATCHED" },
         { facts: ["insufficient evidence"], item_id: "item-2", outcome: "UNRESOLVED" },
       ],
     };
     const proposalDocument = {
+      active_evidence_digest: activeEvidenceDigest,
       chain_id: "61999",
       contract_address: "0x4444444444444444444444444444444444444444",
       delivery_allocation: { courier_wei: "30", customer_wei: "20" },
@@ -882,8 +920,10 @@ describe("order detail readback orchestration", () => {
       ],
       order_id: "fg-mixed",
       proposal_nonce: "mutual-readback",
+      proposal_version: 1,
+      resolution_round: 2,
     };
-    const proposalJson = JSON.stringify(proposalDocument);
+    const proposalJson = canonicalTestJson(proposalDocument);
     const digest = await sha256Text(proposalJson);
     const settlementId = await sha256Text(JSON.stringify({
       basis: `mutual:${digest}`,
@@ -914,7 +954,10 @@ describe("order detail readback orchestration", () => {
         restaurant_wei: "750",
         settlement_id: settlementId,
       });
+      if (method === "get_settlement_proposal_count") return Promise.resolve("1");
+      if (method === "get_settlement_proposal_digest") return Promise.resolve(digest);
       if (method === "get_settlement_proposal") return Promise.resolve({
+        active_evidence_digest: activeEvidenceDigest,
         courier_signed: true,
         courier_wei: 30,
         customer_signed: true,
@@ -922,6 +965,8 @@ describe("order detail readback orchestration", () => {
         digest,
         proposal_json: proposalJson,
         proposal_nonce: "mutual-readback",
+        proposal_version: 1,
+        resolution_round: 2,
         restaurant_signed: true,
         restaurant_wei: 750,
       });
@@ -987,6 +1032,7 @@ describe("order detail readback orchestration", () => {
         order={{
           ...UNRESOLVED_ORDER,
           mutual_settlement: {
+            active_evidence_digest: "0x" + "cd".repeat(32),
             courier_signed: true,
             courier_wei: "30",
             customer_signed: true,
@@ -996,6 +1042,8 @@ describe("order detail readback orchestration", () => {
             item_allocations: [],
             proposal_json: "{}",
             proposal_nonce: "broken",
+            proposal_version: "1",
+            resolution_round: "2",
             restaurant_signed: true,
             restaurant_wei: "750",
           },
@@ -1313,7 +1361,7 @@ describe("immutable settlement proof", () => {
     state: "SETTLED",
   };
 
-  it("renders only real chain, settlement, evidence, outcomes, and readback fields", () => {
+  it("marks deployment provenance unavailable when no verified deployment record is supplied", () => {
     renderLocalized(
       <ProofView
         chainId="61999"
@@ -1327,10 +1375,147 @@ describe("immutable settlement proof", () => {
     expect(screen.getByText("0x" + "ef".repeat(32))).toBeVisible();
     expect(screen.getAllByText("0x" + "ab".repeat(32)).length).toBeGreaterThan(0);
     expect(screen.getByText("SETTLED")).toBeVisible();
-    expect(screen.queryByText(/contract source hash/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/transaction hash/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /deployment verification record/i })).toBeVisible();
+    expect(screen.getByText(
+      "Deployment provenance is unavailable. Contract source hash and deployment transaction lifecycle are intentionally not claimed.",
+    )).toBeVisible();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: /immutable verified settlement/i })).toBeVisible();
+  });
+
+  it("renders verified deployment metadata only after the runtime verifier succeeds", async () => {
+    renderLocalized(
+      <ProofView
+        chainId="61999"
+        contractAddress="0x4444444444444444444444444444444444444444"
+        deploymentProof={{
+          address: "0x4444444444444444444444444444444444444444",
+          chain: FOODGUARD_CHAIN,
+          chainId: FOODGUARD_CHAIN.id,
+          execution: "EXECUTION_SUCCESS",
+          finality: "FINALIZED",
+          readback: "READBACK_CONFIRMED",
+          sourceHash: ("0x" + "12".repeat(32)) as `0x${string}`,
+          sourceHashMatch: true,
+          status: "REVIEWED",
+          transactionHash: ("0x" + "34".repeat(32)) as `0x${string}`,
+          runtimeVerification: { status: "NOT_CHECKED" },
+        } satisfies FoodGuardDeploymentProofConfiguration}
+        order={SETTLED_ORDER}
+        runtimeVerifier={async (proof) => proof.status === "REVIEWED" ? ({
+          ...proof,
+          status: "VERIFIED",
+          runtimeVerification: { status: "VERIFIED" },
+        }) : proof}
+      />,
+      "en",
+    );
+
+    await waitFor(() => expect(screen.getByText(/verified live against studionet/i)).toBeVisible());
+    expect(screen.getByText("0x" + "12".repeat(32))).toBeVisible();
+    expect(screen.getByText("0x" + "34".repeat(32))).toBeVisible();
+    expect(screen.getByText("FINALIZED → EXECUTION_SUCCESS → READBACK_CONFIRMED")).toBeVisible();
+  });
+
+  it("does not show deployment provenance for a different contract address", () => {
+    renderLocalized(
+      <ProofView
+        chainId="61999"
+        contractAddress="0x4444444444444444444444444444444444444444"
+        deploymentProof={{
+          address: "0x5555555555555555555555555555555555555555",
+          chain: FOODGUARD_CHAIN,
+          chainId: FOODGUARD_CHAIN.id,
+          execution: "EXECUTION_SUCCESS",
+          finality: "FINALIZED",
+          readback: "READBACK_CONFIRMED",
+          sourceHash: ("0x" + "56".repeat(32)) as `0x${string}`,
+          sourceHashMatch: true,
+          status: "REVIEWED",
+          transactionHash: ("0x" + "78".repeat(32)) as `0x${string}`,
+          runtimeVerification: { status: "NOT_CHECKED" },
+        } satisfies FoodGuardDeploymentProofConfiguration}
+        order={SETTLED_ORDER}
+        runtimeVerifier={async (proof) => proof}
+      />,
+      "en",
+    );
+
+    expect(screen.getByText(
+      "Deployment provenance is unavailable. Contract source hash and deployment transaction lifecycle are intentionally not claimed.",
+    )).toBeVisible();
+    expect(screen.queryByText("0x" + "56".repeat(32))).not.toBeInTheDocument();
+  });
+
+  it("does not trust a forged verified deployment proof prop", () => {
+    renderLocalized(
+      <ProofView
+        chainId="61999"
+        contractAddress="0x4444444444444444444444444444444444444444"
+        deploymentProof={{
+          address: "0x4444444444444444444444444444444444444444",
+          execution: "EXECUTION_SUCCESS",
+          finality: "FINALIZED",
+          readback: "READBACK_CONFIRMED",
+          sourceHash: "not-a-source-hash",
+          sourceHashMatch: true,
+          status: "VERIFIED",
+          transactionHash: "not-a-transaction-hash",
+        } as unknown as FoodGuardDeploymentProofConfiguration}
+        order={SETTLED_ORDER}
+      />,
+      "en",
+    );
+
+    expect(screen.getByText(
+      "Deployment provenance is unavailable. Contract source hash and deployment transaction lifecycle are intentionally not claimed.",
+    )).toBeVisible();
+    expect(screen.queryByText("not-a-source-hash")).not.toBeInTheDocument();
+  });
+
+  it("labels a configured deployment record as not independently verified", () => {
+    renderLocalized(
+      <ProofView
+        chainId="61999"
+        contractAddress="0x4444444444444444444444444444444444444444"
+        deploymentProof={{
+          address: "0x4444444444444444444444444444444444444444",
+          chain: FOODGUARD_CHAIN,
+          chainId: 61999,
+          execution: "EXECUTION_SUCCESS",
+          finality: "FINALIZED",
+          readback: "READBACK_CONFIRMED",
+          sourceHash: "0x" + "9a".repeat(32),
+          sourceHashMatch: true,
+          status: "REVIEWED",
+          transactionHash: "0x" + "bc".repeat(32),
+          runtimeVerification: { status: "NOT_CHECKED" },
+        } as unknown as FoodGuardDeploymentProofConfiguration}
+        order={SETTLED_ORDER}
+        runtimeVerifier={async (proof) => proof}
+      />,
+      "en",
+    );
+
+    expect(screen.getByText(/reviewed deployment metadata is configured/i)).toBeVisible();
+    expect(screen.getByText("0x" + "9a".repeat(32))).toBeVisible();
+  });
+
+  it("treats a fulfillment timeout refund as terminal contract proof", () => {
+    renderLocalized(
+      <ProofView
+        chainId="61999"
+        contractAddress="0x4444444444444444444444444444444444444444"
+        order={{
+          ...SETTLED_ORDER,
+          state: "FULFILLMENT_TIMEOUT_REFUNDED",
+        }}
+      />,
+      "en",
+    );
+
+    expect(screen.getByRole("heading", { name: /immutable verified settlement/i })).toBeVisible();
+    expect(screen.queryByText(/nonterminal readback/i)).not.toBeInTheDocument();
   });
 
   it("omits unavailable transaction and settlement identifiers without placeholders", () => {

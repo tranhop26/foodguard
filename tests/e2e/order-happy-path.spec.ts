@@ -8,6 +8,7 @@ test("happy path waits for finality, execution, and full readback before success
   await page.goto("/orders/fg-1?locale=en");
 
   await expect(page.getByTestId("raw-detail-state")).toHaveText("RESOLVED");
+  await page.getByRole("button", { name: /connect wallet/i }).click();
   await page.getByRole("button", { name: /execute settlement/i }).click();
 
   await expect(page.getByText("FINALIZED", { exact: true })).toBeVisible();

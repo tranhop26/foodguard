@@ -28,3 +28,17 @@ test("consensus failure preserves prior state and exposes operation-specific ret
   await expect(page.getByRole("button", { name: /thử phân xử lại/i })).toBeEnabled();
   expect(consoleErrors).toEqual([]);
 });
+
+test("an escalated participant can build and submit a mutual settlement proposal", async ({ page }) => {
+  await installWalletAndRpcFixture(page, "escalated");
+  const consoleErrors = trackConsoleErrors(page);
+  await page.goto("/orders/fg-1?locale=en");
+  await expect(page.getByTestId("raw-detail-state")).toHaveText("ESCALATED");
+  await page.getByRole("button", { name: /connect wallet/i }).click();
+
+  await expect(page.getByRole("heading", { name: /mutual settlement/i })).toBeVisible();
+  await expect(page.getByRole("button", { name: /propose mutual settlement/i })).toBeEnabled();
+  await page.getByRole("button", { name: /propose mutual settlement/i }).click();
+  await expect(page.getByText(/proposal submitted\. wait for authoritative readback/i)).toBeVisible();
+  expect(consoleErrors).toEqual([]);
+});

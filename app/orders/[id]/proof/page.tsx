@@ -6,10 +6,22 @@ import { ItemOutcomeTable, type OrderDetailView } from "../../../../components/o
 import {
   FOODGUARD_CHAIN,
   getFoodGuardConfiguration,
+  getFoodGuardDeploymentProofConfiguration,
   getFoodGuardPublicAppOriginConfiguration,
+  isFoodGuardReviewedDeploymentProofForContract,
+  isFoodGuardVerifiedDeploymentProofForContract,
+  type FoodGuardDeploymentProof,
+  type FoodGuardDeploymentProofConfiguration,
 } from "../../../../lib/genlayer/config";
+import { verifyFoodGuardDeploymentProof } from "../../../../lib/genlayer/client";
 import { LocaleProvider, type Locale, useLocale, WorkflowShell } from "../../../../lib/i18n";
 import { readAuthoritativeOrder } from "../page";
+
+const terminalProofStates = new Set<string>([
+  "SETTLED",
+  "CANCELLED_REFUNDED",
+  "FULFILLMENT_TIMEOUT_REFUNDED",
+]);
 
 function readbackJson(order: OrderDetailView): string {
   return JSON.stringify(
@@ -22,17 +34,62 @@ function readbackJson(order: OrderDetailView): string {
 export function ProofView({
   chainId,
   contractAddress,
+  deploymentProof,
   order,
+  runtimeVerifier = verifyFoodGuardDeploymentProof,
 }: {
   chainId: string;
   contractAddress: string;
+  deploymentProof?: FoodGuardDeploymentProofConfiguration;
   order: OrderDetailView;
+  runtimeVerifier?: (
+    proof: FoodGuardDeploymentProofConfiguration,
+    orderId: string,
+  ) => Promise<FoodGuardDeploymentProof>;
 }) {
   const { copy } = useLocale();
-  const terminalVerified = (
-    (order.state === "SETTLED" || order.state === "CANCELLED_REFUNDED") &&
-    order.settlement != null
+  const [runtimeProof, setRuntimeProof] = useState<FoodGuardDeploymentProof>(
+    () => deploymentProof ?? getFoodGuardDeploymentProofConfiguration(),
   );
+  const terminalState = terminalProofStates.has(order.state);
+  const terminalVerified = terminalState && order.settlement != null;
+  const verifiedDeploymentProof = isFoodGuardVerifiedDeploymentProofForContract(
+    runtimeProof,
+    contractAddress,
+  ) ? runtimeProof : null;
+  const reviewedDeploymentProof = isFoodGuardReviewedDeploymentProofForContract(
+    runtimeProof,
+    contractAddress,
+  ) ? runtimeProof : null;
+  const deploymentProofUnavailableReason = runtimeProof.status === "UNAVAILABLE"
+    ? runtimeProof.reason
+    : "CONTRACT_ADDRESS_MISMATCH";
+  const deploymentProofUnavailableMessage = runtimeProof.status === "UNAVAILABLE"
+    ? runtimeProof.message
+    : "Deployment provenance is unavailable because the deployment record does not match this contract address.";
+
+  useEffect(() => {
+    let active = true;
+    const configured = deploymentProof ?? getFoodGuardDeploymentProofConfiguration();
+    setRuntimeProof(configured);
+    if (configured.status !== "REVIEWED") return () => { active = false; };
+    void runtimeVerifier(configured, order.order_id).then((verified) => {
+      if (active) setRuntimeProof(verified);
+    }).catch((caught: unknown) => {
+      if (!active) return;
+      setRuntimeProof({
+        ...configured,
+        runtimeVerification: {
+          status: "FAILED",
+          reason: "RUNTIME_VERIFIER_FAILED",
+          message: caught instanceof Error
+            ? caught.message
+            : "StudioNet runtime verification did not complete.",
+        },
+      });
+    });
+    return () => { active = false; };
+  }, [deploymentProof, order.order_id, runtimeVerifier]);
 
   return (
     <article className="proof-view" aria-labelledby="proof-title">
@@ -59,6 +116,46 @@ export function ProofView({
             <div><dt>{copy.detail.settlementId}</dt><dd><code>{order.settlement.settlement_id}</code></dd></div>
           )}
         </dl>
+      </section>
+      <section className="order-card" aria-labelledby="proof-deployment-title">
+        <h2 id="proof-deployment-title">{copy.detail.deploymentVerification}</h2>
+        {verifiedDeploymentProof ? (
+          <>
+            <p>{copy.detail.deploymentProofVerified}</p>
+            <dl className="order-facts proof-facts">
+              <div><dt>{copy.detail.contractSourceHash}</dt><dd><code>{verifiedDeploymentProof.sourceHash}</code></dd></div>
+              <div><dt>{copy.detail.transactionHash}</dt><dd><code>{verifiedDeploymentProof.transactionHash}</code></dd></div>
+              <div>
+                <dt>{copy.detail.deploymentTransactionLifecycle}</dt>
+                <dd><code>{`${verifiedDeploymentProof.finality} → ${verifiedDeploymentProof.execution} → ${verifiedDeploymentProof.readback}`}</code></dd>
+              </div>
+            </dl>
+          </>
+        ) : reviewedDeploymentProof ? (
+          <>
+            <p className="form-notice form-notice--warning">{copy.detail.deploymentProofReviewed}</p>
+            <dl className="order-facts proof-facts">
+              <div><dt>{copy.detail.contractSourceHash}</dt><dd><code>{reviewedDeploymentProof.sourceHash}</code></dd></div>
+              <div><dt>{copy.detail.transactionHash}</dt><dd><code>{reviewedDeploymentProof.transactionHash}</code></dd></div>
+              <div>
+                <dt>{copy.detail.deploymentTransactionLifecycle}</dt>
+                <dd><code>{`${reviewedDeploymentProof.finality} → ${reviewedDeploymentProof.execution} → ${reviewedDeploymentProof.readback}`}</code></dd>
+              </div>
+              <div>
+                <dt>{copy.detail.runtimeVerification}</dt>
+                <dd><code>{reviewedDeploymentProof.runtimeVerification.status}</code></dd>
+              </div>
+            </dl>
+            {reviewedDeploymentProof.runtimeVerification.status === "FAILED" && (
+              <p><code>{reviewedDeploymentProof.runtimeVerification.reason}</code> {reviewedDeploymentProof.runtimeVerification.message}</p>
+            )}
+          </>
+        ) : (
+          <>
+            <p className="form-notice form-notice--warning">{copy.detail.deploymentProofUnavailable}</p>
+            <p><code>{deploymentProofUnavailableReason}</code> {deploymentProofUnavailableMessage}</p>
+          </>
+        )}
       </section>
       {order.settlement && (
         <section className="order-card" aria-labelledby="proof-allocation-title">
@@ -102,11 +199,13 @@ export function ProofView({
 
 function ProofWorkspace({
   contractAddress,
+  deploymentProof,
   deploymentMessage,
   orderId,
   publicOriginMessage,
 }: {
   contractAddress: string | null;
+  deploymentProof: FoodGuardDeploymentProofConfiguration;
   deploymentMessage?: string;
   orderId: string;
   publicOriginMessage?: string;
@@ -148,6 +247,7 @@ function ProofWorkspace({
         <ProofView
           chainId={String(FOODGUARD_CHAIN.id)}
           contractAddress={contractAddress}
+          deploymentProof={deploymentProof}
           order={order}
         />
       )}
@@ -176,6 +276,7 @@ export default function ProofPage({
   const rawLocale = first(query.locale);
   const locale: Locale = rawLocale === "en" ? "en" : "vi";
   const contract = getFoodGuardConfiguration();
+  const deploymentProof = getFoodGuardDeploymentProofConfiguration();
   const publicOrigin = getFoodGuardPublicAppOriginConfiguration();
 
   return (
@@ -183,6 +284,7 @@ export default function ProofPage({
       <WorkflowShell page="orders">
         <ProofWorkspace
           contractAddress={contract.address}
+          deploymentProof={deploymentProof}
           deploymentMessage={contract.status === "DEPLOYMENT_REQUIRED" ? contract.message : undefined}
           orderId={id}
           publicOriginMessage={publicOrigin.status === "PUBLIC_APP_ORIGIN_REQUIRED" ? publicOrigin.message : undefined}

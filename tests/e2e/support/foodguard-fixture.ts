@@ -6,6 +6,7 @@ import { abi } from "genlayer-js";
 export type FoodGuardBrowserScenario =
   | "consensus-failed"
   | "create-preview"
+  | "escalated"
   | "happy-path"
   | "ready-for-pickup"
   | "unresolved";
@@ -69,11 +70,13 @@ const evidenceRecord = {
 const matchedResolution = {
   delivery_outcome: "DELIVERED",
   evidence_hashes: [evidenceEnvelope.sha256],
+  evidence_indices: [0],
   items: [{ facts: ["Local deterministic E2E fixture"], item_id: "item-1", outcome: "MATCHED" }],
 } satisfies Json;
 const unresolvedResolution = {
   delivery_outcome: "UNRESOLVED",
   evidence_hashes: [],
+  evidence_indices: [],
   items: [{ facts: ["Fixture validators require more evidence"], item_id: "item-1", outcome: "UNRESOLVED" }],
 } satisfies Json;
 const settlementWithoutId = {
@@ -93,25 +96,43 @@ const settlement = {
   }),
 } satisfies Json;
 
-function baseOrder(state: "EVIDENCE_CURE" | "READY_FOR_PICKUP" | "RESOLVED" | "SETTLED") {
+function baseOrder(
+  state: "EVIDENCE_CURE" | "ESCALATED" | "READY_FOR_PICKUP" | "RESOLVED" | "SETTLED",
+  settlementWindowExpired = false,
+) {
   const settledState = state === "SETTLED";
+  const deadlines = settlementWindowExpired
+    ? {
+        acceptance: "1999999000",
+        appeal: "1999999800",
+        delivery: "1999999400",
+        packing: "1999999200",
+        review: "1999999600",
+      }
+    : {
+        acceptance: "2000000100",
+        appeal: "2000000800",
+        delivery: "2000000400",
+        packing: "2000000200",
+        review: "2000000600",
+      };
   return {
-    acceptance_deadline: "1999999000",
-    appeal_deadline: state === "EVIDENCE_CURE" ? "2000000300" : "1999999800",
+    acceptance_deadline: deadlines.acceptance,
+    appeal_deadline: deadlines.appeal,
     courier: COURIER,
     courier_accepted: true,
     customer: CUSTOMER,
-    delivery_deadline: "1999999400",
+    delivery_deadline: deadlines.delivery,
     delivery_fee: "30",
     delivery_settled: settledState,
     items_settled: settledState,
     manifest_json: canonical(manifest),
     order_id: "fg-1",
-    packing_deadline: "1999999200",
+    packing_deadline: deadlines.packing,
     refund_emitted: false,
     restaurant: RESTAURANT,
     restaurant_accepted: true,
-    review_deadline: "1999999600",
+    review_deadline: deadlines.review,
     state,
     subtotal: "100",
     total_value: "130",
@@ -153,8 +174,11 @@ function encodedResult(value: Json): string {
 function contractMethod(data: string): string {
   const decoded = Buffer.from(data.slice(2), "hex").toString("utf8");
   const methods = [
+    "get_settlement_proposal_count",
+    "get_settlement_proposal_digest",
     "get_settlement_proposal",
     "get_order_settlement",
+    "get_creation_paused",
     "get_evidence_count",
     "get_resolution",
     "get_evidence",
@@ -244,9 +268,9 @@ export async function installWalletAndRpcFixture(page: Page, scenario: FoodGuard
         throw new Error("Malformed local E2E gen_call request");
       }
       const method = contractMethod(first.data);
-      const unresolved = scenario === "unresolved" || scenario === "consensus-failed";
+      const unresolved = scenario === "unresolved" || scenario === "consensus-failed" || scenario === "escalated";
       const state = unresolved
-        ? "EVIDENCE_CURE"
+        ? scenario === "escalated" ? "ESCALATED" : "EVIDENCE_CURE"
         : scenario === "ready-for-pickup"
           ? "READY_FOR_PICKUP"
           : settlementExecuted
@@ -255,11 +279,14 @@ export async function installWalletAndRpcFixture(page: Page, scenario: FoodGuard
       const values: Record<string, Json> = {
         get_evidence: evidenceRecord,
         get_evidence_count: unresolved || scenario === "ready-for-pickup" ? 0 : 1,
-        get_order: baseOrder(state),
+        get_creation_paused: false,
+        get_order: baseOrder(state, scenario === "happy-path" || scenario === "escalated"),
         get_order_settlement: settlement,
         get_resolution: canonical(unresolved ? unresolvedResolution : matchedResolution),
-        get_round: unresolved || state === "RESOLVED" || state === "SETTLED" ? 1 : 0,
+        get_round: scenario === "escalated" ? 2 : unresolved || state === "RESOLVED" || state === "SETTLED" ? 1 : 0,
         get_settlement_proposal: {},
+        get_settlement_proposal_count: 0,
+        get_settlement_proposal_digest: "",
       };
       result = encodedResult(values[method]);
     } else {

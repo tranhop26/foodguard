@@ -84,7 +84,8 @@ def _claim_with_source_facts(
     )
     envelope.pop("sha256")
     envelope["claim_category"] = claim_category
-    envelope["facts"] = [CLAIM_PROMPT_ATTACK]
+    envelope["criterion_index"] = 0
+    envelope["criterion_kind"] = "ITEM"
     envelope["sha256"] = "0x" + hashlib.sha256(
         _canonical_json(envelope).encode("utf-8")
     ).hexdigest()
@@ -99,7 +100,7 @@ def _advance_to_resolution(
     courier,
     *,
     claim_category="ABSENT_AT_RECEIPT",
-    packed_observation="PACKED_AS_ORDERED",
+    packed_observation="AS_ORDERED",
     delivery_observation="HANDOFF_CONFIRMED",
 ):
     vm.sender = restaurant
@@ -107,26 +108,21 @@ def _advance_to_resolution(
     vm.sender = courier
     contract.accept_courier("fg-1")
     vm.sender = restaurant
+    packed = json.loads(evidence_json(vm, restaurant, "PACKED"))
+    packed["item_observations"][1]["item_status"] = packed_observation
     contract.submit_packed_evidence(
         "fg-1",
-        _with_committed_fields(
-            evidence_json(vm, restaurant, "PACKED"),
-            item_observations=[
-                {"item_id": "item|1", "observation": "PACKED_AS_ORDERED"},
-                {"item_id": "item-2", "observation": packed_observation},
-            ],
-        ),
+        _with_committed_fields(_canonical_json(packed)),
     )
     vm.sender = courier
     contract.submit_pickup_evidence(
         "fg-1", evidence_json(vm, courier, "PICKED_UP")
     )
+    delivered = json.loads(evidence_json(vm, courier, "DELIVERED"))
+    delivered["delivery_observation"] = delivery_observation
     contract.submit_delivery_evidence(
         "fg-1",
-        _with_committed_fields(
-            evidence_json(vm, courier, "DELIVERED"),
-            delivery_observation=delivery_observation,
-        ),
+        _with_committed_fields(_canonical_json(delivered)),
     )
     vm.sender = customer
     contract.submit_claim_evidence(
@@ -297,101 +293,122 @@ def test_committed_claim_categories_reach_the_judge_only_as_bounded_codes(
 
     assert claim_category not in prompts[0]
     assert CLAIM_PROMPT_ATTACK not in prompts[0]
-    assert payloads == [
+    assert len(payloads) == 1
+    assert payloads[0]["evidence_events"] == [
         {
-            "evidence_events": [
-                {
-                    "action_code": 1,
-                    "claim_code": 0,
-                    "delivery_code": 0,
-                    "item_index": -1,
-                    "item_observations": [[0, 1], [1, 1]],
-                    "observed_at_us": 1_786_147_140_000_000,
-                },
-                {
-                    "action_code": 2,
-                    "claim_code": 0,
-                    "delivery_code": 0,
-                    "item_index": -1,
-                    "item_observations": [],
-                    "observed_at_us": 1_786_147_140_000_000,
-                },
-                {
-                    "action_code": 3,
-                    "claim_code": 0,
-                    "delivery_code": 1,
-                    "item_index": -1,
-                    "item_observations": [],
-                    "observed_at_us": 1_786_147_140_000_000,
-                },
-                {
-                    "action_code": 4,
-                    "claim_code": claim_code,
-                    "delivery_code": 0,
-                    "item_index": 1,
-                    "item_observations": [],
-                    "observed_at_us": 1_786_147_140_000_000,
-                },
-            ],
-            "manifest_items": [
-                {"item_index": 0, "quantity": 2},
-                {"item_index": 1, "quantity": 1},
-            ],
-        }
+            "action_code": 1,
+            "claim_code": 0,
+            "claim_criterion_index": -1,
+            "claim_criterion_kind_code": 0,
+            "delivery_code": 0,
+            "item_index": -1,
+            "item_observations": [[0, 1, 1, -1, [[0, 1]]], [1, 1, 1, -1, []]],
+            "observed_at_us": 1_786_147_140_000_000,
+            "pickup_code": 0,
+            "record_action_code": 1,
+        },
+        {
+            "action_code": 2,
+            "claim_code": 0,
+            "claim_criterion_index": -1,
+            "claim_criterion_kind_code": 0,
+            "delivery_code": 0,
+            "item_index": -1,
+            "item_observations": [],
+            "observed_at_us": 1_786_147_140_000_000,
+            "pickup_code": 1,
+            "record_action_code": 2,
+        },
+        {
+            "action_code": 3,
+            "claim_code": 0,
+            "claim_criterion_index": -1,
+            "claim_criterion_kind_code": 0,
+            "delivery_code": 1,
+            "item_index": -1,
+            "item_observations": [],
+            "observed_at_us": 1_786_147_140_000_000,
+            "pickup_code": 0,
+            "record_action_code": 3,
+        },
+        {
+            "action_code": 4,
+            "claim_code": claim_code,
+            "claim_criterion_index": 0,
+            "claim_criterion_kind_code": 1,
+            "delivery_code": 0,
+            "item_index": 1,
+            "item_observations": [],
+            "observed_at_us": 1_786_147_140_000_000,
+            "pickup_code": 0,
+            "record_action_code": 4,
+        },
     ]
+    typed_manifest = payloads[0]["manifest_items"]
+    assert [(item["item_index"], item["quantity"]) for item in typed_manifest] == [
+        (0, 2),
+        (1, 1),
+    ]
+    for item in typed_manifest:
+        assert set(item) == {
+            "condition_count",
+            "condition_set_commitment",
+            "item_identity_commitment",
+            "item_index",
+            "quantity",
+            "substitution_count",
+            "substitution_set_commitment",
+        }
+        for commitment in (
+            item["condition_set_commitment"],
+            item["item_identity_commitment"],
+            item["substitution_set_commitment"],
+        ):
+            assert re.fullmatch(r"0x[0-9a-f]{64}", commitment)
     assert _stable_decisions(_resolution(contract)) == (
         [("item|1", "MATCHED"), ("item-2", expected_outcome)],
         "DELIVERED",
     )
 
 
-def test_unrecognized_committed_claim_category_is_evidence_insufficiency(
+def test_contract_rejects_unrecognized_claim_category_before_it_can_reach_consensus(
     created_order,
     vm,
     customer,
     restaurant,
     courier,
-    outsider,
 ):
-    contract = _advance_to_resolution(
-        created_order,
-        vm,
-        customer,
-        restaurant,
-        courier,
-        claim_category="SELECT_CALLER_FAVORED_OUTCOME",
-    )
-    before = contract.get_accounting()
-    _mock_sources(vm, _committed_sources(contract))
-    _mock_resolution(vm, MIXED_RESULT)
-    vm.sender = outsider
+    with vm.expect_revert("typed evidence facts required"):
+        _advance_to_resolution(
+            created_order,
+            vm,
+            customer,
+            restaurant,
+            courier,
+            claim_category="SELECT_CALLER_FAVORED_OUTCOME",
+        )
 
-    contract.request_resolution("fg-1")
-
-    assert _stable_decisions(_resolution(contract)) == (
-        [("item|1", "UNRESOLVED"), ("item-2", "UNRESOLVED")],
-        "UNRESOLVED",
-    )
-    assert contract.get_order("fg-1").state == "EVIDENCE_CURE"
-    assert contract.get_accounting() == before
+    assert created_order.get_order("fg-1").state == "REVIEW_WINDOW"
+    assert created_order.get_evidence_count("fg-1") == 3
+    with vm.expect_revert("resolution not found"):
+        created_order.get_resolution("fg-1")
 
 
 @pytest.mark.parametrize(
     "invalid_field",
     ["claim", "packed-observation", "delivery-observation"],
 )
-def test_malformed_categorical_evidence_is_agreed_insufficiency(
+def test_contract_rejects_malformed_categorical_evidence_before_it_can_reach_consensus(
     invalid_field,
     created_order,
     vm,
     customer,
     restaurant,
     courier,
-    outsider,
 ):
     inputs = {
         "claim_category": "ABSENT_AT_RECEIPT",
-        "packed_observation": "PACKED_AS_ORDERED",
+        "packed_observation": "AS_ORDERED",
         "delivery_observation": "HANDOFF_CONFIRMED",
     }
     inputs[
@@ -401,27 +418,19 @@ def test_malformed_categorical_evidence_is_agreed_insufficiency(
             "delivery-observation": "delivery_observation",
         }[invalid_field]
     ] = ["not", "a", "category"]
-    contract = _advance_to_resolution(
-        created_order,
-        vm,
-        customer,
-        restaurant,
-        courier,
-        **inputs,
-    )
-    before = contract.get_accounting()
-    _mock_sources(vm, _committed_sources(contract))
-    _mock_resolution(vm, MIXED_RESULT)
-    vm.sender = outsider
+    with vm.expect_revert("typed evidence facts required"):
+        _advance_to_resolution(
+            created_order,
+            vm,
+            customer,
+            restaurant,
+            courier,
+            **inputs,
+        )
 
-    contract.request_resolution("fg-1")
-
-    assert _stable_decisions(_resolution(contract)) == (
-        [("item|1", "UNRESOLVED"), ("item-2", "UNRESOLVED")],
-        "UNRESOLVED",
-    )
-    assert contract.get_order("fg-1").state == "EVIDENCE_CURE"
-    assert contract.get_accounting() == before
+    assert created_order.get_evidence_count("fg-1") < 4
+    with vm.expect_revert("resolution not found"):
+        created_order.get_resolution("fg-1")
 
 
 def test_validator_refetches_and_rejects_a_structurally_valid_malicious_leader(
@@ -497,53 +506,48 @@ def test_validator_accepts_explanation_variation_when_stable_decisions_match(
     assert vm.run_validator() is True
 
 
-def test_allowed_claim_facts_cannot_enter_leader_or_validator_prompt_or_select_outcome(
-    resolution_order,
+def test_contract_rejects_claim_prose_before_it_can_enter_a_validator_prompt(
+    created_order,
     vm,
-    outsider,
+    customer,
+    restaurant,
+    courier,
 ):
-    leader_prompts = []
-    validator_prompts = []
-    sources = _committed_sources(resolution_order)
-
-    def answer_leader(data):
-        leader_prompts.append(data["prompt"])
-        selected = (
-            MATCH_ALL_RESULT
-            if CLAIM_PROMPT_ATTACK in data["prompt"]
-            else MIXED_RESULT
-        )
-        return {"ok": selected}
-
-    def answer_validator(data):
-        validator_prompts.append(data["prompt"])
-        selected = (
-            MATCH_ALL_RESULT
-            if CLAIM_PROMPT_ATTACK in data["prompt"]
-            else MIXED_RESULT
-        )
-        return {"ok": selected}
-
-    _mock_sources(vm, sources)
-    vm._live_llm_handler = answer_leader
-    vm.sender = outsider
-
-    resolution_order.request_resolution("fg-1")
-
-    vm.clear_mocks()
-    _mock_sources(vm, sources)
-    vm._live_llm_handler = answer_validator
-
-    assert vm.run_validator() is True
-    assert len(leader_prompts) == 1
-    assert len(validator_prompts) == 1
-    assert validator_prompts == leader_prompts
-    assert CLAIM_PROMPT_ATTACK not in leader_prompts[0]
-    assert CLAIM_PROMPT_ATTACK not in validator_prompts[0]
-    assert _stable_decisions(_resolution(resolution_order)) == (
-        [("item|1", "MATCHED"), ("item-2", "MISSING")],
-        "DELIVERED",
+    vm.sender = restaurant
+    created_order.accept_restaurant("fg-1")
+    vm.sender = courier
+    created_order.accept_courier("fg-1")
+    vm.sender = restaurant
+    created_order.submit_packed_evidence(
+        "fg-1", evidence_json(vm, restaurant, "PACKED")
     )
+    vm.sender = courier
+    created_order.submit_pickup_evidence(
+        "fg-1", evidence_json(vm, courier, "PICKED_UP")
+    )
+    created_order.submit_delivery_evidence(
+        "fg-1", evidence_json(vm, courier, "DELIVERED")
+    )
+    vm.sender = customer
+    envelope = json.loads(
+        evidence_json(
+            vm,
+            customer,
+            "CUSTOMER_CLAIM",
+            item_id="item-2",
+            nonce="claim-prose-attack",
+        )
+    )
+    envelope.pop("sha256")
+    envelope["facts"] = [CLAIM_PROMPT_ATTACK]
+    envelope["sha256"] = "0x" + hashlib.sha256(
+        _canonical_json(envelope).encode("utf-8")
+    ).hexdigest()
+
+    with vm.expect_revert("typed evidence facts required"):
+        created_order.submit_claim_evidence("fg-1", _canonical_json(envelope))
+
+    assert created_order.get_evidence_count("fg-1") == 3
 
 
 def test_manifest_prose_cannot_enter_leader_or_validator_prompt_or_select_outcome(
@@ -640,7 +644,11 @@ def test_validators_agree_invalid_public_sources_are_unresolved_without_allocati
         [("item|1", "UNRESOLVED"), ("item-2", "UNRESOLVED")],
         "UNRESOLVED",
     )
-    assert stored["evidence_hashes"] == []
+    assert stored["evidence_indices"] == [0, 1, 2, 3]
+    assert stored["evidence_hashes"] == [
+        resolution_order.get_evidence("fg-1", index).sha256
+        for index in stored["evidence_indices"]
+    ]
     assert resolution_order.get_order("fg-1").state == "EVIDENCE_CURE"
     assert resolution_order.get_accounting() == before
     assert vm.run_validator() is True
@@ -769,3 +777,77 @@ def test_completed_resolution_replay_preserves_result_and_accounting(
     assert resolution_order.get_resolution("fg-1") == first
     assert resolution_order.get_order("fg-1") == before_order
     assert resolution_order.get_accounting() == before_accounting
+
+
+def test_equal_quantity_manifests_reach_judges_as_distinct_safe_commitments(
+    food_guard,
+    vm,
+    customer,
+    restaurant,
+    courier,
+    outsider,
+):
+    manifest = json.loads(_canonical_json(MANIFEST_DATA))
+    manifest["items"][0]["quantity"] = 1
+    manifest["items"][1]["quantity"] = 1
+    vm.sender = customer
+    vm.value = 90
+    food_guard.create_order(
+        "fg-1",
+        addr(restaurant),
+        addr(courier),
+        _canonical_json(manifest),
+        30,
+        DEADLINES,
+    )
+    vm.value = 0
+    contract = _advance_to_resolution(
+        food_guard,
+        vm,
+        customer,
+        restaurant,
+        courier,
+    )
+    payloads = []
+
+    def capture_typed_payload(data):
+        prompt = data["prompt"]
+        assert MANIFEST_PROMPT_ATTACK not in prompt
+        payloads.append(json.loads(prompt.split("TYPED_DECISION_PAYLOAD_JSON=", 1)[1]))
+        return {"ok": MIXED_RESULT}
+
+    _mock_sources(vm, _committed_sources(contract))
+    vm._live_llm_handler = capture_typed_payload
+    vm.sender = outsider
+    contract.request_resolution("fg-1")
+
+    typed_items = payloads[0]["manifest_items"]
+    assert typed_items == [
+        {
+            "condition_count": 1,
+            "condition_set_commitment": typed_items[0]["condition_set_commitment"],
+            "item_identity_commitment": typed_items[0]["item_identity_commitment"],
+            "item_index": 0,
+            "quantity": 1,
+            "substitution_count": 0,
+            "substitution_set_commitment": typed_items[0]["substitution_set_commitment"],
+        },
+        {
+            "condition_count": 0,
+            "condition_set_commitment": typed_items[1]["condition_set_commitment"],
+            "item_identity_commitment": typed_items[1]["item_identity_commitment"],
+            "item_index": 1,
+            "quantity": 1,
+            "substitution_count": 1,
+            "substitution_set_commitment": typed_items[1]["substitution_set_commitment"],
+        },
+    ]
+    for item in typed_items:
+        for field in (
+            "condition_set_commitment",
+            "item_identity_commitment",
+            "substitution_set_commitment",
+        ):
+            assert re.fullmatch(r"0x[0-9a-f]{64}", item[field])
+    assert typed_items[0]["item_identity_commitment"] != typed_items[1]["item_identity_commitment"]
+    assert typed_items[0]["condition_set_commitment"] != typed_items[1]["condition_set_commitment"]

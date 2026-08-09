@@ -1119,6 +1119,17 @@ button.button--quiet:disabled {
   font-weight: 850;
 }
 
+.transaction-stage--failure,
+.transaction-lifecycle[data-stage="CONSENSUS_FAILED"],
+.transaction-lifecycle[data-stage="EXECUTION_ERROR"] {
+  color: #a12f28;
+}
+
+.transaction-lifecycle[data-stage="CONSENSUS_FAILED"] code,
+.transaction-lifecycle[data-stage="EXECUTION_ERROR"] code {
+  color: #8f211c;
+}
+
 .order-lookup {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
