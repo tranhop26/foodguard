@@ -7,16 +7,19 @@ import {
 } from "genlayer-js/types";
 
 import { getFoodGuardReadClient, reconcileOrder } from "./client";
+import { withStudioNetBackoff } from "./rpcResilience";
 
 export type TxStage =
   | "WALLET_CONFIRMATION"
   | "SUBMITTED"
+  | "RECONCILING"
   | "CONSENSUS_PENDING"
   | "CONSENSUS_FAILED"
   | "FINALIZED"
   | "EXECUTION_SUCCESS"
   | "EXECUTION_ERROR"
-  | "READBACK_CONFIRMED";
+  | "READBACK_CONFIRMED"
+  | "OUTCOME_UNKNOWN";
 
 export type TxStageHandler = (stage: TxStage) => void;
 
@@ -55,6 +58,7 @@ const consensusFailureStatuses = new Set<string>([
   TransactionStatus.VALIDATORS_TIMEOUT,
   TransactionStatus.LEADER_TIMEOUT,
 ]);
+const minimumStatusPollIntervalMs = 3_000;
 
 function getStatusName(transaction: GenLayerTransaction): string | undefined {
   return (
@@ -176,35 +180,68 @@ async function waitForNextPoll(
   }
 }
 
+async function waitForStatusRequestBudget(
+  nextRequestAt: number,
+  deadline: number,
+): Promise<void> {
+  const delayMs = nextRequestAt - Date.now();
+  if (delayMs <= 0) return;
+  if (delayMs >= deadline - Date.now()) {
+    throw new TransactionTrackingTimeoutError("transaction status");
+  }
+  await wait(delayMs);
+  if (Date.now() >= deadline) {
+    throw new TransactionTrackingTimeoutError("transaction status");
+  }
+}
+
 export async function trackTransaction<T = unknown>(
   hash: string,
   onUpdate: TxStageHandler,
   options: TrackTransactionOptions = {},
 ): Promise<T> {
   const maxAttempts = options.maxAttempts ?? 40;
-  const pollIntervalMs = options.pollIntervalMs ?? 1_500;
-  const timeoutMs = options.timeoutMs ?? 60_000;
+  const requestedPollIntervalMs =
+    options.pollIntervalMs ?? minimumStatusPollIntervalMs;
+  const timeoutMs = options.timeoutMs ?? 120_000;
   if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
     throw new RangeError("maxAttempts must be a positive integer");
   }
-  if (!Number.isFinite(pollIntervalMs) || pollIntervalMs < 0) {
+  if (
+    !Number.isFinite(requestedPollIntervalMs) ||
+    requestedPollIntervalMs < 0
+  ) {
     throw new RangeError("pollIntervalMs must be a nonnegative finite number");
   }
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new RangeError("timeoutMs must be a positive finite number");
   }
+  if (!/^0x[0-9a-fA-F]{64}$/.test(hash)) {
+    throw new Error("A valid StudioNet transaction hash is required for tracking");
+  }
+  const pollIntervalMs = Math.max(
+    requestedPollIntervalMs,
+    minimumStatusPollIntervalMs,
+  );
 
   const deadline = Date.now() + timeoutMs;
 
   onUpdate("SUBMITTED");
   onUpdate("CONSENSUS_PENDING");
   const client = getFoodGuardReadClient();
+  let nextStatusRequestAt = Date.now();
+
+  const readTransactionStatus = async (): Promise<GenLayerTransaction> => {
+    await waitForStatusRequestBudget(nextStatusRequestAt, deadline);
+    nextStatusRequestAt = Date.now() + minimumStatusPollIntervalMs;
+    return client.getTransaction({
+      hash: hash as TransactionHash,
+    });
+  };
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const transaction = await withDeadline(
-      client.getTransaction({
-        hash: hash as TransactionHash,
-      }),
+      withStudioNetBackoff(readTransactionStatus, { deadline }),
       deadline,
       "transaction status",
     );
@@ -231,7 +268,7 @@ export async function trackTransaction<T = unknown>(
       }
 
       const order = await withDeadline(
-        reconcileOrder<T>(orderId),
+        withStudioNetBackoff(() => reconcileOrder<T>(orderId), { deadline }),
         deadline,
         "order readback",
       );

@@ -40,6 +40,13 @@ import {
   trackTransaction,
   type TxStage,
 } from "../../lib/genlayer/transactions";
+import {
+  AmbiguousWalletOutcomeError,
+  classifyRpcFailure,
+  singleFlight,
+  StudioNetRateLimitError,
+  withStudioNetBackoff,
+} from "../../lib/genlayer/rpcResilience";
 
 const ADDRESS = "0x2222222222222222222222222222222222222222";
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
@@ -64,6 +71,163 @@ function mockReceipt(
     ...receipt,
   } satisfies GenLayerTransaction);
 }
+
+describe("StudioNet RPC failure classification", () => {
+  it("honors a nested structured StudioNet rate-limit delay", () => {
+    expect(
+      classifyRpcFailure({
+        cause: { code: -32029, data: { retry_after_seconds: 60 } },
+      }),
+    ).toEqual({ kind: "RATE_LIMIT", retryAfterMs: 60_000 });
+  });
+
+  it("finds structured rate limits inside an RPC error wrapper", () => {
+    expect(
+      classifyRpcFailure({
+        error: {
+          cause: { code: -32029, data: { retry_after_seconds: 2 } },
+        },
+      }),
+    ).toEqual({ kind: "RATE_LIMIT", retryAfterMs: 2_000 });
+  });
+
+  it("treats a nested transport failure as ambiguous", () => {
+    const error = new Error("request failed", {
+      cause: new TypeError("Failed to fetch"),
+    });
+
+    expect(classifyRpcFailure(error)).toEqual({ kind: "TRANSIENT" });
+    expect(new AmbiguousWalletOutcomeError(error)).toMatchObject({
+      name: "AmbiguousWalletOutcomeError",
+      cause: error,
+    });
+  });
+
+  it.each([
+    { error: { code: 4001 }, description: "user rejection" },
+    { error: { cause: { code: 4100 } }, description: "unauthorized account" },
+    { error: { details: { code: 4902 } }, description: "wrong chain" },
+    {
+      error: { name: "UserError", message: "[EXPECTED] invalid order state" },
+      description: "contract UserError",
+    },
+  ])("keeps $description definitive", ({ error }) => {
+    expect(classifyRpcFailure(error)).toEqual({ kind: "DEFINITIVE" });
+  });
+});
+
+describe("StudioNet RPC resilience", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("shares an identical read only while it is in flight", async () => {
+    let resolveRead: ((value: string) => void) | undefined;
+    const operation = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveRead = resolve;
+        }),
+    );
+
+    const first = singleFlight("61999:contract:get_order:[\"fg-1\"]", operation);
+    const concurrent = singleFlight(
+      "61999:contract:get_order:[\"fg-1\"]",
+      operation,
+    );
+
+    expect(operation).toHaveBeenCalledTimes(1);
+    resolveRead?.("first");
+    await expect(Promise.all([first, concurrent])).resolves.toEqual([
+      "first",
+      "first",
+    ]);
+
+    operation.mockResolvedValueOnce("fresh");
+    await expect(
+      singleFlight("61999:contract:get_order:[\"fg-1\"]", operation),
+    ).resolves.toBe("fresh");
+    expect(operation).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps different read keys independent", async () => {
+    const operation = vi.fn(async (value: string) => value);
+
+    await expect(
+      Promise.all([
+        singleFlight("get_order:fg-1", () => operation("fg-1")),
+        singleFlight("get_order:fg-2", () => operation("fg-2")),
+      ]),
+    ).resolves.toEqual(["fg-1", "fg-2"]);
+    expect(operation).toHaveBeenCalledTimes(2);
+  });
+
+  it("honors the exact server retry delay and clears its timer", async () => {
+    vi.useFakeTimers();
+    const operation = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce({
+        cause: { code: -32029, data: { retry_after_seconds: 60 } },
+      })
+      .mockResolvedValueOnce("settled");
+
+    const result = withStudioNetBackoff(operation, {
+      deadline: Date.now() + 61_000,
+    });
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(operation).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(result).resolves.toBe("settled");
+    expect(operation).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not schedule a server retry beyond the deadline", async () => {
+    vi.useFakeTimers();
+    const rateLimit = {
+      cause: { code: -32029, data: { retry_after_seconds: 60 } },
+    };
+    const operation = vi.fn<() => Promise<string>>().mockRejectedValue(rateLimit);
+
+    const result = withStudioNetBackoff(operation, {
+      deadline: Date.now() + 59_999,
+    });
+
+    await expect(result).rejects.toMatchObject({
+      name: "StudioNetRateLimitError",
+      retryAfterMs: 60_000,
+      cause: rateLimit,
+    });
+    await expect(result).rejects.toBeInstanceOf(StudioNetRateLimitError);
+    expect(operation).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("uses bounded exponential backoff for transport failures", async () => {
+    vi.useFakeTimers();
+    const operation = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValueOnce("settled");
+
+    const result = withStudioNetBackoff(operation, {
+      deadline: Date.now() + 10_000,
+    });
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(operation).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(operation).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(3_999);
+    expect(operation).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(result).resolves.toBe("settled");
+    expect(operation).toHaveBeenCalledTimes(3);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
 
 describe("FoodGuard StudioNet configuration", () => {
   it.each([undefined, "", "not-an-address", ZERO_ADDRESS])(
@@ -217,6 +381,30 @@ describe("FoodGuard StudioNet client", () => {
     });
   });
 
+  it("coalesces only concurrent identical latest-final contract reads", async () => {
+    const order = { order_id: "fg-1", state: "RESOLVED" };
+    let resolveRead: ((value: typeof order) => void) | undefined;
+    sdk.readContract.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveRead = resolve;
+      }),
+    );
+
+    const first = readFoodGuard<typeof order>("get_order", ["fg-1"]);
+    const concurrent = readFoodGuard<typeof order>("get_order", ["fg-1"]);
+    expect(sdk.readContract).toHaveBeenCalledTimes(1);
+
+    resolveRead?.(order);
+    await expect(Promise.all([first, concurrent])).resolves.toEqual([order, order]);
+
+    const freshOrder = { ...order, state: "SETTLED" };
+    sdk.readContract.mockResolvedValueOnce(freshOrder);
+    await expect(
+      readFoodGuard<typeof freshOrder>("get_order", ["fg-1"]),
+    ).resolves.toEqual(freshOrder);
+    expect(sdk.readContract).toHaveBeenCalledTimes(2);
+  });
+
   it("only marks deployment metadata verified after finalized deploy, code, hash, and order readback checks", async () => {
     const deployedCode = "0x666f6f646775617264" as `0x${string}`;
     const deployedSourceHash = `0x${createHash("sha256")
@@ -340,6 +528,18 @@ describe("FoodGuard StudioNet client", () => {
       ),
     ).rejects.toThrow("invalid transaction hash");
     expect(stages).toEqual(["WALLET_CONFIRMATION"]);
+  });
+
+  it("never retries a wallet write after an ambiguous transport failure", async () => {
+    const transportFailure = new TypeError("Failed to fetch");
+    sdk.writeContract.mockRejectedValue(transportFailure);
+
+    await expect(
+      writeFoodGuard("accept_restaurant", ["fg-1"]),
+    ).rejects.toBe(transportFailure);
+    expect(sdk.writeContract).toHaveBeenCalledTimes(1);
+    expect(sdk.getTransaction).not.toHaveBeenCalled();
+    expect(sdk.readContract).not.toHaveBeenCalled();
   });
 
   it("blocks writes when the connected wallet is not on StudioNet", async () => {
@@ -571,20 +771,180 @@ describe("FoodGuard StudioNet client", () => {
     expect(stages).not.toContain("READBACK_CONFIRMED");
   });
 
-  it("times out after a bounded number of polls", async () => {
+  it("backs off a transient status read without exceeding the poll budget", async () => {
+    vi.useFakeTimers();
+    const stages: TxStage[] = [];
+    const order = { order_id: "fg-1", state: "SETTLED" };
+    sdk.readContract.mockResolvedValue(order);
+    sdk.getTransaction
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValueOnce({
+        hash: HASH,
+        statusName: TransactionStatus.FINALIZED,
+        txExecutionResultName: ExecutionResult.FINISHED_WITH_RETURN,
+        txDataDecoded: {
+          type: "call",
+          leaderOnly: false,
+          callData: new Map<string, unknown>([
+            ["method", "execute_settlement"],
+            ["args", ["fg-1"]],
+          ]),
+        },
+      } satisfies GenLayerTransaction);
+
+    const outcome = trackTransaction(HASH, (stage) => stages.push(stage)).then(
+      (value) => ({ kind: "resolved", value }) as const,
+      (error: unknown) => ({ kind: "rejected", error }) as const,
+    );
+
+    await vi.advanceTimersByTimeAsync(2_999);
+    expect(sdk.getTransaction).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(outcome).resolves.toEqual({ kind: "resolved", value: order });
+    expect(stages).toEqual([
+      "SUBMITTED",
+      "CONSENSUS_PENDING",
+      "FINALIZED",
+      "EXECUTION_SUCCESS",
+      "READBACK_CONFIRMED",
+    ]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("backs off a transient authoritative readback without conflating claims", async () => {
+    vi.useFakeTimers();
+    const stages: TxStage[] = [];
+    const order = { order_id: "fg-1", state: "SETTLED" };
+    sdk.readContract
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValueOnce(order);
+    mockReceipt({
+      statusName: TransactionStatus.FINALIZED,
+      txExecutionResultName: ExecutionResult.FINISHED_WITH_RETURN,
+    });
+
+    const outcome = trackTransaction(HASH, (stage) => stages.push(stage)).then(
+      (value) => ({ kind: "resolved", value }) as const,
+      (error: unknown) => ({ kind: "rejected", error }) as const,
+    );
+
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(sdk.readContract).toHaveBeenCalledTimes(1);
+    expect(stages.at(-1)).toBe("EXECUTION_SUCCESS");
+    expect(stages).not.toContain("READBACK_CONFIRMED");
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(outcome).resolves.toEqual({ kind: "resolved", value: order });
+    expect(stages.at(-1)).toBe("READBACK_CONFIRMED");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("limits default status polling to twenty requests in the first minute", async () => {
+    vi.useFakeTimers();
     sdk.getTransaction.mockResolvedValue({
       hash: HASH,
       statusName: TransactionStatus.PENDING,
       txExecutionResultName: ExecutionResult.NOT_VOTED,
     } satisfies GenLayerTransaction);
 
+    const outcome = trackTransaction(HASH, () => undefined, {
+      maxAttempts: 21,
+    }).then(
+      (value) => ({ kind: "resolved", value }) as const,
+      (error: unknown) => ({ kind: "rejected", error }) as const,
+    );
+
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(sdk.getTransaction).toHaveBeenCalledTimes(20);
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(outcome).resolves.toMatchObject({
+      kind: "rejected",
+      error: { message: expect.stringContaining("21 attempts") },
+    });
+    expect(sdk.getTransaction).toHaveBeenCalledTimes(21);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("uses a 120-second default deadline for a hung status RPC", async () => {
+    vi.useFakeTimers();
+    sdk.getTransaction.mockReturnValue(new Promise(() => undefined));
+
+    const outcome = trackTransaction(HASH, () => undefined).then(
+      (value) => ({ kind: "resolved", value }) as const,
+      (error: unknown) => ({ kind: "rejected", error }) as const,
+    );
+
+    await vi.advanceTimersByTimeAsync(119_999);
     await expect(
-      trackTransaction(HASH, () => undefined, {
-        maxAttempts: 2,
-        pollIntervalMs: 0,
-      }),
-    ).rejects.toThrow("timed out");
+      Promise.race([
+        outcome,
+        Promise.resolve({ kind: "still-pending" } as const),
+      ]),
+    ).resolves.toEqual({ kind: "still-pending" });
+
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(outcome).resolves.toMatchObject({
+      kind: "rejected",
+      error: {
+        name: "TransactionTrackingTimeoutError",
+        message: expect.stringContaining("transaction status"),
+      },
+    });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("never marks an explicit consensus failure retryable for a malformed hash", async () => {
+    const stages: TxStage[] = [];
+    mockReceipt({
+      statusName: TransactionStatus.UNDETERMINED,
+      txExecutionResultName: ExecutionResult.NOT_VOTED,
+    });
+
+    const outcome = await trackTransaction("not-a-transaction-hash", (stage) =>
+      stages.push(stage),
+    ).then(
+      (value) => ({ kind: "resolved", value }) as const,
+      (error: unknown) => ({ kind: "rejected", error }) as const,
+    );
+
+    expect(outcome).toMatchObject({
+      kind: "rejected",
+      error: { message: expect.stringMatching(/transaction hash/i) },
+    });
+    expect(
+      outcome.kind === "rejected" && outcome.error instanceof ConsensusFailedError,
+    ).toBe(false);
+    expect(stages).not.toContain("CONSENSUS_FAILED");
+    expect(sdk.getTransaction).not.toHaveBeenCalled();
+  });
+
+  it("clamps an unsafe poll override while keeping attempts bounded", async () => {
+    vi.useFakeTimers();
+    sdk.getTransaction.mockResolvedValue({
+      hash: HASH,
+      statusName: TransactionStatus.PENDING,
+      txExecutionResultName: ExecutionResult.NOT_VOTED,
+    } satisfies GenLayerTransaction);
+
+    const outcome = trackTransaction(HASH, () => undefined, {
+      maxAttempts: 2,
+      pollIntervalMs: 0,
+    }).then(
+      (value) => ({ kind: "resolved", value }) as const,
+      (error: unknown) => ({ kind: "rejected", error }) as const,
+    );
+
+    await vi.advanceTimersByTimeAsync(2_999);
+    expect(sdk.getTransaction).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(outcome).resolves.toMatchObject({
+      kind: "rejected",
+      error: { message: expect.stringContaining("timed out") },
+    });
     expect(sdk.getTransaction).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("times out when the transaction RPC never settles", async () => {
