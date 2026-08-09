@@ -80,16 +80,16 @@ def _corrective_evidence(
             vm,
             actor,
             action,
-            item_id=item_id,
             nonce=nonce,
             expires_at="2026-08-08T02:00:00.000Z",
         )
     )
     envelope.pop("sha256")
-    envelope["effective_action"] = effective_action
-    envelope["supersedes_evidence_index"] = supersedes_evidence_index
+    statement = {"effective_action": effective_action}
+    if item_id is not None:
+        statement["item_id"] = item_id
     if effective_action == "PACKED":
-        envelope["item_observations"] = [
+        statement["item_observations"] = [
             {
                 "condition_statuses": [{"condition_index": 0, "status": "MET"}],
                 "item_id": "item|1",
@@ -106,13 +106,15 @@ def _corrective_evidence(
             },
         ]
     elif effective_action == "PICKED_UP":
-        envelope["pickup_observation"] = "PICKUP_CONFIRMED"
+        statement["pickup_observation"] = "PICKUP_CONFIRMED"
     elif effective_action == "DELIVERED":
-        envelope["delivery_observation"] = "HANDOFF_CONFIRMED"
+        statement["delivery_observation"] = "HANDOFF_CONFIRMED"
     elif effective_action == "CUSTOMER_CLAIM":
-        envelope["claim_category"] = "ABSENT_AT_RECEIPT"
-        envelope["criterion_index"] = 0
-        envelope["criterion_kind"] = "ITEM"
+        statement["claim_category"] = "ABSENT_AT_RECEIPT"
+        statement["criterion_index"] = 0
+        statement["criterion_kind"] = "ITEM"
+    envelope["statements"] = [statement]
+    envelope["supersedes_evidence_indices"] = [supersedes_evidence_index]
     envelope["sha256"] = "0x" + hashlib.sha256(
         _canonical_json(envelope).encode("utf-8")
     ).hexdigest()

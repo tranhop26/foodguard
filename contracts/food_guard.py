@@ -323,6 +323,90 @@ def _valid_model_resolution(value, item_count: int) -> bool:
     return True
 
 
+def _typed_evidence_event(manifest, item_ids, item_index_by_id, document, action, record_action, observed_at):
+    item_id = document.get("item_id", "")
+    if item_id:
+        if item_id not in item_index_by_id:
+            raise _EvidenceResolutionFailure("invalid evidence item")
+        item_index = item_index_by_id[item_id]
+    else:
+        item_index = -1
+    claim_code = 0
+    claim_criterion_index = -1
+    claim_criterion_kind_code = 0
+    delivery_code = 0
+    pickup_code = 0
+    item_observations = []
+    if action == "PACKED":
+        observations = document.get("item_observations")
+        if type(observations) is not list or len(observations) != len(item_ids):
+            raise _EvidenceResolutionFailure("missing packed item observations")
+        for expected_index, observation in enumerate(observations):
+            manifest_item = manifest["items"][expected_index]
+            if (
+                type(observation) is not dict
+                or set(observation.keys()) != {"condition_statuses", "item_id", "item_status", "quantity_status", "substitution_index"}
+                or observation["item_id"] != item_ids[expected_index]
+                or type(observation["item_status"]) is not str
+                or observation["item_status"] not in PACKED_ITEM_STATUS_CODES
+                or type(observation["quantity_status"]) is not str
+                or observation["quantity_status"] not in QUANTITY_STATUS_CODES
+                or type(observation["substitution_index"]) is not int
+            ):
+                raise _EvidenceResolutionFailure("invalid packed item observations")
+            substitution_index = observation["substitution_index"]
+            if (observation["item_status"] == "PERMITTED_SUBSTITUTION" and not 0 <= substitution_index < len(manifest_item["permitted_substitutions"])) or (observation["item_status"] != "PERMITTED_SUBSTITUTION" and substitution_index != -1):
+                raise _EvidenceResolutionFailure("invalid packed substitution index")
+            condition_statuses = observation["condition_statuses"]
+            if type(condition_statuses) is not list or len(condition_statuses) != len(manifest_item["conditions"]):
+                raise _EvidenceResolutionFailure("invalid packed condition statuses")
+            typed_conditions = []
+            for condition_index, condition in enumerate(condition_statuses):
+                if type(condition) is not dict or set(condition.keys()) != {"condition_index", "status"} or condition["condition_index"] != condition_index or type(condition["status"]) is not str or condition["status"] not in CONDITION_STATUS_CODES:
+                    raise _EvidenceResolutionFailure("invalid packed condition statuses")
+                typed_conditions.append([condition_index, CONDITION_STATUS_CODES[condition["status"]]])
+            item_observations.append([expected_index, PACKED_ITEM_STATUS_CODES[observation["item_status"]], QUANTITY_STATUS_CODES[observation["quantity_status"]], substitution_index, typed_conditions])
+        if item_id:
+            raise _EvidenceResolutionFailure("invalid packed item")
+    elif action == "PICKED_UP":
+        value = document.get("pickup_observation")
+        if type(value) is not str or value not in PICKUP_OBSERVATION_CODES or item_id:
+            raise _EvidenceResolutionFailure("invalid pickup observation")
+        pickup_code = PICKUP_OBSERVATION_CODES[value]
+    elif action == "DELIVERED":
+        value = document.get("delivery_observation")
+        if type(value) is not str or value not in DELIVERY_OBSERVATION_CODES or item_id:
+            raise _EvidenceResolutionFailure("invalid delivery observation")
+        delivery_code = DELIVERY_OBSERVATION_CODES[value]
+    elif action == "CUSTOMER_CLAIM":
+        category = document.get("claim_category")
+        kind = document.get("criterion_kind")
+        criterion_index = document.get("criterion_index")
+        if not item_id or type(category) is not str or category not in CLAIM_CATEGORY_CODES or type(kind) is not str or kind not in CLAIM_CRITERION_KIND_CODES or type(criterion_index) is not int:
+            raise _EvidenceResolutionFailure("invalid claim criterion")
+        manifest_item = manifest["items"][item_index]
+        limit = {"ITEM": 1, "SUBSTITUTION": len(manifest_item["permitted_substitutions"]), "CONDITION": len(manifest_item["conditions"]), "QUANTITY": 1, "DELIVERY": 0}[kind]
+        if (criterion_index != -1 if kind == "DELIVERY" else not 0 <= criterion_index < limit):
+            raise _EvidenceResolutionFailure("invalid claim criterion")
+        claim_code = CLAIM_CATEGORY_CODES[category]
+        claim_criterion_kind_code = CLAIM_CRITERION_KIND_CODES[kind]
+        claim_criterion_index = criterion_index
+    else:
+        raise _EvidenceResolutionFailure("invalid evidence action")
+    return {
+        "action_code": EVIDENCE_ACTION_CODES[action],
+        "claim_code": claim_code,
+        "claim_criterion_index": claim_criterion_index,
+        "claim_criterion_kind_code": claim_criterion_kind_code,
+        "delivery_code": delivery_code,
+        "item_index": item_index,
+        "item_observations": item_observations,
+        "observed_at_us": observed_at,
+        "pickup_code": pickup_code,
+        "record_action_code": EVIDENCE_ACTION_CODES[record_action],
+    }
+
+
 def _derive_resolution(manifest_json, item_ids, evidence_inputs, resolution_time):
     invalid_reason = "Public evidence was unavailable, invalid, or insufficient."
     verified_indices = [record["history_index"] for record in evidence_inputs]
@@ -413,6 +497,36 @@ def _derive_resolution(manifest_json, item_ids, evidence_inputs, resolution_time
 
             record_action = record["action"]
             action = record["effective_action"]
+            if action == "BATCH_CORRECTION":
+                if record_action not in ("CURE", "APPEAL") or document.get("action") != record_action or record["item_id"] or document.get("item_id", ""):
+                    raise _EvidenceResolutionFailure("invalid batch evidence")
+                statements = document.get("statements")
+                if type(statements) is not list or not statements or len(statements) > MAX_ACTIVE_EVIDENCE:
+                    raise _EvidenceResolutionFailure("invalid batch evidence")
+                for statement in statements:
+                    if type(statement) is not dict:
+                        raise _EvidenceResolutionFailure("invalid batch statement")
+                    semantic_action = statement.get("effective_action")
+                    semantic_item = statement.get("item_id", "")
+                    typed_fields = {
+                        "PACKED": {"item_observations"},
+                        "PICKED_UP": {"pickup_observation"},
+                        "DELIVERED": {"delivery_observation"},
+                        "CUSTOMER_CLAIM": {"claim_category", "criterion_index", "criterion_kind"},
+                    }.get(semantic_action)
+                    if typed_fields is None:
+                        raise _EvidenceResolutionFailure("invalid batch statement")
+                    exact_fields = {"effective_action"} | typed_fields
+                    if semantic_item:
+                        exact_fields.add("item_id")
+                    if set(statement.keys()) != exact_fields:
+                        raise _EvidenceResolutionFailure("invalid batch statement")
+                    actions.add(semantic_action)
+                    evidence_events.append(_typed_evidence_event(
+                        manifest, item_ids, item_index_by_id, statement,
+                        semantic_action, record_action, observed_at,
+                    ))
+                continue
             if record_action not in EVIDENCE_ACTION_CODES or action not in EVIDENCE_ACTION_CODES:
                 raise RuntimeError("invalid stored evidence action")
             if document.get("action") != record_action:
@@ -679,8 +793,6 @@ class Evidence:
     nonce: str
     envelope_json: str
     effective_action: str
-    has_supersedes: bool
-    supersedes_index: u256
 
 
 @allow_storage
@@ -988,6 +1100,121 @@ class FoodGuard(gl.Contract):
             return
         raise gl.vm.UserError("[EXPECTED] invalid evidence")
 
+    def _typed_statement_slot(self, order_id: str, statement):
+        if type(statement) is not dict:
+            raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+        action = statement.get("effective_action")
+        item_id = statement.get("item_id", "")
+        if type(item_id) is not str:
+            raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+        manifest = json.loads(self.orders[order_id].manifest_json)
+        typed_fields = set()
+        if action == "PACKED":
+            typed_fields = {"item_observations"}
+            observations = statement.get("item_observations")
+            if type(observations) is not list or len(observations) != len(manifest["items"]):
+                raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+            for manifest_item, observation in zip(manifest["items"], observations):
+                if (
+                    type(observation) is not dict
+                    or set(observation.keys()) != {"condition_statuses", "item_id", "item_status", "quantity_status", "substitution_index"}
+                    or observation.get("item_id") != manifest_item["item_id"]
+                    or type(observation.get("item_status")) is not str
+                    or observation.get("item_status") not in PACKED_ITEM_STATUS_CODES
+                    or type(observation.get("quantity_status")) is not str
+                    or observation.get("quantity_status") not in QUANTITY_STATUS_CODES
+                    or type(observation.get("substitution_index")) is not int
+                ):
+                    raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+                substitution_index = observation["substitution_index"]
+                if observation["item_status"] == "PERMITTED_SUBSTITUTION":
+                    if not 0 <= substitution_index < len(manifest_item["permitted_substitutions"]):
+                        raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+                elif substitution_index != -1:
+                    raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+                statuses = observation.get("condition_statuses")
+                if type(statuses) is not list or len(statuses) != len(manifest_item["conditions"]):
+                    raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+                for condition_index, status in enumerate(statuses):
+                    if (
+                        type(status) is not dict
+                        or set(status.keys()) != {"condition_index", "status"}
+                        or status.get("condition_index") != condition_index
+                        or type(status.get("status")) is not str
+                        or status.get("status") not in CONDITION_STATUS_CODES
+                    ):
+                        raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+            if item_id:
+                raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+        elif action == "PICKED_UP":
+            typed_fields = {"pickup_observation"}
+            if type(statement.get("pickup_observation")) is not str or statement.get("pickup_observation") not in PICKUP_OBSERVATION_CODES or item_id:
+                raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+        elif action == "DELIVERED":
+            typed_fields = {"delivery_observation"}
+            if type(statement.get("delivery_observation")) is not str or statement.get("delivery_observation") not in DELIVERY_OBSERVATION_CODES or item_id:
+                raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+        elif action == "CUSTOMER_CLAIM":
+            typed_fields = {"claim_category", "criterion_index", "criterion_kind"}
+            category = statement.get("claim_category")
+            kind = statement.get("criterion_kind")
+            criterion_index = statement.get("criterion_index")
+            manifest_item = next((candidate for candidate in manifest["items"] if candidate["item_id"] == item_id), None)
+            if not item_id or manifest_item is None or type(category) is not str or category not in CLAIM_CATEGORY_CODES or type(kind) is not str or kind not in CLAIM_CRITERION_KIND_CODES or type(criterion_index) is not int:
+                raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+            criterion_limit = {"ITEM": 1, "SUBSTITUTION": len(manifest_item["permitted_substitutions"]), "CONDITION": len(manifest_item["conditions"]), "QUANTITY": 1, "DELIVERY": 0}[kind]
+            if (criterion_index != -1 if kind == "DELIVERY" else not 0 <= criterion_index < criterion_limit):
+                raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+        else:
+            raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+        exact_fields = {"effective_action"} | typed_fields
+        if item_id:
+            exact_fields.add("item_id")
+        if set(statement.keys()) != exact_fields:
+            raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
+        return action, item_id
+
+    def _stored_evidence_slots(self, order_id: str, evidence: Evidence):
+        if evidence.effective_action != "BATCH_CORRECTION":
+            return [(evidence.effective_action, evidence.item_id)]
+        try:
+            statements = json.loads(evidence.envelope_json)["statements"]
+        except Exception:
+            raise gl.vm.UserError("[EXPECTED] invalid stored batch evidence")
+        return [(statement.get("effective_action"), statement.get("item_id", "")) for statement in statements]
+
+    def _validate_batch_correction(self, order_id: str, envelope, expected_actor: Address):
+        targets = envelope.get("supersedes_evidence_indices")
+        statements = envelope.get("statements")
+        if type(targets) is not list or not targets or type(statements) is not list or not statements or len(statements) > MAX_ACTIVE_EVIDENCE:
+            raise gl.vm.UserError("[EXPECTED] typed corrective evidence required")
+        evidence_count = int(self.evidence_count_by_order[order_id])
+        previous = -1
+        slots = []
+        for target in targets:
+            if type(target) is not int or target <= previous or target >= evidence_count:
+                raise gl.vm.UserError("[EXPECTED] typed corrective evidence required")
+            previous = target
+            key = self._evidence_key(order_id, target)
+            if key in self.superseded_evidence_keys:
+                raise gl.vm.UserError("[EXPECTED] typed corrective evidence required")
+            evidence = self.evidence_by_key[key]
+            try:
+                actor = Address(evidence.actor_wallet)
+            except Exception:
+                raise gl.vm.UserError("[EXPECTED] typed corrective evidence required")
+            if actor != expected_actor:
+                raise gl.vm.UserError("[EXPECTED] typed corrective evidence required")
+            slots.extend(self._stored_evidence_slots(order_id, evidence))
+            if len(slots) > MAX_ACTIVE_EVIDENCE:
+                raise gl.vm.UserError("[EXPECTED] typed corrective evidence required")
+        if len(slots) != len(statements):
+            raise gl.vm.UserError("[EXPECTED] typed corrective evidence required")
+        for expected_slot, statement in zip(slots, statements):
+            if self._typed_statement_slot(order_id, statement) != expected_slot:
+                raise gl.vm.UserError("[EXPECTED] typed corrective evidence required")
+        return targets
+
     def _validate_typed_evidence_facts(
         self,
         order_id: str,
@@ -1015,49 +1242,12 @@ class FoodGuard(gl.Contract):
         if item_id:
             common_fields.add("item_id")
 
-        effective_action = expected_action
-        has_supersedes = False
-        supersedes_index = 0
-        correction_fields = set()
         if expected_action in ("CURE", "APPEAL"):
-            correction_fields = {"effective_action", "supersedes_evidence_index"}
-            effective_action = envelope.get("effective_action")
-            raw_supersedes = envelope.get("supersedes_evidence_index")
-            if (
-                effective_action not in (
-                    "PACKED",
-                    "PICKED_UP",
-                    "DELIVERED",
-                    "CUSTOMER_CLAIM",
-                )
-                or type(raw_supersedes) is not int
-                or raw_supersedes < 0
-            ):
+            if item_id or set(envelope.keys()) != common_fields | {"statements", "supersedes_evidence_indices"}:
                 raise gl.vm.UserError("[EXPECTED] typed corrective evidence required")
-            evidence_count = (
-                int(self.evidence_count_by_order[order_id])
-                if order_id in self.evidence_count_by_order
-                else 0
-            )
-            if raw_supersedes >= evidence_count:
-                raise gl.vm.UserError("[EXPECTED] typed corrective evidence required")
-            supersedes_key = self._evidence_key(order_id, raw_supersedes)
-            if supersedes_key in self.superseded_evidence_keys:
-                raise gl.vm.UserError("[EXPECTED] typed corrective evidence required")
-            superseded = self.evidence_by_key[supersedes_key]
-            try:
-                superseded_actor = Address(superseded.actor_wallet)
-            except Exception:
-                raise gl.vm.UserError("[EXPECTED] typed corrective evidence required")
-            if (
-                superseded_actor != expected_actor
-                or superseded.effective_action != effective_action
-                or superseded.item_id != item_id
-            ):
-                raise gl.vm.UserError("[EXPECTED] typed corrective evidence required")
-            supersedes_index = raw_supersedes
-            has_supersedes = True
+            return "BATCH_CORRECTION", self._validate_batch_correction(order_id, envelope, expected_actor)
 
+        effective_action = expected_action
         manifest = json.loads(self.orders[order_id].manifest_json)
         typed_fields = set()
         if effective_action == "PACKED":
@@ -1167,9 +1357,9 @@ class FoodGuard(gl.Contract):
         else:
             raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
 
-        if set(envelope.keys()) != common_fields | correction_fields | typed_fields:
+        if set(envelope.keys()) != common_fields | typed_fields:
             raise gl.vm.UserError("[EXPECTED] typed evidence facts required")
-        return effective_action, has_supersedes, supersedes_index
+        return effective_action, []
 
     def _append_evidence(
         self,
@@ -1277,11 +1467,7 @@ class FoodGuard(gl.Contract):
         if digest.lower() != calculated_digest:
             raise gl.vm.UserError("[EXPECTED] evidence digest mismatch")
 
-        (
-            effective_action,
-            has_supersedes,
-            supersedes_index,
-        ) = self._validate_typed_evidence_facts(
+        effective_action, superseded_indices = self._validate_typed_evidence_facts(
             order_id,
             envelope,
             expected_action,
@@ -1332,8 +1518,6 @@ class FoodGuard(gl.Contract):
             nonce=envelope["nonce"],
             envelope_json=envelope_json,
             effective_action=effective_action,
-            has_supersedes=has_supersedes,
-            supersedes_index=u256(supersedes_index),
         )
         evidence_count = (
             int(self.evidence_count_by_order[order_id])
@@ -1344,9 +1528,9 @@ class FoodGuard(gl.Contract):
             raise gl.vm.UserError("[EXPECTED] evidence history limit exceeded")
         self.evidence_by_key[self._evidence_key(order_id, evidence_count)] = evidence
         self.evidence_count_by_order[order_id] = u256(evidence_count + 1)
-        if has_supersedes:
+        for target_index in superseded_indices:
             self.superseded_evidence_keys[
-                self._evidence_key(order_id, supersedes_index)
+                self._evidence_key(order_id, target_index)
             ] = True
         self.used_evidence_replay_keys[replay_key] = True
         if expected_action == "CUSTOMER_CLAIM":

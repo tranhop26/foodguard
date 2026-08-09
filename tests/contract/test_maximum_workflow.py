@@ -196,10 +196,12 @@ def test_maximum_100_item_109_history_workflow_resolves_from_103_active_records(
                 actor,
                 "CURE",
                 nonce,
-                item_id=item_id,
-                effective_action=effective_action,
-                supersedes_evidence_index=supersedes,
-                **facts,
+                supersedes_evidence_indices=[supersedes],
+                statements=[{
+                    "effective_action": effective_action,
+                    **({"item_id": item_id} if item_id else {}),
+                    **facts,
+                }],
             ),
         )
     assert food_guard.get_evidence_count("fg-max") == 106
@@ -221,10 +223,12 @@ def test_maximum_100_item_109_history_workflow_resolves_from_103_active_records(
                 actor,
                 "APPEAL",
                 f"appeal-{appeal_index}-max",
-                item_id=item_id,
-                effective_action=effective_action,
-                supersedes_evidence_index=103 + appeal_index,
-                **facts,
+                supersedes_evidence_indices=[103 + appeal_index],
+                statements=[{
+                    "effective_action": effective_action,
+                    **({"item_id": item_id} if item_id else {}),
+                    **facts,
+                }],
             ),
         )
     assert food_guard.get_evidence_count("fg-max") == 109
