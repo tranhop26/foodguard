@@ -1,6 +1,10 @@
 import type { CalldataEncodable } from "genlayer-js/types";
 
-import { writeFoodGuard } from "./client";
+import {
+  WalletAccountChangedAfterSubmissionError,
+  WalletAccountUnverifiedAfterSubmissionError,
+  writeFoodGuard,
+} from "./client";
 import {
   AmbiguousWalletOutcomeError,
   classifyRpcFailure,
@@ -21,6 +25,16 @@ export interface FoodGuardOperation<T> {
   onStage: TxStageHandler;
   readback: () => Promise<T>;
   matches: (readback: T) => boolean;
+}
+
+function trustedRecoverableHash(error: unknown): string | null {
+  if (
+    !(error instanceof WalletAccountChangedAfterSubmissionError) &&
+    !(error instanceof WalletAccountUnverifiedAfterSubmissionError)
+  ) return null;
+  return /^0x[0-9a-fA-F]{64}$/.test(error.transactionHash)
+    ? error.transactionHash
+    : null;
 }
 
 const reconciliationTimeoutMs = 120_000;
@@ -69,6 +83,7 @@ async function reconcileFoodGuardOperation<T>(
   input: FoodGuardOperation<T>,
   ambiguousCause: unknown,
   deadline = Date.now() + reconciliationTimeoutMs,
+  confirmationStage: "READBACK_CONFIRMED" | "STATE_READBACK_CONFIRMED" = "READBACK_CONFIRMED",
 ): Promise<T> {
   input.onStage("RECONCILING");
   if (deadline <= Date.now()) {
@@ -90,7 +105,7 @@ async function reconcileFoodGuardOperation<T>(
       deadline,
       maxRetries: Number.MAX_SAFE_INTEGER,
     });
-    input.onStage("READBACK_CONFIRMED");
+    input.onStage(confirmationStage);
     return readback;
   } catch {
     input.onStage("OUTCOME_UNKNOWN");
@@ -111,8 +126,17 @@ export async function executeFoodGuardOperation<T>(
       input.expectedAccount,
     );
   } catch (error: unknown) {
-    if (classifyRpcFailure(error).kind === "DEFINITIVE") throw error;
-    return reconcileFoodGuardOperation(input, error);
+    const recoverableHash = trustedRecoverableHash(error);
+    if (recoverableHash === null && classifyRpcFailure(error).kind === "DEFINITIVE") throw error;
+    if (recoverableHash === null) {
+      return reconcileFoodGuardOperation(
+        input,
+        error,
+        Date.now() + reconciliationTimeoutMs,
+        "STATE_READBACK_CONFIRMED",
+      );
+    }
+    hash = recoverableHash;
   }
 
   try {

@@ -19,6 +19,7 @@ export type TxStage =
   | "EXECUTION_SUCCESS"
   | "EXECUTION_ERROR"
   | "READBACK_CONFIRMED"
+  | "STATE_READBACK_CONFIRMED"
   | "OUTCOME_UNKNOWN";
 
 export type TxStageHandler = (stage: TxStage) => void;

@@ -14,6 +14,8 @@ Record the discovery time, reporter, affected Git commit/source hash, configured
 
 Preserve logs and readbacks. Do not infer a transaction outcome from a wallet popup, submitted hash, or finality alone.
 
+Treat a wallet/RPC transport error after submission as an ambiguous outcome. The application and operator must reconcile authoritative contract state and must never automatically resend the wallet write. If the provider returned no transaction hash, transaction finality and execution proof are unavailable even when a later `latest-final` readback confirms the expected effect. Record that narrower result as `STATE_READBACK_CONFIRMED`; do not manufacture a hash, receipt, execution result, or normal tracked `READBACK_CONFIRMED` lifecycle.
+
 ## 2. Confirm and pause new creation
 
 Before calling `set_creation_paused(true)`, display:
@@ -69,6 +71,8 @@ The committed `order-fg-batch-demo-*.json` history and Playwright three-claim sc
 ## 6. Review and deploy V2
 
 Fix the defect in a new contract version with regression tests. Run contract, web, browser, lint, typecheck, build, and secret checks. Independently verify the exact source SHA-256 and Git commit.
+
+V1 remains the frozen, unchanged live contract. The current V2 source adds participant-initiated `cancel_before_packed` in `FUNDED`, `PARTIALLY_ACCEPTED`, and `ACCEPTED` before packing, with one conserved full-customer-refund settlement. This capability is not live merely because its source and deterministic tests exist. Keep it labelled source-only until a separately confirmed deployment supplies a verified V2 address, transaction finality, successful execution, source-hash match, and authoritative readback.
 
 Before deployment, display the deployer wallet, StudioNet network, reviewed source hash, commit, constructor inputs, exact contract classification token `INTENTIONALLY_FROZEN`, and exact deployment command. Deploy only after explicit confirmation of that identity and action. Require a receipt plus finality, execution success, contract readback, explorer record, and source-hash match before recording V2 as verified.
 

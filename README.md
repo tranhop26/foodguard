@@ -76,6 +76,8 @@ npm run verify:no-secrets
 
 `npm run test:e2e` starts two local servers: a configured test instance and a `DEPLOYMENT_REQUIRED` instance. Wallet and RPC behavior is mocked deterministically at the browser boundary. These tests never contact a deployment and **do not count as live StudioNet proof**.
 
+The browser recovery regression records and decodes one `accept_restaurant` wallet request, makes that provider call fail with `Failed to fetch`, and exposes the changed order only through a later authoritative `latest-final` read. The UI moves from `RECONCILING` to the distinct `STATE_READBACK_CONFIRMED` stage without automatically resending the wallet transaction. Because the provider returns no transaction hash, that stage does not mark finality or execution complete; the matching readback confirms only that the expected contract effect is present.
+
 The secret scan reads tracked worktree content, staged index content, and untracked public-source files. A separate bounded filesystem presence check also catches ordinary ignored `.env.local` files at the root and relevant source subtrees without reading their contents; it skips `.git`, `node_modules`, and symlinks. The gate rejects private-key, mnemonic/seed-phrase, and Vercel-token patterns plus unsafe tracked paths such as generated output, dependency/cache directories, `.superpowers`, `work`, `research`, and task artifacts. Findings report only the path and rule ID; matched values are redacted. Blank `.env.example` keys and documentation variable names are allowed.
 
 ### Deployment and action-time confirmation gates
@@ -89,6 +91,8 @@ The secret scan reads tracked worktree content, staged index content, and untrac
 ### Frozen V1 classification and known limits
 
 FoodGuard V1's exact contract classification is `INTENTIONALLY_FROZEN`: it is a frozen, non-upgradeable contract design. The deployer can pause **new order creation only**; the UI reads `get_creation_paused()` and fails closed for new funding if that authoritative read is unavailable. There is no upgrade proxy, arbitrary admin rewrite, custody sweep, or automatic migration of active orders. A defect therefore requires pausing creation, auditing every active V1 order, exporting public evidence, deploying reviewed V2 source after confirmation, routing only new orders to V2, and preserving V1 readback/action access until its orders are terminal. See `docs/recovery-runbook.md`.
+
+The deployed V1 source and address remain frozen and unchanged. The V2 source in this repository adds participant-initiated `cancel_before_packed` while an order is still `FUNDED`, `PARTIALLY_ACCEPTED`, or `ACCEPTED`, before packing. That V2 behavior is **source-only, not live**: it must not be attributed to StudioNet until a separate deployment is explicitly confirmed and recorded with its address, transaction, execution result, source hash, and authoritative readback.
 
 Known limits: StudioNet and Simulated GEN are non-production; evidence availability and truth remain external assumptions; a digest proves integrity, not physical correctness; browser tests use local doubles; the contract and production UI are live but the promoted three-wallet workflow branches have not yet been exercised on StudioNet; and unresolved/escalated funds may require cure or a fully signed mutual settlement.
 
@@ -110,11 +114,15 @@ Ba ví phải hợp lệ, khác địa chỉ zero và khác nhau từng đôi m�
 
 Các JSON trong `public/evidence/` là **fixture offline cố định**, không phải bằng chứng live và không thể dùng để tuyên bố còn mới. Thời gian năm 2030 chỉ là dữ liệu fixture. Test trình duyệt cũng dùng ví/RPC giả lập cục bộ có giới hạn và không được tính là bằng chứng StudioNet live.
 
+Regression khôi phục RPC ghi và giải mã đúng một yêu cầu ví `accept_restaurant`, sau đó provider báo `Failed to fetch`, rồi chỉ cho thấy trạng thái mới qua lần đọc `latest-final` có thẩm quyền về sau. Giao diện chuyển từ `RECONCILING` sang stage riêng `STATE_READBACK_CONFIRMED` mà không tự động gửi lại giao dịch ví. Vì provider không trả transaction hash, stage này không đánh dấu finality hay execution là hoàn tất; dữ liệu đọc lại khớp chỉ xác nhận hiệu ứng contract mong đợi đang hiện diện.
+
 ### Chạy kiểm tra và giới hạn triển khai
 
 Dùng các lệnh trong phần English để chạy contract test, web test, browser E2E, lint, typecheck, build và quét secret. Khi chưa có địa chỉ đã triển khai/xác minh, ứng dụng phải hiển thị `DEPLOYMENT_REQUIRED` và khóa mọi write.
 
 Phân loại contract chính xác của V1 là `INTENTIONALLY_FROZEN`: contract đóng băng, không upgrade. Deployer chỉ có thể dừng tạo **đơn mới**; không thể sửa tùy ý, quét escrow hoặc tự động chuyển đơn đang chạy. Khi có lỗi: dừng tạo đơn sau xác nhận, kiểm kê đơn V1, xuất bằng chứng, review/deploy V2 sau xác nhận, chuyển đơn mới sang V2, và tiếp tục giữ giao diện V1 cho đến khi mọi đơn cũ kết thúc. Xác nhận deployment phải hiển thị chính token `INTENTIONALLY_FROZEN`. Mọi deployment StudioNet, deployment Vercel và push GitHub đều có cổng xác nhận riêng ngay tại thời điểm hành động.
+
+Source và địa chỉ V1 đã deploy vẫn đóng băng, không thay đổi. Source V2 trong repository bổ sung `cancel_before_packed` do người tham gia khởi tạo khi đơn còn `FUNDED`, `PARTIALLY_ACCEPTED` hoặc `ACCEPTED`, trước khi đóng gói. Hành vi V2 này mới chỉ tồn tại trong source, **chưa live**; không được gán cho StudioNet cho đến khi một deployment riêng được xác nhận và ghi nhận đầy đủ địa chỉ, giao dịch, execution, source hash và readback có thẩm quyền.
 
 ## Repository references
 

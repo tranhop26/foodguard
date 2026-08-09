@@ -11,11 +11,15 @@ const genlayerMocks = vi.hoisted(() => ({
   writeFoodGuard: vi.fn(),
 }));
 
-vi.mock("../../lib/genlayer/client", () => ({
-  readFoodGuard: genlayerMocks.readFoodGuard,
-  verifyFoodGuardDeploymentProof: genlayerMocks.verifyFoodGuardDeploymentProof,
-  writeFoodGuard: genlayerMocks.writeFoodGuard,
-}));
+vi.mock("../../lib/genlayer/client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/genlayer/client")>();
+  return {
+    ...actual,
+    readFoodGuard: genlayerMocks.readFoodGuard,
+    verifyFoodGuardDeploymentProof: genlayerMocks.verifyFoodGuardDeploymentProof,
+    writeFoodGuard: genlayerMocks.writeFoodGuard,
+  };
+});
 vi.mock("../../lib/genlayer/transactions", () => ({
   trackTransaction: genlayerMocks.trackTransaction,
 }));
@@ -1287,6 +1291,19 @@ describe("authoritative order outcome presentation", () => {
     expect(screen.getByText("Readback pending")).toBeVisible();
   });
 
+  it("confirms hashless state readback without claiming finality or execution", () => {
+    renderLocalized(
+      <TransactionLifecycle stage={"STATE_READBACK_CONFIRMED" as TxStage} />,
+      "en",
+    );
+
+    expect(screen.getByTestId("transaction-finality")).not.toHaveAttribute("data-complete");
+    expect(screen.getByTestId("transaction-execution")).not.toHaveAttribute("data-complete");
+    expect(screen.getByTestId("transaction-execution")).toHaveTextContent("EXECUTION_PENDING");
+    expect(screen.getByTestId("transaction-readback")).toHaveAttribute("data-complete", "true");
+    expect(screen.getByTestId("transaction-readback")).toHaveTextContent("READBACK_CONFIRMED");
+  });
+
   it("presents RECONCILING as non-final and tells Vietnamese users never to resend", () => {
     renderLocalized(<TransactionLifecycle stage="RECONCILING" />, "vi");
 
@@ -2500,6 +2517,56 @@ describe("order detail readback orchestration", () => {
       settlement: { settlement_id: settlementId },
       state: "CANCELLED_REFUNDED",
     });
+  });
+
+  it("accepts the exact V2 participant-cancellation basis while preserving V1 and rejecting unrelated bases", async () => {
+    const contractAddress = "0x4444444444444444444444444444444444444444";
+    vi.stubEnv("NEXT_PUBLIC_FOODGUARD_ADDRESS", contractAddress);
+    const cancelledOrder = {
+      ...BASE_ORDER,
+      courier_accepted: false,
+      delivery_settled: true,
+      items_settled: true,
+      refund_emitted: true,
+      restaurant_accepted: false,
+      state: "CANCELLED_REFUNDED",
+    };
+
+    async function readCancellation(basis: string) {
+      const settlementId = await sha256Text(JSON.stringify({
+        basis,
+        chain_id: "61999",
+        contract_address: contractAddress,
+        courier_wei: "0",
+        customer_wei: "950",
+        order_id: "fg-mixed",
+        restaurant_wei: "0",
+        schema_version: "foodguard-settlement-v1",
+      }));
+      genlayerMocks.readFoodGuard.mockImplementation((method: string) => {
+        if (method === "get_order") return Promise.resolve(cancelledOrder);
+        if (method === "get_evidence_count") return Promise.resolve("0");
+        if (method === "get_round") return Promise.resolve("0");
+        if (method === "get_order_settlement") return Promise.resolve({
+          courier_wei: 0,
+          customer_wei: 950,
+          restaurant_wei: 0,
+          settlement_id: settlementId,
+        });
+        throw new Error(`unexpected method ${method}`);
+      });
+      return readAuthoritativeOrder("fg-mixed");
+    }
+
+    await expect(readCancellation("unaccepted-cancellation")).resolves.toMatchObject({
+      state: "CANCELLED_REFUNDED",
+    });
+    await expect(readCancellation("participant-cancellation-before-packed")).resolves.toMatchObject({
+      state: "CANCELLED_REFUNDED",
+    });
+    await expect(readCancellation("unrelated-cancellation-basis")).rejects.toThrow(
+      /settlement id does not bind/i,
+    );
   });
 
   it("fails closed instead of rendering malformed mutual allocations", () => {

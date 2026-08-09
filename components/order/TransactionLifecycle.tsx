@@ -25,11 +25,13 @@ export function TransactionLifecycle({
   if (!stage) return null;
 
   const currentIndex = progression.indexOf(stage);
-  const walletConfirmed = currentIndex > progression.indexOf("WALLET_CONFIRMATION") || stage === "CONSENSUS_FAILED" || stage === "EXECUTION_ERROR";
+  const stateReadbackConfirmed = stage === "STATE_READBACK_CONFIRMED";
+  const walletConfirmed = currentIndex > progression.indexOf("WALLET_CONFIRMATION") || stateReadbackConfirmed || stage === "CONSENSUS_FAILED" || stage === "EXECUTION_ERROR";
   const submitted = currentIndex >= progression.indexOf("SUBMITTED") || stage === "CONSENSUS_FAILED" || stage === "EXECUTION_ERROR";
   const consensusPending = currentIndex >= progression.indexOf("CONSENSUS_PENDING") || stage === "CONSENSUS_FAILED" || stage === "EXECUTION_ERROR";
   const finalized = currentIndex >= progression.indexOf("FINALIZED") || stage === "EXECUTION_ERROR";
-  const readbackConfirmed = stage === "READBACK_CONFIRMED";
+  const readbackConfirmed = stage === "READBACK_CONFIRMED" || stateReadbackConfirmed;
+  const executionConfirmed = stage === "EXECUTION_SUCCESS" || stage === "READBACK_CONFIRMED";
   const permissionlessRetry = (
     operation === "request_resolution" ||
     operation === "execute_settlement" ||
@@ -62,18 +64,18 @@ export function TransactionLifecycle({
           <code>FINALIZED</code>
           <span>{finalized ? copy.detail.finalityRecorded : copy.detail.stagePending}</span>
         </li>
-        <li data-complete={stage === "EXECUTION_SUCCESS" || readbackConfirmed || undefined} data-testid="transaction-execution">
+        <li data-complete={executionConfirmed || undefined} data-testid="transaction-execution">
           <code>
             {stage === "EXECUTION_ERROR"
               ? "EXECUTION_ERROR"
-              : stage === "EXECUTION_SUCCESS" || readbackConfirmed
+              : executionConfirmed
                 ? "EXECUTION_SUCCESS"
                 : "EXECUTION_PENDING"}
           </code>
           <span>
             {stage === "EXECUTION_ERROR"
               ? copy.detail.executionError
-              : stage === "EXECUTION_SUCCESS" || readbackConfirmed
+              : executionConfirmed
                 ? copy.detail.executionSuccess
                 : copy.detail.stagePending}
           </span>

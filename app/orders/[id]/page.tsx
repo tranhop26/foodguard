@@ -794,7 +794,12 @@ export async function readAuthoritativeOrder(orderId: string): Promise<OrderDeta
     if (fullRefund && (customer !== BigInt(order.total_value) || restaurant !== 0n || courier !== 0n)) {
       throw new TypeError("Cancellation settlement allocation is malformed");
     }
-    if (order.state === "CANCELLED_REFUNDED") settlementBases = ["unaccepted-cancellation"];
+    if (order.state === "CANCELLED_REFUNDED") {
+      settlementBases = [
+        "unaccepted-cancellation",
+        "participant-cancellation-before-packed",
+      ];
+    }
     if (order.state === "FULFILLMENT_TIMEOUT_REFUNDED") {
       settlementBases = [
         "fulfillment-timeout:ACCEPTED",

@@ -545,7 +545,7 @@ describe("FoodGuard StudioNet client", () => {
     expect(sdk.readContract).not.toHaveBeenCalled();
   });
 
-  it("reconciles a broadcast-then-transport-error without resubmitting", async () => {
+  it("reconciles a broadcast-then-transport-error with a readback-only stage without resubmitting", async () => {
     const stages: TxStage[] = [];
     const order = {
       courier: "0x3333333333333333333333333333333333333333",
@@ -578,8 +578,75 @@ describe("FoodGuard StudioNet client", () => {
     expect(stages).toEqual([
       "WALLET_CONFIRMATION",
       "RECONCILING",
-      "READBACK_CONFIRMED",
+      "STATE_READBACK_CONFIRMED",
     ]);
+  });
+
+  it("tracks a trusted post-submission account error through its recoverable hash", async () => {
+    const changedAccount = "0x3333333333333333333333333333333333333333";
+    const stages: TxStage[] = [];
+    const order = {
+      courier: changedAccount,
+      courier_accepted: false,
+      customer: "0x1111111111111111111111111111111111111111",
+      order_id: "fg-1",
+      restaurant: ADDRESS,
+      restaurant_accepted: true,
+      state: "PARTIALLY_ACCEPTED",
+    };
+    walletProvider.request.mockImplementation(
+      async ({ method }: { method: string }) => {
+        if (method === "eth_chainId") return `0x${studionet.id.toString(16)}`;
+        if (method === "eth_requestAccounts") return [ADDRESS];
+        if (method === "eth_accounts") return [changedAccount];
+        throw new Error(`unexpected wallet method ${method}`);
+      },
+    );
+    sdk.writeContract.mockResolvedValue(HASH);
+    mockReceipt({
+      statusName: TransactionStatus.FINALIZED,
+      txExecutionResultName: ExecutionResult.FINISHED_WITH_RETURN,
+    });
+    sdk.readContract.mockResolvedValue(order);
+    const readback = vi.fn().mockResolvedValue(order);
+
+    await expect(executeFoodGuardOperation<typeof order>({
+      method: "accept_restaurant",
+      args: ["fg-1"],
+      value: 0n,
+      expectedAccount: ADDRESS,
+      onStage: (stage) => stages.push(stage),
+      readback,
+      matches: (candidate) => candidate.restaurant_accepted === true,
+    })).resolves.toEqual(order);
+
+    expect(sdk.writeContract).toHaveBeenCalledTimes(1);
+    expect(sdk.getTransaction).toHaveBeenCalledWith({ hash: HASH });
+    expect(readback).toHaveBeenCalledTimes(1);
+    expect(stages).toContain("FINALIZED");
+    expect(stages).toContain("EXECUTION_SUCCESS");
+    expect(stages.at(-1)).toBe("READBACK_CONFIRMED");
+    expect(stages).not.toContain("STATE_READBACK_CONFIRMED");
+  });
+
+  it("never trusts an arbitrary hash attached to a rejected wallet request", async () => {
+    const rejection = { code: 4001, message: "User rejected the request", transactionHash: HASH };
+    const readback = vi.fn();
+    sdk.writeContract.mockRejectedValue(rejection);
+
+    await expect(executeFoodGuardOperation({
+      method: "accept_restaurant",
+      args: ["fg-1"],
+      value: 0n,
+      expectedAccount: ADDRESS,
+      onStage: () => undefined,
+      readback,
+      matches: () => true,
+    })).rejects.toBe(rejection);
+
+    expect(sdk.writeContract).toHaveBeenCalledTimes(1);
+    expect(sdk.getTransaction).not.toHaveBeenCalled();
+    expect(readback).not.toHaveBeenCalled();
   });
 
   it("does not reconcile a definitive wallet rejection", async () => {
