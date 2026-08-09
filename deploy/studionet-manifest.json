@@ -34,11 +34,12 @@
     "provider": "Vercel",
     "team": "tdh-s-projects",
     "project": "foodguard-genlayer",
-    "deployment_id": "dpl_B9dQbDiDrQ7D6rKzLyPHZbp4qUEC",
+    "deployment_id": "dpl_ARefQRUQS8SvbnnP3F3yu1xXAmxk",
+    "git_commit": "1d72e99d9d93f67ccbe46a12c3428fb5efd27ca9",
     "production_url": "https://foodguard-genlayer.vercel.app",
-    "deployment_url": "https://foodguard-genlayer-lu4wyjg81-tdh-s-projects.vercel.app",
+    "deployment_url": "https://foodguard-genlayer-1fid6vo6g-tdh-s-projects.vercel.app",
     "ready_state": "READY",
-    "verified_at": "2026-08-09T06:40:06Z"
+    "verified_at": "2026-08-09T07:03:07Z"
   },
   "limitations": [
     "StudioNet GEN is simulated and is not production money.",

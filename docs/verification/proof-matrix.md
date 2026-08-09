@@ -10,9 +10,9 @@ This file records the separately confirmed FoodGuard V1 deployment and Vercel pr
 
 ## Verified Vercel production UI
 
-| Team | Project | Deployment ID | Production URL | State | Live checks | Limitation |
-| --- | --- | --- | --- | --- | --- | --- |
-| `tdh-s-projects` | `foodguard-genlayer` | `dpl_B9dQbDiDrQ7D6rKzLyPHZbp4qUEC` | [`https://foodguard-genlayer.vercel.app`](https://foodguard-genlayer.vercel.app) | `READY`; HTTP `200` | Contract address and public origin rendered on `/create`; no application console errors; no horizontal overflow at 375px or 1440px | UI deployment proof only; live three-wallet terminal branches remain unverified |
+| Team | Project | Deployment ID | Git commit | Production URL | State | Live checks | Limitation |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `tdh-s-projects` | `foodguard-genlayer` | `dpl_ARefQRUQS8SvbnnP3F3yu1xXAmxk` | `1d72e99d9d93f67ccbe46a12c3428fb5efd27ca9` | [`https://foodguard-genlayer.vercel.app`](https://foodguard-genlayer.vercel.app) | `READY`; HTTP `200` | `Bếp Lá` and `Gánh Cuốn` rendered with Noto Serif and normal letter spacing; no horizontal overflow at 375px or 1440px | UI deployment proof only; live three-wallet terminal branches remain unverified |
 
 ## Deployment record shown by the proof page
 
