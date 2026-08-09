@@ -68,9 +68,13 @@ function withReconciliationDeadline<T>(
 async function reconcileFoodGuardOperation<T>(
   input: FoodGuardOperation<T>,
   ambiguousCause: unknown,
+  deadline = Date.now() + reconciliationTimeoutMs,
 ): Promise<T> {
   input.onStage("RECONCILING");
-  const deadline = Date.now() + reconciliationTimeoutMs;
+  if (deadline <= Date.now()) {
+    input.onStage("OUTCOME_UNKNOWN");
+    throw new OutcomeUnknownError();
+  }
 
   try {
     const readback = await withStudioNetBackoff(async () => {
@@ -125,17 +129,22 @@ export async function executeFoodGuardOperation<T>(
     return reconcileFoodGuardOperation(input, error);
   }
 
+  const readbackDeadline = Date.now() + reconciliationTimeoutMs;
   try {
-    const finalReadback = await input.readback();
+    const finalReadback = await withReconciliationDeadline(
+      input.readback(),
+      readbackDeadline,
+    );
     if (input.matches(finalReadback)) {
       input.onStage("READBACK_CONFIRMED");
       return finalReadback;
     }
   } catch (error: unknown) {
-    return reconcileFoodGuardOperation(input, error);
+    return reconcileFoodGuardOperation(input, error, readbackDeadline);
   }
   return reconcileFoodGuardOperation(
     input,
     new TypeError("Failed to fetch a matching authoritative readback"),
+    readbackDeadline,
   );
 }

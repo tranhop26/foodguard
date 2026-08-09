@@ -857,6 +857,55 @@ describe("FoodGuard StudioNet client", () => {
     expect(stages.at(-1)).toBe("READBACK_CONFIRMED");
   });
 
+  it("bounds a hung enriched read after successful transaction tracking", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2030-01-01T00:00:00.000Z"));
+    const stages: TxStage[] = [];
+    const trackedOrder = {
+      courier: "0x3333333333333333333333333333333333333333",
+      courier_accepted: false,
+      customer: "0x1111111111111111111111111111111111111111",
+      order_id: "fg-1",
+      restaurant: ADDRESS,
+      restaurant_accepted: true,
+      state: "PARTIALLY_ACCEPTED",
+    };
+    const readback = vi.fn(
+      () => new Promise<typeof trackedOrder>(() => undefined),
+    );
+    const settled = vi.fn();
+    sdk.writeContract.mockResolvedValue(HASH);
+    sdk.readContract.mockResolvedValue(trackedOrder);
+    mockReceipt({
+      statusName: TransactionStatus.FINALIZED,
+      txExecutionResultName: ExecutionResult.FINISHED_WITH_RETURN,
+    });
+
+    void executeFoodGuardOperation<typeof trackedOrder>({
+      method: "accept_restaurant",
+      args: ["fg-1"],
+      value: 0n,
+      expectedAccount: ADDRESS,
+      onStage: (stage) => stages.push(stage),
+      readback,
+      matches: (candidate) => candidate.restaurant_accepted === true,
+    }).then(settled, settled);
+
+    await vi.advanceTimersByTimeAsync(119_999);
+    expect(settled).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(settled).toHaveBeenCalledWith(expect.any(OutcomeUnknownError));
+    expect(sdk.writeContract).toHaveBeenCalledTimes(1);
+    expect(readback).toHaveBeenCalledTimes(1);
+    expect(stages).toContain("FINALIZED");
+    expect(stages).toContain("EXECUTION_SUCCESS");
+    expect(stages).toContain("RECONCILING");
+    expect(stages.at(-1)).toBe("OUTCOME_UNKNOWN");
+    expect(stages).not.toContain("READBACK_CONFIRMED");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("does not reconcile a known-hash explicit consensus failure", async () => {
     const readback = vi.fn();
     sdk.writeContract.mockResolvedValue(HASH);
