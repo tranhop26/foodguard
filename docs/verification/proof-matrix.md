@@ -10,13 +10,13 @@ Populate those public values only from a reviewed, real `deploy/studionet-manife
 
 ## Local verification (not live proof)
 
-The deterministic browser fixture also covers authoritative creation-pause readback and an escalated mutual-settlement proposal. These remain local behavior checks, not deployment evidence.
+The deterministic browser fixture also covers authoritative creation-pause readback and an escalated mutual-settlement proposal. The committed batch evidence family independently binds its cure to a complete three-item manifest and ordered six-record target history. These remain local behavior checks, not deployment evidence.
 
 `npm run test:e2e` uses deterministic local wallet and RPC doubles. It covers 375/1440 marketplace layout, bilingual filtering, three-wallet/payable preview, `DEPLOYMENT_REQUIRED`, keyboard focus, finality → execution → full readback, `UNRESOLVED` cure, consensus-failed unchanged state, operation-specific retry, and three stale customer claims corrected by one atomic batch. The batch scenario records exactly one local wallet request, then reads active indices `0, 1, 2, 6`. These checks exercise the real browser application but **must not be counted as StudioNet deployment evidence**.
 
 | Local-only scenario | Actor | Method | Deterministic lifecycle | Authoritative local readback | Source/test | Limitation |
 | --- | --- | --- | --- | --- | --- | --- |
-| Three stale customer claims → one atomic cure | Synthetic customer fixture | `submit_cure_evidence("fg-batch-1", envelope_json)` once | `FINALIZED` / `EXECUTION_SUCCESS` / `READBACK_CONFIRMED` from local doubles | One new history index `6`; active `0, 1, 2, 6`; stale `3, 4, 5` absent | `public/evidence/order-fg-demo-cure-batch.json`; `tests/e2e/order-unresolved.spec.ts` | Local deterministic evidence only; no StudioNet address, transaction, explorer receipt, wallet, or live URL |
+| Three stale customer claims → one atomic cure | Synthetic customer fixture | `submit_cure_evidence("fg-batch-1", envelope_json)` once | `FINALIZED` / `EXECUTION_SUCCESS` / `READBACK_CONFIRMED` from local doubles | One new history index `6`; active `0, 1, 2, 6`; stale `3, 4, 5` absent | `public/evidence/order-fg-batch-demo-*.json`; `tests/web/evidence.test.ts`; `tests/e2e/order-unresolved.spec.ts` | Local deterministic evidence only; no StudioNet address, transaction, explorer receipt, wallet, or live URL |
 
 ## Live proof rows
 

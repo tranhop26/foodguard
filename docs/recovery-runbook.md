@@ -64,7 +64,7 @@ V1 has no admin rewrite, upgrade proxy, rescue sweep, or automatic migration. Th
 
 Publish participant guidance that names the exact permitted method and consequence for each affected state.
 
-The committed `order-fg-demo-cure-batch.json` and Playwright three-claim scenario are rehearsal material only. They prove canonical bytes and deterministic local behavior, including active indices `0, 1, 2, 6`; they are not incident evidence, StudioNet finality, or permission to perform a wallet action.
+The committed `order-fg-batch-demo-*.json` history and Playwright three-claim scenario are rehearsal material only. The history contains a three-item manifest, the ordered `PACKED`/`PICKED_UP`/`DELIVERED` records, three distinct item claims at indices `3`, `4`, and `5`, and the single cure bound to those authoritative targets. They prove canonical bytes and deterministic local behavior, including active indices `0, 1, 2, 6`; they are not incident evidence, StudioNet finality, or permission to perform a wallet action.
 
 ## 6. Review and deploy V2
 

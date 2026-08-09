@@ -62,6 +62,12 @@ test("three stale customer claims recover through one atomic batch cure", async 
   await expect(categories.nth(0)).toHaveValue("");
   await expect(categories.nth(1)).toHaveValue("");
   await expect(categories.nth(2)).toHaveValue("");
+  await expect(kinds.nth(0)).toHaveValue("");
+  await expect(kinds.nth(1)).toHaveValue("");
+  await expect(kinds.nth(2)).toHaveValue("");
+  await expect(indices.nth(0)).toHaveValue("");
+  await expect(indices.nth(1)).toHaveValue("");
+  await expect(indices.nth(2)).toHaveValue("");
   for (const [index, category] of ["ABSENT_AT_RECEIPT", "NOT_AS_ORDERED", "HANDOFF_NOT_RECEIVED"].entries()) {
     await categories.nth(index).selectOption(category);
   }

@@ -12,7 +12,14 @@ import {
   validateEvidenceDocument,
 } from "../../lib/evidence";
 import claimFixture from "../../public/evidence/order-fg-demo-claim-missing-item.json";
-import batchCureFixture from "../../public/evidence/order-fg-demo-cure-batch.json";
+import batchClaimItem1Fixture from "../../public/evidence/order-fg-batch-demo-claim-item-1.json";
+import batchClaimItem2Fixture from "../../public/evidence/order-fg-batch-demo-claim-item-2.json";
+import batchClaimItem3Fixture from "../../public/evidence/order-fg-batch-demo-claim-item-3.json";
+import batchCureFixture from "../../public/evidence/order-fg-batch-demo-cure-batch.json";
+import batchDeliveredFixture from "../../public/evidence/order-fg-batch-demo-delivered.json";
+import batchManifestFixture from "../../public/evidence/order-fg-batch-demo-manifest.json";
+import batchPackedFixture from "../../public/evidence/order-fg-batch-demo-packed.json";
+import batchPickupFixture from "../../public/evidence/order-fg-batch-demo-pickup.json";
 import deliveredFixture from "../../public/evidence/order-fg-demo-delivered.json";
 import manifestFixture from "../../public/evidence/order-fg-demo-manifest.json";
 import packedFixture from "../../public/evidence/order-fg-demo-packed.json";
@@ -20,7 +27,14 @@ import pickupFixture from "../../public/evidence/order-fg-demo-pickup.json";
 
 const FIXTURE_DIGESTS = Object.freeze({
   "order-fg-demo-claim-missing-item.json": "0xc6b1996f8fb0350c217679fdd40b425c5b0385f32d7db608713087e3f6d989c3",
-  "order-fg-demo-cure-batch.json": "0x280f9d6f5c6f3e4e62cbd79b59aff3bbe90ae4560e003dcf76cf1b588990cc1e",
+  "order-fg-batch-demo-claim-item-1.json": "0xe5893f78ead60ce4e2ceeccc26860a5c97a515a599bf62b7c0058fd50baa8e3d",
+  "order-fg-batch-demo-claim-item-2.json": "0xb5783653e62d1b67c30975f7bce2de6e1ede3af83358012bd7261d3b68f98337",
+  "order-fg-batch-demo-claim-item-3.json": "0x42699bcc3e6910ce5f9f4b88b264e9ebfdcc4306304a0abec8014d8239db8e34",
+  "order-fg-batch-demo-cure-batch.json": "0x41548c1306fd12785adc5dd6400b2ac235849777ba9de31dea4e7f367239587c",
+  "order-fg-batch-demo-delivered.json": "0xf96d1e24534f191172fd59f3208ff2365a370de9203bcfecc47e6c6b1b6bf040",
+  "order-fg-batch-demo-manifest.json": "0x8f539b60979571dad557f25b32d5804291fe868ade8814a4576d77ec440240e5",
+  "order-fg-batch-demo-packed.json": "0x348ffb2c9f916b87ecbd8cc54594125c5210d46a9c3b2303acf2e0ff43cf7e44",
+  "order-fg-batch-demo-pickup.json": "0xd0d1d6d895b1ce845a2e70edfc73e27e87bc51761e205ab25244f333cbcef83b",
   "order-fg-demo-delivered.json": "0x1f75f32767e97a2dfe7bdec507fe3b963d7ff151e3a13cb5a169a1570bfccd0f",
   "order-fg-demo-manifest.json": "0xc8b3c3caf0d9c51e79a636095a5c8b1a603b61a39bc80027e7ae9ab91ac76ac5",
   "order-fg-demo-packed.json": "0x81aeb38f325af53321789f67ca05cd2423f5cb4d5c4511eaf9ebd0a896ef8d48",
@@ -412,7 +426,14 @@ describe("committed demo evidence fixtures", () => {
     ["order-fg-demo-pickup.json", pickupFixture, FIXTURE_DIGESTS["order-fg-demo-pickup.json"]],
     ["order-fg-demo-delivered.json", deliveredFixture, FIXTURE_DIGESTS["order-fg-demo-delivered.json"]],
     ["order-fg-demo-claim-missing-item.json", claimFixture, FIXTURE_DIGESTS["order-fg-demo-claim-missing-item.json"]],
-    ["order-fg-demo-cure-batch.json", batchCureFixture, FIXTURE_DIGESTS["order-fg-demo-cure-batch.json"]],
+    ["order-fg-batch-demo-manifest.json", batchManifestFixture, FIXTURE_DIGESTS["order-fg-batch-demo-manifest.json"]],
+    ["order-fg-batch-demo-packed.json", batchPackedFixture, FIXTURE_DIGESTS["order-fg-batch-demo-packed.json"]],
+    ["order-fg-batch-demo-pickup.json", batchPickupFixture, FIXTURE_DIGESTS["order-fg-batch-demo-pickup.json"]],
+    ["order-fg-batch-demo-delivered.json", batchDeliveredFixture, FIXTURE_DIGESTS["order-fg-batch-demo-delivered.json"]],
+    ["order-fg-batch-demo-claim-item-1.json", batchClaimItem1Fixture, FIXTURE_DIGESTS["order-fg-batch-demo-claim-item-1.json"]],
+    ["order-fg-batch-demo-claim-item-2.json", batchClaimItem2Fixture, FIXTURE_DIGESTS["order-fg-batch-demo-claim-item-2.json"]],
+    ["order-fg-batch-demo-claim-item-3.json", batchClaimItem3Fixture, FIXTURE_DIGESTS["order-fg-batch-demo-claim-item-3.json"]],
+    ["order-fg-batch-demo-cure-batch.json", batchCureFixture, FIXTURE_DIGESTS["order-fg-batch-demo-cure-batch.json"]],
   ] as const;
 
   it.each(fixtures)("pins the canonical envelope and digest for %s", async (name, rawFixture, expectedDigest) => {
@@ -449,9 +470,10 @@ describe("committed demo evidence fixtures", () => {
   it.each(fixtures)("binds %s to its committed public fixture path", (name, rawFixture) => {
     const fixture = rawFixture as unknown as EvidenceDocument;
     const source = new URL(fixture.source_url);
+    const expectedOrderId = name.startsWith("order-fg-batch-demo-") ? "fg-batch-demo" : "fg-demo";
 
     expect(source.pathname).toBe(`/evidence/${name}`);
-    expect(fixture.order_id).toBe("fg-demo");
+    expect(fixture.order_id).toBe(expectedOrderId);
     expect(fixture.issuer_id).toBe("foodguard-offline-fixture");
   });
 
@@ -472,18 +494,39 @@ describe("committed demo evidence fixtures", () => {
     expect(new Set([customer, restaurant, courier]).size).toBe(3);
   });
 
-  it("binds the three-record cure fixture to ordered stale claims in the demo order", () => {
-    const manifestItemIds = new Set(manifestFixture.items.map((item) => item.item_id));
+  it("derives the cure targets from a coherent committed three-claim history", () => {
+    const batchHistory = [
+      batchPackedFixture,
+      batchPickupFixture,
+      batchDeliveredFixture,
+      batchClaimItem1Fixture,
+      batchClaimItem2Fixture,
+      batchClaimItem3Fixture,
+    ] as unknown as EvidenceDocument[];
+    const manifestItems = batchManifestFixture.items;
+    const targets = batchCureFixture.supersedes_evidence_indices.map((index) => batchHistory[index]);
+    const targetSlots = targets.map((target) => [target.action, target.item_id]);
 
-    expect(batchCureFixture.supersedes_evidence_indices).toEqual([3, 4, 5]);
-    expect(batchCureFixture.statements.map((statement) => [
-      statement.effective_action,
-      statement.item_id,
-    ])).toEqual([
+    expect(batchHistory.map((record) => record.action)).toEqual([
+      "PACKED", "PICKED_UP", "DELIVERED", "CUSTOMER_CLAIM", "CUSTOMER_CLAIM", "CUSTOMER_CLAIM",
+    ]);
+    expect(targets.every((target) => target !== undefined)).toBe(true);
+    expect(targets.every((target) => target.actor_wallet === batchCureFixture.actor_wallet)).toBe(true);
+    expect(targetSlots).toEqual([
       ["CUSTOMER_CLAIM", "item-1"],
       ["CUSTOMER_CLAIM", "item-2"],
-      ["CUSTOMER_CLAIM", "item-1"],
+      ["CUSTOMER_CLAIM", "item-3"],
     ]);
-    expect(batchCureFixture.statements.every((statement) => manifestItemIds.has(statement.item_id))).toBe(true);
+    expect(new Set(targets.map((target) => target.item_id)).size).toBe(3);
+    expect(batchCureFixture.statements.map((statement) => [statement.effective_action, statement.item_id])).toEqual(targetSlots);
+    for (const record of batchHistory) {
+      expect(validateEvidenceDocument(record, new Date("2030-01-01T00:00:00.000Z"), undefined, manifestItems)).toEqual(record);
+    }
+    expect(validateEvidenceDocument(
+      batchCureFixture,
+      new Date("2030-01-01T00:00:00.000Z"),
+      targets,
+      manifestItems,
+    )).toEqual(batchCureFixture);
   });
 });
