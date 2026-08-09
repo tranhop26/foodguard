@@ -30,7 +30,12 @@ export function TransactionLifecycle({
   const consensusPending = currentIndex >= progression.indexOf("CONSENSUS_PENDING") || stage === "CONSENSUS_FAILED" || stage === "EXECUTION_ERROR";
   const finalized = currentIndex >= progression.indexOf("FINALIZED") || stage === "EXECUTION_ERROR";
   const readbackConfirmed = stage === "READBACK_CONFIRMED";
-  const permissionlessRetry = operation === "request_resolution" || operation === "execute_settlement";
+  const permissionlessRetry = (
+    operation === "request_resolution" ||
+    operation === "execute_settlement" ||
+    operation === "cancel_unaccepted" ||
+    operation === "cancel_fulfillment_timeout"
+  );
 
   return (
     <section
@@ -89,6 +94,16 @@ export function TransactionLifecycle({
       )}
       {stage === "CONSENSUS_FAILED" && !permissionlessRetry && (!actorAddress || !operation) && (
         <p className="form-notice form-notice--warning">{copy.detail.consensusRetryUnspecified}</p>
+      )}
+      {stage === "RECONCILING" && (
+        <p className="form-notice form-notice--warning">
+          <code>RECONCILING</code>{" "}<span>{copy.detail.reconciling}</span>
+        </p>
+      )}
+      {stage === "OUTCOME_UNKNOWN" && (
+        <p className="form-notice form-notice--warning">
+          <code>OUTCOME_UNKNOWN</code>{" "}<span>{copy.detail.outcomeUnknown}</span>
+        </p>
       )}
     </section>
   );

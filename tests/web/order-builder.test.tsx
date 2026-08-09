@@ -693,7 +693,7 @@ describe("FoodGuard role console", () => {
     expect(screen.queryByRole("button", { name: /nhà hàng nhận đơn/i })).not.toBeInTheDocument();
   });
 
-  it("offers customer cancellation before the deadline only when neither provider accepted", () => {
+  it("offers customer cancellation before packing", () => {
     render(
       <LocaleProvider>
         <RoleConsole
@@ -710,7 +710,7 @@ describe("FoodGuard role console", () => {
       </LocaleProvider>,
     );
 
-    expect(screen.getByRole("button", { name: /hoàn tiền đơn chưa được nhận/i })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /hủy trước khi đóng gói/i })).toBeEnabled();
   });
 
   it("hides customer claims after the review deadline", () => {
@@ -750,17 +750,19 @@ describe("FoodGuard role console", () => {
       </LocaleProvider>,
     );
 
-    const acceptanceLabel = screen.getByRole("button").textContent;
-    expect(acceptanceLabel).toBeTruthy();
+    expect(screen.getByRole("button", { name: /nhà hàng nhận đơn/i })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /hủy trước khi đóng gói/i })).toBeEnabled();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(999);
     });
-    expect(screen.getByRole("button")).toBeEnabled();
+    expect(screen.getByRole("button", { name: /nhà hàng nhận đơn/i })).toBeEnabled();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1);
     });
-    expect(screen.getByRole("button")).not.toHaveTextContent(acceptanceLabel!);
+    expect(screen.queryByRole("button", { name: /nhà hàng nhận đơn/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /hủy trước khi đóng gói/i })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /hoàn tiền đơn chưa được nhận/i })).toBeEnabled();
   });
 
   it("makes unaccepted cancellation permissionless at the exact deadline", async () => {
@@ -816,7 +818,7 @@ describe("FoodGuard role console", () => {
   });
 
   it.each([undefined, "not-a-deadline"])(
-    "fails closed when the acceptance deadline is missing or invalid (%s)",
+    "keeps state-based participant cancellation while deadline actions fail closed (%s)",
     (acceptanceDeadline) => {
       render(
         <LocaleProvider>
@@ -833,7 +835,8 @@ describe("FoodGuard role console", () => {
         </LocaleProvider>,
       );
 
-      expect(screen.queryByRole("button")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /hủy trước khi đóng gói/i })).toBeEnabled();
+      expect(screen.queryByRole("button", { name: /nhận đơn/i })).not.toBeInTheDocument();
     },
   );
 
@@ -928,7 +931,7 @@ describe("FoodGuard role console", () => {
       </LocaleProvider>,
     );
 
-    fireEvent.click(screen.getByRole("button"));
+    fireEvent.click(screen.getByRole("button", { name: /nhà hàng nhận đơn/i }));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });

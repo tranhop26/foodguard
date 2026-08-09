@@ -14,6 +14,7 @@ import {
   type WalletSnapshot,
 } from "../wallet/WalletButton";
 import { authoritativeNowMs, type AuthoritativeClock } from "./authoritativeClock";
+import { TransactionLifecycle } from "./TransactionLifecycle";
 
 export interface FoodGuardOrderView {
   acceptance_deadline?: bigint | number | string;
@@ -38,6 +39,7 @@ export type RoleActionId =
   | "pickup"
   | "deliver"
   | "claim"
+  | "cancelBeforePacked"
   | "cancel"
   | "cancelFulfillmentTimeout";
 
@@ -175,23 +177,25 @@ function deadlinePhase(
   return nowSeconds < parsed ? "BEFORE" : "EXPIRED";
 }
 
-function actionFor(
+function actionsFor(
   role: WalletRole,
   order: FoodGuardOrderView,
   nowSeconds: bigint | null,
-): RoleAction | null {
+): RoleAction[] {
+  const actions: RoleAction[] = [];
   const acceptancePhase = deadlinePhase(order.acceptance_deadline, nowSeconds);
   const fulfillmentDeadline = order.state === "ACCEPTED"
     ? order.packing_deadline
     : order.state === "READY_FOR_PICKUP" || order.state === "IN_TRANSIT"
       ? order.delivery_deadline
       : undefined;
-  if (deadlinePhase(fulfillmentDeadline, nowSeconds) === "EXPIRED") {
-    return {
+  const fulfillmentExpired = deadlinePhase(fulfillmentDeadline, nowSeconds) === "EXPIRED";
+  if (fulfillmentExpired) {
+    actions.push({
       id: "cancelFulfillmentTimeout",
       method: "cancel_fulfillment_timeout",
       requiresEvidence: false,
-    };
+    });
   }
   if (role === "RESTAURANT") {
     if (
@@ -199,10 +203,10 @@ function actionFor(
       !order.restaurant_accepted &&
       acceptancePhase === "BEFORE"
     ) {
-      return { id: "acceptRestaurant", method: "accept_restaurant", requiresEvidence: false };
+      actions.push({ id: "acceptRestaurant", method: "accept_restaurant", requiresEvidence: false });
     }
-    if (order.state === "ACCEPTED") {
-      return { id: "pack", method: "submit_packed_evidence", requiresEvidence: true };
+    if (order.state === "ACCEPTED" && !fulfillmentExpired) {
+      actions.push({ id: "pack", method: "submit_packed_evidence", requiresEvidence: true });
     }
   }
   if (role === "COURIER") {
@@ -211,13 +215,13 @@ function actionFor(
       !order.courier_accepted &&
       acceptancePhase === "BEFORE"
     ) {
-      return { id: "acceptCourier", method: "accept_courier", requiresEvidence: false };
+      actions.push({ id: "acceptCourier", method: "accept_courier", requiresEvidence: false });
     }
-    if (order.state === "READY_FOR_PICKUP") {
-      return { id: "pickup", method: "submit_pickup_evidence", requiresEvidence: true };
+    if (order.state === "READY_FOR_PICKUP" && !fulfillmentExpired) {
+      actions.push({ id: "pickup", method: "submit_pickup_evidence", requiresEvidence: true });
     }
-    if (order.state === "IN_TRANSIT") {
-      return { id: "deliver", method: "submit_delivery_evidence", requiresEvidence: true };
+    if (order.state === "IN_TRANSIT" && !fulfillmentExpired) {
+      actions.push({ id: "deliver", method: "submit_delivery_evidence", requiresEvidence: true });
     }
   }
   if (
@@ -225,26 +229,28 @@ function actionFor(
     order.state === "REVIEW_WINDOW" &&
     deadlinePhase(order.review_deadline, nowSeconds) === "BEFORE"
   ) {
-    return { id: "claim", method: "submit_claim_evidence", requiresEvidence: true };
+    actions.push({ id: "claim", method: "submit_claim_evidence", requiresEvidence: true });
   }
+
+  if (
+    role !== "OUTSIDER" &&
+    (order.state === "FUNDED" || order.state === "PARTIALLY_ACCEPTED" || order.state === "ACCEPTED")
+  ) {
+    actions.push({
+      id: "cancelBeforePacked",
+      method: "cancel_before_packed",
+      requiresEvidence: false,
+    });
+  }
+
   if (
     acceptedState(order.state) &&
-    (
-      (
-        acceptancePhase === "BEFORE" &&
-        role === "CUSTOMER" &&
-        !order.restaurant_accepted &&
-        !order.courier_accepted
-      ) ||
-      (
-        acceptancePhase === "EXPIRED" &&
-        !(order.restaurant_accepted && order.courier_accepted)
-      )
-    )
+    acceptancePhase === "EXPIRED" &&
+    !(order.restaurant_accepted && order.courier_accepted)
   ) {
-    return { id: "cancel", method: "cancel_unaccepted", requiresEvidence: false };
+    actions.push({ id: "cancel", method: "cancel_unaccepted", requiresEvidence: false });
   }
-  return null;
+  return actions;
 }
 
 export function RoleConsole<TOrder extends FoodGuardOrderView = FoodGuardOrderView>({
@@ -261,6 +267,7 @@ export function RoleConsole<TOrder extends FoodGuardOrderView = FoodGuardOrderVi
   const [authoritativeOrder, setAuthoritativeOrder] = useState(order);
   const [pending, setPending] = useState(false);
   const [stage, setStage] = useState<TxStage | null>(null);
+  const [stageOperation, setStageOperation] = useState<RoleAction["method"] | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [nowSeconds, setNowSeconds] = useState<bigint | null>(null);
@@ -270,7 +277,7 @@ export function RoleConsole<TOrder extends FoodGuardOrderView = FoodGuardOrderVi
     authoritativeOrder.courier,
   ] as const;
   const role = address ? deriveWalletRole(address, actors) : null;
-  const action = role ? actionFor(role, authoritativeOrder, nowSeconds) : null;
+  const actions = role ? actionsFor(role, authoritativeOrder, nowSeconds) : [];
 
   useEffect(() => {
     let active = true;
@@ -311,14 +318,26 @@ export function RoleConsole<TOrder extends FoodGuardOrderView = FoodGuardOrderVi
     };
   }, [authoritativeOrder.acceptance_deadline, authoritativeOrder.review_deadline, clock]);
 
-  async function performAction() {
-    if (!action || pending || !writesEnabled || (action.requiresEvidence && !evidenceWritesEnabled)) return;
+  async function performAction(action: RoleAction) {
+    if (
+      !action ||
+      pending ||
+      stage === "OUTCOME_UNKNOWN" ||
+      !writesEnabled ||
+      (action.requiresEvidence && !evidenceWritesEnabled)
+    ) return;
     setError(null);
     setNotice(null);
+    if (
+      action.id === "cancelBeforePacked" &&
+      !window.confirm(copy.console.cancelBeforePackedConfirmation)
+    ) return;
     if (action.requiresEvidence && !onAction) {
       setNotice(copy.console.evidenceRequired);
       return;
     }
+    setStage(null);
+    setStageOperation(action.method);
     setPending(true);
     const submittedAction = action;
     const submittedOrder = authoritativeOrder;
@@ -373,26 +392,27 @@ export function RoleConsole<TOrder extends FoodGuardOrderView = FoodGuardOrderVi
       </dl>
 
       {!address && <p className="form-notice">{copy.console.connect}</p>}
-      {role === "OUTSIDER" && !action && <p className="form-notice">{copy.console.readOnly}</p>}
-      {role && role !== "OUTSIDER" && !action && (
+      {role === "OUTSIDER" && actions.length === 0 && <p className="form-notice">{copy.console.readOnly}</p>}
+      {role && role !== "OUTSIDER" && actions.length === 0 && (
         <p className="form-notice">{copy.console.noAction}</p>
       )}
-      {action && (
+      {actions.map((action) => (
         <button
+          key={action.id}
           className="button button--primary"
-          disabled={pending || !writesEnabled || (action.requiresEvidence && !evidenceWritesEnabled)}
-          onClick={performAction}
+          disabled={pending || stage === "OUTCOME_UNKNOWN" || !writesEnabled || (action.requiresEvidence && !evidenceWritesEnabled)}
+          onClick={() => void performAction(action)}
           type="button"
         >
           {copy.console.actions[action.id]}
         </button>
-      )}
+      ))}
       {pending && <p className="form-notice" role="status">{copy.console.pending}</p>}
-      {stage && (
-        <p className={`transaction-stage${stage === "CONSENSUS_FAILED" || stage === "EXECUTION_ERROR" ? " transaction-stage--failure" : ""}`}>
-          <code>{stage}</code>
-        </p>
-      )}
+      <TransactionLifecycle
+        actorAddress={address}
+        operation={stageOperation}
+        stage={stage}
+      />
       {notice && <p className="form-notice" role="status">{notice}</p>}
       {error && <p className="form-notice form-notice--error" role="alert">{error}</p>}
     </section>

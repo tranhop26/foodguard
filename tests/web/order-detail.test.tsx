@@ -37,11 +37,17 @@ import {
 import { OrderTimeline } from "../../components/order/OrderTimeline";
 import {
   matchesRoleActionReadback,
+  RoleConsole,
   type FoodGuardOrderView,
 } from "../../components/order/RoleConsole";
 import { TransactionLifecycle } from "../../components/order/TransactionLifecycle";
 import { LocaleProvider, type Locale } from "../../lib/i18n";
-import type { EvidenceDocument, OrderItem, OrderState } from "../../lib/domain";
+import {
+  formatSimulatedGenWei,
+  type EvidenceDocument,
+  type OrderItem,
+  type OrderState,
+} from "../../lib/domain";
 import { hashEvidence } from "../../lib/evidence";
 import {
   FOODGUARD_CHAIN,
@@ -284,6 +290,213 @@ describe("authoritative role-action reconciliation", () => {
       submittedOrder,
       undefined,
     )).toBe(true);
+  });
+});
+
+describe("participant cancellation actions", () => {
+  const cancellableOrders = [
+    ["FUNDED", false, false],
+    ["PARTIALLY_ACCEPTED", true, false],
+    ["PARTIALLY_ACCEPTED", false, true],
+    ["ACCEPTED", true, true],
+  ] as const;
+  const participants = [
+    ["customer", CUSTOMER],
+    ["restaurant", RESTAURANT],
+    ["courier", COURIER],
+  ] as const;
+  const cancellableCases = participants.flatMap(([role, address]) =>
+    cancellableOrders.map(([state, restaurantAccepted, courierAccepted]) => ({
+      address,
+      courierAccepted,
+      role,
+      restaurantAccepted,
+      state,
+    })),
+  );
+
+  it.each(cancellableCases)(
+    "shows $role cancellation in $state ($restaurantAccepted/$courierAccepted)",
+    async ({ address, courierAccepted, restaurantAccepted, state }) => {
+      renderLocalized(
+        <RoleConsole
+          address={address}
+          clock={testClock(1_893_455_000n)}
+          order={{
+            ...BASE_ORDER,
+            courier_accepted: courierAccepted,
+            restaurant_accepted: restaurantAccepted,
+            state,
+          }}
+        />,
+        "en",
+      );
+
+      expect(await screen.findByRole("button", { name: "Cancel before packing" })).toBeVisible();
+    },
+  );
+
+  it("shows restaurant packing and cancellation as separate ACCEPTED actions", async () => {
+    renderLocalized(
+      <RoleConsole
+        address={RESTAURANT}
+        clock={testClock(1_893_455_000n)}
+        order={{ ...BASE_ORDER, state: "ACCEPTED" }}
+      />,
+      "en",
+    );
+
+    expect(await screen.findByRole("button", { name: "Confirm packed" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Cancel before packing" })).toBeVisible();
+  });
+
+  it("does not expose participant cancellation to an outsider", async () => {
+    renderLocalized(
+      <RoleConsole
+        address="0x4444444444444444444444444444444444444444"
+        clock={testClock(1_893_455_000n)}
+        order={{ ...BASE_ORDER, state: "ACCEPTED" }}
+      />,
+      "en",
+    );
+
+    expect(await screen.findByText(/read only/i)).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Cancel before packing" })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    "READY_FOR_PICKUP",
+    "IN_TRANSIT",
+    "REVIEW_WINDOW",
+    "RESOLVING",
+    "EVIDENCE_CURE",
+    "RESOLVED",
+    "APPEALED",
+    "ESCALATED",
+    "SETTLED",
+    "CANCELLED_REFUNDED",
+    "FULFILLMENT_TIMEOUT_REFUNDED",
+  ] as const)("does not expose unilateral participant cancellation in %s", async (state) => {
+    renderLocalized(
+      <RoleConsole
+        address={CUSTOMER}
+        clock={testClock(1_893_455_000n)}
+        order={{ ...BASE_ORDER, state }}
+      />,
+      "en",
+    );
+
+    expect(await screen.findByText(state)).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Cancel before packing" })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["outsider", "0x4444444444444444444444444444444444444444"],
+    ["participant", CUSTOMER],
+  ] as const)("retains permissionless unaccepted cancellation for an %s after the acceptance deadline", async (_actor, address) => {
+    renderLocalized(
+      <RoleConsole
+        address={address}
+        clock={testClock(1_893_456_001n)}
+        order={{
+          ...BASE_ORDER,
+          courier_accepted: false,
+          restaurant_accepted: true,
+          state: "PARTIALLY_ACCEPTED",
+        }}
+      />,
+      "en",
+    );
+
+    expect(await screen.findByRole("button", { name: "Refund unaccepted order" })).toBeVisible();
+  });
+
+  it("freezes every available action while one operation is pending", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    genlayerMocks.writeFoodGuard.mockReturnValue(new Promise(() => undefined));
+    renderLocalized(
+      <RoleConsole
+        address={RESTAURANT}
+        clock={testClock(1_893_455_000n)}
+        order={{ ...BASE_ORDER, state: "ACCEPTED" }}
+      />,
+      "en",
+    );
+
+    const pack = await screen.findByRole("button", { name: "Confirm packed" });
+    const cancel = screen.getByRole("button", { name: "Cancel before packing" });
+    fireEvent.click(cancel);
+
+    await waitFor(() => {
+      expect(pack).toBeDisabled();
+      expect(cancel).toBeDisabled();
+    });
+    expect(genlayerMocks.writeFoodGuard).toHaveBeenCalledWith(
+      "cancel_before_packed",
+      [BASE_ORDER.order_id],
+      0n,
+      expect.any(Function),
+      RESTAURANT,
+    );
+  });
+
+  it("requires an explicit participant-cancellation confirmation", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    renderLocalized(
+      <RoleConsole
+        address={CUSTOMER}
+        clock={testClock(1_893_455_000n)}
+        order={{ ...BASE_ORDER, state: "FUNDED", restaurant_accepted: false, courier_accepted: false }}
+      />,
+      "en",
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel before packing" }));
+
+    expect(confirm).toHaveBeenCalledWith(
+      "Cancel before packing; all simulated GEN is refunded to the customer.",
+    );
+    expect(genlayerMocks.writeFoodGuard).not.toHaveBeenCalled();
+  });
+
+  it("shows non-final never-resend guidance where cancellation reconciliation is owned", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    genlayerMocks.writeFoodGuard.mockRejectedValue(
+      new Error("wallet request failed", {
+        cause: { details: new TypeError("Failed to fetch") },
+      }),
+    );
+    const readOrder = vi.fn(() => new Promise<OrderDetailView>(() => undefined));
+    renderLocalized(
+      <RoleConsole
+        address={RESTAURANT}
+        clock={testClock(1_893_455_000n)}
+        order={{ ...BASE_ORDER, state: "ACCEPTED" }}
+        readOrder={readOrder}
+      />,
+      "en",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel before packing" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText("RECONCILING")).toBeVisible();
+    expect(screen.getByText(
+      "The wallet may have submitted the transaction. FoodGuard is reconciling with the contract — never resend.",
+    )).toBeVisible();
+    expect(screen.getByTestId("transaction-finality")).not.toHaveAttribute("data-complete");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120_000);
+    });
+    expect(screen.getByText("OUTCOME_UNKNOWN")).toBeVisible();
+    expect(screen.getByText(
+      "The outcome has not been verified. Never resend; check the contract state.",
+    )).toBeVisible();
+    expect(screen.getByRole("button", { name: "Confirm packed" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Cancel before packing" })).toBeDisabled();
   });
 });
 
@@ -802,6 +1015,42 @@ describe("authoritative batch history reduction", () => {
 });
 
 describe("authoritative order outcome presentation", () => {
+  it("formats exact wei as simulated GEN without floating-point loss", () => {
+    expect(formatSimulatedGenWei("420000000000000000")).toBe("0.42 simulated GEN");
+    expect(formatSimulatedGenWei("50000000000000000")).toBe("0.05 simulated GEN");
+  });
+
+  it("shows simulated GEN while retaining exact wei audit values", () => {
+    renderLocalized(
+      <ItemOutcomeTable
+        order={{
+          ...BASE_ORDER,
+          delivery_fee: "50000000000000000",
+          manifest_json: JSON.stringify({
+            items: [{
+              conditions: ["sealed"],
+              item_id: "item-1",
+              name: "Pho",
+              permitted_substitutions: [],
+              price_wei: "210000000000000000",
+              quantity: 2,
+            }],
+          }),
+          resolution: null,
+          state: "ACCEPTED",
+          subtotal: "420000000000000000",
+          total_value: "470000000000000000",
+        }}
+      />,
+      "en",
+    );
+
+    expect(screen.getByText("0.42 simulated GEN")).toBeVisible();
+    expect(screen.getByText("0.05 simulated GEN")).toBeVisible();
+    expect(screen.getByText("420000000000000000 wei", { selector: "code.sr-only" })).toBeInTheDocument();
+    expect(screen.getByText("50000000000000000 wei", { selector: "code.sr-only" })).toBeInTheDocument();
+  });
+
   it("marks the raw authoritative state and displays every well-formed deadline", () => {
     renderLocalized(<OrderTimeline order={UNRESOLVED_ORDER} />, "en");
 
@@ -881,6 +1130,45 @@ describe("authoritative order outcome presentation", () => {
     expect(screen.queryByText("Execution success")).not.toBeInTheDocument();
     expect(screen.getByText("Readback pending")).toBeVisible();
   });
+
+  it("presents RECONCILING as non-final and tells Vietnamese users never to resend", () => {
+    renderLocalized(<TransactionLifecycle stage="RECONCILING" />, "vi");
+
+    expect(screen.getByText("RECONCILING")).toBeVisible();
+    expect(screen.getByText(
+      "Ví có thể đã gửi giao dịch. FoodGuard đang đối chiếu contract — không gửi lại.",
+    )).toBeVisible();
+    expect(screen.getByTestId("transaction-finality")).not.toHaveAttribute("data-complete");
+    expect(screen.queryByText("Thực thi thành công")).not.toBeInTheDocument();
+  });
+
+  it("presents OUTCOME_UNKNOWN without claiming finality and tells users never to resend", () => {
+    renderLocalized(<TransactionLifecycle stage="OUTCOME_UNKNOWN" />, "en");
+
+    expect(screen.getByText("OUTCOME_UNKNOWN")).toBeVisible();
+    expect(screen.getByText(
+      "The outcome has not been verified. Never resend; check the contract state.",
+    )).toBeVisible();
+    expect(screen.getByTestId("transaction-finality")).not.toHaveAttribute("data-complete");
+    expect(screen.queryByText("Execution success")).not.toBeInTheDocument();
+  });
+
+  it.each(["cancel_unaccepted", "cancel_fulfillment_timeout"])(
+    "keeps %s consensus retry guidance permissionless",
+    (operation) => {
+      renderLocalized(
+        <TransactionLifecycle
+          actorAddress={RESTAURANT}
+          operation={operation}
+          stage="CONSENSUS_FAILED"
+        />,
+        "en",
+      );
+
+      expect(screen.getByText(/anyone may retry safely/i)).toBeVisible();
+      expect(screen.queryByText(/only the eligible original actor/i)).not.toBeInTheDocument();
+    },
+  );
 
   it("records all predecessor stages before an execution error", () => {
     renderLocalized(<TransactionLifecycle stage="EXECUTION_ERROR" />, "en");
@@ -2010,8 +2298,10 @@ describe("order detail readback orchestration", () => {
       restaurant_wei: "700",
     });
     renderLocalized(<ItemOutcomeTable order={result} />, "en");
-    expect(screen.getByText("Customer: 100 wei / Restaurant: 700 wei")).toBeVisible();
-    expect(screen.getByText("Customer: 20 wei / Courier: 30 wei")).toBeVisible();
+    expect(screen.getByText("0.0000000000000007 simulated GEN")).toBeVisible();
+    expect(screen.getByText("0.00000000000000003 simulated GEN")).toBeVisible();
+    expect(screen.getByText("700 wei", { selector: "code.sr-only" })).toBeInTheDocument();
+    expect(screen.getByText("30 wei", { selector: "code.sr-only" })).toBeInTheDocument();
     expect(screen.queryByText("Locked in escrow")).not.toBeInTheDocument();
   });
 
