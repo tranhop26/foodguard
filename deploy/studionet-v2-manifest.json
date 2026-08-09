@@ -38,14 +38,24 @@
     "transaction_hash_variant": "LATEST_FINAL"
   },
   "frontend": {
-    "status": "NOT_YET_CONFIGURED_FOR_V2",
-    "current_public_url": "https://foodguard-genlayer.vercel.app",
-    "note": "The current public frontend deployment still references the separately recorded V1 deployment until a V2 configuration deployment is explicitly confirmed."
+    "status": "PRODUCTION_DEPLOYED_VERIFIED",
+    "provider": "Vercel",
+    "team": "tdh-s-projects",
+    "project": "foodguard-genlayer",
+    "deployment_id": "dpl_BehG8SuNLuNkBjxDS1UBqLLyw7F1",
+    "git_commit": "849d630aa34b41a3703a689f7c7ac5c562af84a9",
+    "production_url": "https://foodguard-genlayer.vercel.app",
+    "deployment_url": "https://foodguard-genlayer-qnguy8om6-tdh-s-projects.vercel.app",
+    "ready_state": "READY",
+    "http_status": 200,
+    "v2_address_visible": true,
+    "v1_address_absent": true,
+    "browser_console_errors": 0,
+    "verified_at": "2026-08-09T14:24:43Z"
   },
   "limitations": [
     "StudioNet GEN is simulated and is not production money.",
     "The V2 contract is intentionally frozen; future fixes require a new contract deployment and explicit frontend migration.",
-    "The public frontend has not yet been configured or redeployed against this V2 address.",
     "Live three-wallet happy-path and terminal-branch proof remains separate from deployment verification."
   ]
 }
