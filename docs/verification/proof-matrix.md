@@ -1,12 +1,18 @@
 # FoodGuard verification proof matrix
 
-This file records the separately confirmed FoodGuard V1 deployment and remains a template for later live workflow evidence. It currently asserts the deployment transaction, address, source match, execution result, and pause readback only. It does not assert a Vercel URL or successful live three-wallet order workflow. Never populate a cell from an expectation, local mock, wallet popup, or submitted hash.
+This file records the separately confirmed FoodGuard V1 deployment and Vercel production UI, and remains a template for later live workflow evidence. It currently asserts the deployment transaction, address, source match, execution result, pause readback, and production URL only. It does not assert a successful live three-wallet order workflow. Never populate a cell from an expectation, local mock, wallet popup, or submitted hash.
 
 ## Verified StudioNet deployment
 
 | Network | Deployer | Contract | Transaction | Finality | Execution | Authoritative readback | Git commit | Source SHA-256 | Limitation |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | GenLayer StudioNet (`61999`) | `0x21b45103dd05c43969daF3CbB4277391777e2eC7` | [`0x9214256f05c613Bacaba8e7E8762C62B5BDB52A5`](https://explorer-studio.genlayer.com/address/0x9214256f05c613Bacaba8e7E8762C62B5BDB52A5) | [`0xab80bf526784d2b4a7d527abf02834bacecdd1a54e3da39e4846f7964ea1e0b0`](https://explorer-studio.genlayer.com/tx/0xab80bf526784d2b4a7d527abf02834bacecdd1a54e3da39e4846f7964ea1e0b0) | `FINALIZED` | `SUCCESS` / `MAJORITY_AGREE` | `get_creation_paused()` returned `false` | `ac9c800daee2a741729588ba79bf24df2c48655a` | `a2d4d113f023a20eba3f24d5287bd82995348c6f3ea2b24a704d7dd531b2f3ee` | Deployment proof only; GEN is simulated and live workflow rows below remain unverified |
+
+## Verified Vercel production UI
+
+| Team | Project | Deployment ID | Production URL | State | Live checks | Limitation |
+| --- | --- | --- | --- | --- | --- | --- |
+| `tdh-s-projects` | `foodguard-genlayer` | `dpl_B9dQbDiDrQ7D6rKzLyPHZbp4qUEC` | [`https://foodguard-genlayer.vercel.app`](https://foodguard-genlayer.vercel.app) | `READY`; HTTP `200` | Contract address and public origin rendered on `/create`; no application console errors; no horizontal overflow at 375px or 1440px | UI deployment proof only; live three-wallet terminal branches remain unverified |
 
 ## Deployment record shown by the proof page
 

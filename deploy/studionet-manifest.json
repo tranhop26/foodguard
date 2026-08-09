@@ -30,9 +30,19 @@
     "method": "get_creation_paused",
     "value": false
   },
+  "frontend": {
+    "provider": "Vercel",
+    "team": "tdh-s-projects",
+    "project": "foodguard-genlayer",
+    "deployment_id": "dpl_B9dQbDiDrQ7D6rKzLyPHZbp4qUEC",
+    "production_url": "https://foodguard-genlayer.vercel.app",
+    "deployment_url": "https://foodguard-genlayer-lu4wyjg81-tdh-s-projects.vercel.app",
+    "ready_state": "READY",
+    "verified_at": "2026-08-09T06:40:06Z"
+  },
   "limitations": [
     "StudioNet GEN is simulated and is not production money.",
     "Deployment verification does not substitute for live three-wallet workflow evidence.",
-    "No Vercel production URL is recorded yet."
+    "The production UI is live, but promoted three-wallet terminal workflow branches still require live StudioNet evidence."
   ]
 }

@@ -2,7 +2,7 @@
 
 FoodGuard is a bilingual proof-marketplace demonstration for evidence-bound food orders on GenLayer StudioNet.
 
-> **StudioNet · Simulated GEN.** This repository is not production payments software. FoodGuard V1 is deployed at [`0x9214256f05c613Bacaba8e7E8762C62B5BDB52A5`](https://explorer-studio.genlayer.com/address/0x9214256f05c613Bacaba8e7E8762C62B5BDB52A5). Local and hosted builds remain locked as `DEPLOYMENT_REQUIRED` until this verified address and the public application origin are configured.
+> **StudioNet · Simulated GEN.** This repository is not production payments software. FoodGuard V1 is deployed at [`0x9214256f05c613Bacaba8e7E8762C62B5BDB52A5`](https://explorer-studio.genlayer.com/address/0x9214256f05c613Bacaba8e7E8762C62B5BDB52A5), and the verified production UI is available at [`foodguard-genlayer.vercel.app`](https://foodguard-genlayer.vercel.app). Unconfigured local builds remain locked as `DEPLOYMENT_REQUIRED`.
 
 ## English
 
@@ -90,7 +90,7 @@ The secret scan reads tracked worktree content, staged index content, and untrac
 
 FoodGuard V1's exact contract classification is `INTENTIONALLY_FROZEN`: it is a frozen, non-upgradeable contract design. The deployer can pause **new order creation only**; the UI reads `get_creation_paused()` and fails closed for new funding if that authoritative read is unavailable. There is no upgrade proxy, arbitrary admin rewrite, custody sweep, or automatic migration of active orders. A defect therefore requires pausing creation, auditing every active V1 order, exporting public evidence, deploying reviewed V2 source after confirmation, routing only new orders to V2, and preserving V1 readback/action access until its orders are terminal. See `docs/recovery-runbook.md`.
 
-Known limits: StudioNet and Simulated GEN are non-production; evidence availability and truth remain external assumptions; a digest proves integrity, not physical correctness; browser tests use local doubles; the deployment transaction is live but the promoted three-wallet workflow branches have not yet been exercised on StudioNet; no production Vercel URL is asserted yet; and unresolved/escalated funds may require cure or a fully signed mutual settlement.
+Known limits: StudioNet and Simulated GEN are non-production; evidence availability and truth remain external assumptions; a digest proves integrity, not physical correctness; browser tests use local doubles; the contract and production UI are live but the promoted three-wallet workflow branches have not yet been exercised on StudioNet; and unresolved/escalated funds may require cure or a fully signed mutual settlement.
 
 ## Tiếng Việt
 
