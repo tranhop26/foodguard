@@ -1,7 +1,14 @@
 import type { Metadata } from "next";
+import { Noto_Serif } from "next/font/google";
 import type { ReactNode } from "react";
 
 import "./globals.css";
+
+const displaySerif = Noto_Serif({
+  display: "swap",
+  subsets: ["latin", "vietnamese"],
+  variable: "--font-display",
+});
 
 export const metadata: Metadata = {
   title: "FoodGuard — Chọn món, giữ bằng chứng",
@@ -12,7 +19,7 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {
   return (
     <html lang="vi">
-      <body>{children}</body>
+      <body className={displaySerif.variable}>{children}</body>
     </html>
   );
 }

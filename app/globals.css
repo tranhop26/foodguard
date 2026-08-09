@@ -67,7 +67,7 @@ p {
 
 h1,
 h2 {
-  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  font-family: var(--font-display), Georgia, serif;
   font-weight: 600;
   letter-spacing: -0.035em;
   line-height: 1.02;
@@ -509,7 +509,7 @@ button.button--quiet:disabled {
   display: block;
   margin-bottom: 36px;
   color: #f6ac91;
-  font-family: "Iowan Old Style", Georgia, serif;
+  font-family: var(--font-display), Georgia, serif;
   font-size: 1.08rem;
   font-style: italic;
 }
@@ -644,7 +644,7 @@ button.button--quiet:disabled {
 
 .empty-results h3 {
   margin: 0 0 6px;
-  font-family: "Iowan Old Style", Georgia, serif;
+  font-family: var(--font-display), Georgia, serif;
   font-size: 1.55rem;
 }
 
@@ -731,9 +731,9 @@ button.button--quiet:disabled {
 .restaurant-card h3 {
   margin: 0 0 9px;
   color: var(--green-900);
-  font-family: "Iowan Old Style", Georgia, serif;
+  font-family: var(--font-display), Georgia, serif;
   font-size: 1.52rem;
-  letter-spacing: -0.025em;
+  letter-spacing: normal;
 }
 
 .restaurant-card__body > p {
